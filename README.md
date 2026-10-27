@@ -8,10 +8,64 @@ event log.
 The engine, not a model, decides control flow: which step runs next, whether a gate passed, when to loop back, and
 when to stop and hand the run to you. Models only do the work and return structured reports.
 
-**Status: phase 1.** This release has the engine and a CLI with a plain log view. There is no UI yet. The board,
-run view and chat UI will be views over the same event stream.
+There are two ways to use it: the **Mac app** (dashboard, team editor, live board, chat) and the **`covibe` CLI**.
+Both run the same engine on the same files, so a run started in the terminal shows up live in the app.
 
-## Quick start
+![Home: spend, plan usage, live runs](docs/screenshots/home.png)
+
+## The Mac app
+
+### Install
+
+Requirements: macOS, Node ≥ 22.13, git, and Claude Code signed in (`claude login`) or another
+[backend](#backends).
+
+```sh
+npm install          # also builds the engine and the UI
+npm run desktop      # opens covibe in a window
+npm run dist:mac     # builds a .dmg and a .zip in release/
+```
+
+You can also skip local builds: run the **desktop** workflow from the repository's Actions tab, which builds
+`.dmg` files for Apple silicon and Intel and attaches them to the run.
+
+The app is not code-signed. The first time, right-click covibe in Applications and choose **Open**, or run
+`xattr -dr com.apple.quarantine /Applications/covibe.app`.
+
+To try the UI in a browser instead, run `covibe app`.
+
+### What you can do
+
+| Screen | What it shows and does |
+|---|---|
+| **Home** | Today's and this week's estimated spend, tokens, members working now, run outcomes, gate pass rate; your plan's 5-hour and weekly usage as reported by Claude Code; spend per day and per team member; live runs and recent ones. Give a new goal or ask a question right there (⌘N anywhere). |
+| **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Board** (a column per workflow step, a card per member and fix round, gate results), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch). Stop a run, or start a **new goal on this result**. |
+| **Chat** | While a run is live, your message is queued for the member's next turn and nothing is interrupted. After the run, the member resumes its session and answers now; anything it changes is scope-checked and merged into the run's branch. |
+| **Ask a question** | A read-only session with one member in your project: it can read the code but not change it. Follow-up questions continue the same session. |
+| **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, report format, connection, limits), **Workflow** (steps, parallel groups, gates, fix loop), **Team settings**, **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
+| **Projects** | The git repositories your teams work on, added with the folder picker. |
+
+![A live run: members, board and gates](docs/screenshots/run-board.png)
+
+| | |
+|---|---|
+| ![Chat with a member after the run](docs/screenshots/run-chat.png) | ![A run that needs you: the fix loop ran out of rounds](docs/screenshots/run-escalated.png) |
+| ![Team members editor](docs/screenshots/team-members.png) | ![Workflow editor with gates and the fix loop](docs/screenshots/team-workflow.png) |
+
+The app follows the system's light or dark appearance.
+
+![Dark mode](docs/screenshots/run-board-dark.png)
+
+**About the numbers.** Dollar amounts are Claude Code's estimate of what the usage would cost on the API. On a
+subscription you are not billed per token; usage counts against your plan's 5-hour and weekly limits, which the
+Home screen shows once a team has run.
+
+**How it fits together.** The app starts the covibe server inside itself, on `127.0.0.1` with a random port and a
+per-launch access token, and shows the UI in a native window with a translucent sidebar. Teams and settings live
+in `~/.covibe/` (override with `COVIBE_HOME`), run worktrees in `~/.covibe/worktrees/`, and each project's run
+history in `<repo>/.covibe/covibe.db`. Quitting while runs are working asks first, because quitting stops them.
+
+## Quick start (CLI)
 
 Requirements: Node ≥ 22.13, git, and Claude Code credentials. For your own machine, `claude login` with your
 subscription is enough (see [Backends](#backends)).
@@ -52,9 +106,10 @@ Your checkout is never touched. The result lands on the branch `covibe/<run-id>`
 | `covibe runs` | List recent runs in this repository |
 | `covibe log <run> [--follow] [--json]` | Print a run's event log. `--json` prints the raw events, one per line |
 | `covibe chat <run> <agent> <message…>` | Talk to an agent (see [Chat](#chat)) |
+| `covibe app [--port <n>] [--no-open]` | Serve the app UI in your browser |
 
-Run ids accept a unique prefix. State lives in `<repo>/.covibe/`: the SQLite event store and the worktrees. covibe
-writes its own `.gitignore` there.
+Run ids accept a unique prefix. The event store lives in `<repo>/.covibe/covibe.db`; covibe writes its own
+`.gitignore` there. Worktrees live outside the repository, in `~/.covibe/worktrees/`.
 
 ## The team file
 
@@ -151,7 +206,10 @@ The rules in the team file are enforced in code, not left to prompts:
 each writing agent gets its own worktree and branch, brought up to date with the integration branch before each
 turn. After a turn, the engine commits the agent's changes and merges them into the integration branch.
 Read-only agents (manager, QA) work in the integration worktree, so they always see the merged state. Parallel
-builders cannot overwrite each other. If a merge conflicts, the step fails and the run stops.
+builders cannot overwrite each other. If a merge conflicts, the step fails and the run stops. Worktrees live in
+`~/.covibe/worktrees/<repo>-<hash>/<run-id>/`, outside the repository, so an agent cannot reach another agent's
+worktree by walking the tree. Remove old ones with `git worktree remove` or by deleting that folder and running
+`git worktree prune`.
 
 `isolation: none` runs every agent in your checkout. That is simpler, but scope enforcement then covers only the
 file tools, not Bash. Use it for read-only teams.
@@ -204,7 +262,10 @@ All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event t
 
 `run.started` `run.finished` `step.started` `step.finished` `step.skipped` `gate.passed` `gate.failed` `loop.goto`
 `agent.started` `agent.text` `agent.tool` `agent.finished` `agent.error` `scope.denied` `scope.violation`
-`git.commit` `git.merge` `message.queued` `message.delivered` `backend.warning`
+`git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit`
+
+`agent.finished` carries turns, estimated cost, duration, model and token counts; `usage.limit` carries the plan
+usage Claude Code reports (window, status, utilization, reset time).
 
 ## Code layout
 
@@ -218,7 +279,12 @@ src/engine/chat.ts         queue-or-resume chat
 src/events/store.ts        SQLite runs, events, sessions, inbox (node:sqlite, WAL)
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
 src/runner/backend.ts      per-agent environment for each backend
+src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.0.0.1, token)
+src/server/library.ts      projects and teams library, comment-preserving YAML edits
+src/server/projections.ts  events → run summaries, member status, board, chat threads, stats
 src/main.ts                CLI
+ui/                        the app UI (React, Vite, CodeMirror)
+desktop/                   the macOS shell (Electron): window, menus, folder picker, quit guard
 ```
 
 The SDK is pinned to an exact version. An SDK upgrade or API change touches `src/runner/claude-sdk.ts` only.
@@ -226,18 +292,20 @@ The SDK is pinned to an exact version. An SDK upgrade or API change touches `src
 ## Development
 
 ```sh
-npm test            # vitest: config, scope, backends, expressions, engine and chat against a scripted runner and real git repos
-npm run typecheck
+npm test            # vitest: config, scope, backends, engine, chat, server API and projections (scripted runner, real git repos)
+npm run typecheck   # engine and UI
 npm run dev -- validate examples/feature-team/team.yaml
+
+# UI with hot reload: the API server in one terminal, Vite in another
+npm run dev:server
+npm run dev:ui      # then open http://localhost:5173/?token=<token printed by dev:server>
 ```
 
 ## Roadmap
 
 1. **Engine (done):** YAML team, gates, bounded loops, worktrees, event log, CLI.
-2. **Hardening:** sandboxed Bash, cost and usage summaries per run, resuming an escalated run from a step, more
-   example teams.
-3. **Server and live feed:** a small HTTP server with Server-Sent Events over the event store, and chat that can
-   interrupt an agent's current turn as well as queue for the next.
-4. **UI:** a team editor (YAML with live schema errors and a comment-preserving save), a board (a column per step,
-   a card per task with its loop count), a run view (per-agent timeline, errors pinned), and a chat thread per
-   agent.
+2. **Server, live feed and Mac app (done):** dashboard with spend and plan usage, team editor, live board,
+   activity, changes, chat and questions.
+3. **Next:** sandboxed Bash, chat that can interrupt a member's current turn (not only queue for the next),
+   resuming an escalated run from a step, an editable workflow graph, code signing and notarization for the app,
+   cleanup of old worktrees from the app.

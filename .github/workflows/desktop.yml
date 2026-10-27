@@ -1,0 +1,35 @@
+# Builds the macOS app (unsigned .dmg and .zip, Apple silicon and Intel) on a
+# Mac runner and attaches it to the workflow run. Start it from the Actions
+# tab, or push a v* tag.
+name: desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Installs the Claude Code binary for this runner (arm64) and builds dist/.
+      - run: npm ci
+      - run: npm test
+      # Add the Intel binary too, so the x64 app can start agents. The SDK
+      # picks the binary matching the machine it runs on.
+      - run: npm install --no-save --force @anthropic-ai/claude-agent-sdk-darwin-x64@$(node -p "require('@anthropic-ai/claude-agent-sdk/package.json').version")
+      - run: npx electron-builder --mac --arm64 --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: covibe-mac
+          path: |
+            release/*.dmg
+            release/*.zip
+          if-no-files-found: error

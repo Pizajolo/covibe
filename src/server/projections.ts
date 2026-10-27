@@ -10,15 +10,32 @@ function tokensOf(d: D): number {
   return t ? (t.input ?? 0) + (t.output ?? 0) + (t.cacheRead ?? 0) + (t.cacheWrite ?? 0) : 0;
 }
 
-export function toolLabel(tool: string, input: unknown): string {
+/** Worktree paths (…/worktrees/[<repo>/]<run-id>/<agent>/) shown relative to the worktree. */
+export const WORKTREE_PATH = /\S*\/worktrees\/(?:[^/\s]+\/)?\d{8}-\d{6}-[0-9a-f]{4}\/[^/\s]+\/?/g;
+
+export function shortenPaths(text: string, roots: string[] = []): string {
+  let out = text.replace(WORKTREE_PATH, '');
+  for (const r of roots) if (r) out = out.split(r.endsWith('/') ? r : `${r}/`).join('').split(r).join('.');
+  return out;
+}
+
+export function toolLabel(tool: string, input: unknown, roots: string[] = []): string {
   const i = (input ?? {}) as D;
-  const pick = i.file_path ?? i.notebook_path ?? i.command ?? i.pattern ?? i.path ?? i.url ?? i.to;
+  const pick = i.file_path ?? i.notebook_path ?? i.command ?? i.pattern ?? i.path ?? i.url ?? i.query ?? i.to;
   if (pick === undefined) return tool.replace(/^mcp__team__/, '');
-  const shown = String(pick).replace(/\S*\/\.covibe\/worktrees\/[^/\s]+\/[^/\s]+\/?/g, '').replace(/\s+/g, ' ').trim();
+  const shown = shortenPaths(String(pick), roots).replace(/\s+/g, ' ').trim();
   return `${tool.replace(/^mcp__team__/, '')} ${shown.length > 90 ? shown.slice(0, 89) + '…' : shown}`;
 }
 
-export function summarizeRun(run: RunRecord, events: RunEvent[], project: { id: string; name: string }, live: boolean, teamAgents: string[] = []): RunSummary {
+export function summarizeRun(
+  run: RunRecord,
+  events: RunEvent[],
+  project: { id: string; name: string },
+  live: boolean,
+  teamAgents: string[] = [],
+  /** Members answering a chat right now (after the run itself ended). */
+  busy: Set<string> = new Set(),
+): RunSummary {
   const agents = new Map<string, AgentState>();
   const agent = (name: string) => {
     let a = agents.get(name);
@@ -102,7 +119,7 @@ export function summarizeRun(run: RunRecord, events: RunEvent[], project: { id: 
       }
       case 'agent.tool': {
         const a = agent(e.agent!);
-        a.activity = toolLabel(String(d.tool), d.input);
+        a.activity = toolLabel(String(d.tool), d.input, [run.repo]);
         a.updatedAt = e.ts;
         break;
       }
@@ -149,7 +166,7 @@ export function summarizeRun(run: RunRecord, events: RunEvent[], project: { id: 
   }
 
   // A run that is no longer live cannot have working agents.
-  if (!live) for (const a of agents.values()) if (a.status === 'working') a.status = 'error';
+  if (!live) for (const a of agents.values()) if (a.status === 'working' && !busy.has(a.name)) a.status = 'error';
   if (live) for (const a of agents.values()) if (a.status !== 'working' && a.inbox > 0) a.status = 'waiting';
 
   const status = run.status === 'running' && !live ? 'failed' : run.status;
@@ -178,7 +195,7 @@ export function summarizeRun(run: RunRecord, events: RunEvent[], project: { id: 
 }
 
 /** One conversation per agent: your messages, its replies, and compact tool notes. */
-export function chatThreads(events: RunEvent[]): Record<string, ChatItem[]> {
+export function chatThreads(events: RunEvent[], roots: string[] = []): Record<string, ChatItem[]> {
   const threads: Record<string, ChatItem[]> = {};
   const push = (agent: string, item: ChatItem) => (threads[agent] ??= []).push(item);
   const pending = new Map<number, ChatItem>();
@@ -200,7 +217,7 @@ export function chatThreads(events: RunEvent[]): Record<string, ChatItem[]> {
       if (e.step !== 'chat' && lastStep[e.agent] !== `${e.step}`) push(e.agent, { ...base, kind: 'note', text: `Started step "${e.step}"` });
       lastStep[e.agent] = e.step;
     } else if (e.type === 'agent.text' && e.agent) push(e.agent, { ...base, kind: 'agent', text: d.text });
-    else if (e.type === 'agent.tool' && e.agent) push(e.agent, { ...base, kind: 'tool', text: toolLabel(String(d.tool), d.input) });
+    else if (e.type === 'agent.tool' && e.agent) push(e.agent, { ...base, kind: 'tool', text: toolLabel(String(d.tool), d.input, roots) });
     else if (e.type === 'scope.denied' && e.agent) push(e.agent, { ...base, kind: 'error', text: `Blocked: ${d.reason}` });
     else if (e.type === 'agent.error' && e.agent) push(e.agent, { ...base, kind: 'error', text: `Failed: ${d.error}` });
   }

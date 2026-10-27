@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { Isolation } from '../config/types.js';
+import { worktreesRoot } from '../home.js';
 import { scopeMatcher } from './scope.js';
 
 const exec = promisify(execFile);
@@ -53,11 +54,8 @@ export class Workspace {
     await git(top, ['rev-parse', '--verify', 'HEAD']).catch(() => {
       throw new GitError(`${top} has no commits yet; worktree isolation needs at least one commit.`);
     });
-    const root = join(top, '.covibe');
-    mkdirSync(root, { recursive: true });
-    // Keep covibe's own state (worktrees, database) out of the user's git status.
-    if (!existsSync(join(root, '.gitignore'))) writeFileSync(join(root, '.gitignore'), '*\n');
-    const dir = join(root, 'worktrees', runId, '_integration');
+    const dir = join(worktreesRoot(top), runId, '_integration');
+    mkdirSync(join(worktreesRoot(top), runId), { recursive: true });
     const branch = `covibe/${runId}`;
     await git(top, ['rev-parse', '--verify', `${base}^{commit}`]).catch(() => {
       throw new GitError(`cannot start from "${base}": no such branch or commit`);
@@ -69,7 +67,9 @@ export class Workspace {
   /** Reopen the workspace of an earlier run (to chat with its agents after it finished). */
   static attach(repo: string, runId: string, isolation: Isolation, branch: string | undefined): Workspace {
     if (isolation === 'none' || !branch) return new Workspace(repo, runId, 'none', repo, undefined);
-    const base = join(repo, '.covibe', 'worktrees', runId);
+    // Runs from before worktrees moved out of the repository kept them in .covibe/worktrees.
+    const legacy = join(repo, '.covibe', 'worktrees', runId);
+    const base = existsSync(legacy) ? legacy : join(worktreesRoot(repo), runId);
     const ws = new Workspace(repo, runId, isolation, join(base, '_integration'), branch);
     if (existsSync(base)) {
       for (const name of readdirSync(base)) if (name !== '_integration') ws.agentDirs.set(name, join(base, name));
@@ -94,7 +94,7 @@ export class Workspace {
     return this.exclusive(async () => {
       let dir = this.agentDirs.get(agent);
       if (!dir) {
-        dir = join(this.repo, '.covibe', 'worktrees', this.runId, agent);
+        dir = join(dirname(this.integrationDir), agent);
         await git(this.repo, ['worktree', 'add', '-q', '-b', this.agentBranch(agent), dir, this.branch!]);
         this.agentDirs.set(agent, dir);
       } else {

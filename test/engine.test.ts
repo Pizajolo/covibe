@@ -98,9 +98,12 @@ describe('runTeam', () => {
     const violation = store.events(outcome.runId).find((e) => e.type === 'scope.violation');
     expect(violation).toMatchObject({ agent: 'tester', data: { files: ['web/index.html'] } });
 
-    // The user's checkout is untouched.
+    // The user's checkout is untouched, and worktrees live outside the repository,
+    // where agents walking the repo cannot reach each other's work.
     expect(readFileSync(join(repo, 'README.md'), 'utf8')).toBe('# app\n');
     expect(existsSync(join(repo, 'web'))).toBe(false);
+    expect(existsSync(join(repo, '.covibe', 'worktrees'))).toBe(false);
+    expect(runner.callsFor('frontend')[0]!.cwd.startsWith(process.env.COVIBE_HOME!)).toBe(true);
     expect(store.getRun(outcome.runId)!.status).toBe('succeeded');
   });
 

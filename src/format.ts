@@ -1,4 +1,5 @@
 import type { RunEvent, RunRecord } from './events/types.js';
+import { WORKTREE_PATH } from './server/projections.js';
 
 const color = process.stdout.isTTY && !process.env.NO_COLOR;
 const paint = (code: number) => (s: string) => (color ? `\x1b[${code}m${s}\x1b[0m` : s);
@@ -18,8 +19,8 @@ function toolSummary(tool: string, input: unknown): string {
   const i = (input ?? {}) as Record<string, unknown>;
   const pick = i.file_path ?? i.notebook_path ?? i.command ?? i.pattern ?? i.path ?? i.url ?? i.to;
   if (pick === undefined) return tool;
-  // Show worktree paths relative to the worktree: .covibe/worktrees/<run>/<agent>/web/x → web/x
-  const shown = String(pick).replace(/\S*\/\.covibe\/worktrees\/[^/\s]+\/[^/\s]+\//g, '');
+  // Show worktree paths relative to the worktree: …/worktrees/<repo>/<run>/<agent>/web/x → web/x
+  const shown = String(pick).replace(WORKTREE_PATH, '');
   return `${tool} ${one(shown, 120)}`;
 }
 

@@ -3,6 +3,53 @@ import type { RunEvent, RunKind, RunStatus } from '../events/types.js';
 
 export type { RunEvent, RunKind, RunStatus };
 
+export interface Project {
+  id: string;
+  name: string;
+  path: string;
+  addedAt: string;
+}
+
+export interface TeamFileInfo {
+  path: string;
+  size: number;
+}
+
+export interface TeamListing {
+  id: string;
+  name: string;
+  description?: string;
+  dir: string;
+  valid: boolean;
+  problems: string[];
+  agents: string[];
+  steps: string[];
+}
+
+export type EditOp = { op: 'set'; path: (string | number)[]; value: unknown } | { op: 'delete'; path: (string | number)[] };
+
+export interface Overview {
+  projects: Project[];
+  teams: TeamListing[];
+  runs: RunSummary[];
+  stats: Stats;
+  /** Library folder (teams, settings). */
+  home: string;
+}
+
+export interface Template {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface DiffResult {
+  files: { path: string; additions: number; deletions: number }[];
+  patch: string;
+  range?: string;
+  note?: string;
+}
+
 export type AgentActivity = 'idle' | 'working' | 'done' | 'error' | 'waiting';
 
 export interface AgentState {
@@ -79,6 +126,12 @@ export interface RunDetail {
   threads: Record<string, ChatItem[]>;
   /** Whether a chat message right now is queued (live run) or answered immediately. */
   chatMode: 'queue' | 'answer';
+  /** The run was started by this app and can be stopped from it. */
+  canStop: boolean;
+  /** Members answering a chat message right now. */
+  answering: string[];
+  /** Absolute paths the UI shows relative (the project folder). */
+  roots: string[];
 }
 
 export interface UsageWindow {

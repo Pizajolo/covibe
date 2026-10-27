@@ -6,6 +6,8 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { isMap, isSeq, parseDocument } from 'yaml';
 import { ConfigError, loadTeam } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
+import { covibeHome } from '../home.js';
+import type { EditOp, Project, TeamFileInfo, TeamListing } from './api-types.js';
 
 /**
  * The desktop app's library: the projects (git repositories) you work on and
@@ -15,34 +17,11 @@ import type { TeamConfig } from '../config/types.js';
  *   ~/.covibe/config.json
  *   ~/.covibe/teams/<team-id>/team.yaml
  */
-export interface Project {
-  id: string;
-  name: string;
-  path: string;
-  addedAt: string;
-}
-
 interface LibraryConfig {
   projects: Project[];
 }
 
-export interface TeamFileInfo {
-  path: string;
-  size: number;
-}
-
-export interface TeamListing {
-  id: string;
-  name: string;
-  description?: string;
-  dir: string;
-  valid: boolean;
-  problems: string[];
-  agents: string[];
-  steps: string[];
-}
-
-export type EditOp = { op: 'set'; path: (string | number)[]; value: unknown } | { op: 'delete'; path: (string | number)[] };
+export type { EditOp, Project, TeamFileInfo, TeamListing };
 
 const TEMPLATES_DIR = new URL('../../examples/', import.meta.url).pathname;
 const TEAM_FILE = 'team.yaml';
@@ -51,7 +30,7 @@ export class Library {
   readonly teamsDir: string;
   private readonly configFile: string;
 
-  constructor(readonly home = process.env.COVIBE_HOME ?? join(homedir(), '.covibe')) {
+  constructor(readonly home = covibeHome()) {
     this.teamsDir = join(home, 'teams');
     this.configFile = join(home, 'config.json');
     mkdirSync(this.teamsDir, { recursive: true });
@@ -199,7 +178,7 @@ export class Library {
     const file = join(dest, TEAM_FILE);
     const doc = parseDocument(readFileSync(file, 'utf8'));
     doc.set('name', slug(name) || id);
-    writeFileSync(file, doc.toString().replace(/^# yaml-language-server:.*\n/m, ''));
+    writeFileSync(file, doc.toString().replace(/^# yaml-language-server:.*\n(#\s*\n)?/m, ''));
     return this.listing(id);
   }
 

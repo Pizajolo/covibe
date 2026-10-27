@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { ConfigError } from '../config/load.js';
 import { ask, chat } from '../engine/chat.js';
 import { startRun } from '../engine/engine.js';
+import { GitError } from '../engine/workspace.js';
 import { EventStore } from '../events/store.js';
 import type { RunEvent, RunRecord } from '../events/types.js';
 import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
@@ -58,6 +59,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const stores = new Map<string, EventStore>();
   const active = new Map<string, AbortController>();
   const sse = new Set<ServerResponse>();
+  /** `${runId}/${agent}` for members answering a chat after their run ended. */
+  const answering = new Set<string>();
+  const busyIn = (runId: string) => new Set([...answering].filter((k) => k.startsWith(`${runId}/`)).map((k) => k.slice(runId.length + 1)));
   const cursors = new Map<string, number>();
 
   const storeFor = (project: Project): EventStore => {
@@ -79,7 +83,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
 
   const summary = (project: Project, run: RunRecord, events?: RunEvent[], roster = rosters()): RunSummary => {
     const store = storeFor(project);
-    return summarizeRun(run, events ?? store.events(run.id), project, store.isLive(run), run.kind === 'ask' ? [] : (roster.get(run.team) ?? []));
+    return summarizeRun(run, events ?? store.events(run.id), project, store.isLive(run), run.kind === 'ask' ? [] : (roster.get(run.team) ?? []), busyIn(run.id));
   };
 
   const allRuns = (limit: number, projectId?: string): RunSummary[] => {
@@ -184,7 +188,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     ['GET', '/api/runs/:pid/:rid', (p): RunDetail => {
       const { project, store, run } = findRun(p.pid!, p.rid!);
       const events = store.events(run.id);
-      return { summary: summary(project, run, events), events, threads: chatThreads(events), chatMode: store.isLive(run) ? 'queue' : 'answer' };
+      return {
+        summary: summary(project, run, events),
+        events,
+        threads: chatThreads(events, [project.path]),
+        roots: [project.path],
+        chatMode: store.isLive(run) ? 'queue' : 'answer',
+        canStop: active.has(`${project.id}/${run.id}`),
+        answering: [...busyIn(run.id)],
+      };
     }],
     ['POST', '/api/runs', async (_p, body) => {
       const project = library.project(str(body, 'project'));
@@ -210,10 +222,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const message = str(body, 'message');
       if (store.isLive(run)) return chat({ store, runner, team, runId: run.id, agent, message });
       if (!store.getSession(run.id, agent)) throw new BadRequest(`${agent} has not worked on this run yet, so there is no conversation to continue. Ask it a question instead.`);
+      const key = `${run.id}/${agent}`;
+      if (answering.has(key)) throw new BadRequest(`${agent} is still answering your last message.`);
+      answering.add(key);
       // The answer streams in as events; don't hold the request open for it.
-      void chat({ store, runner, team, runId: run.id, agent, message }).catch((err) =>
-        store.append(run.id, { type: 'agent.error', agent, step: 'chat', data: { ok: false, error: (err as Error).message } }),
-      );
+      void chat({ store, runner, team, runId: run.id, agent, message })
+        .catch((err) => store.append(run.id, { type: 'agent.error', agent, step: 'chat', data: { ok: false, error: (err as Error).message } }))
+        .finally(() => answering.delete(key));
       return { mode: 'answering' };
     }],
     ['POST', '/api/ask', async (_p, body) => {
@@ -271,7 +286,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       }
       send(res, 404, { error: 'not found' });
     } catch (err) {
-      const status = err instanceof NotFound ? 404 : err instanceof BadRequest || err instanceof ConfigError ? 400 : 500;
+      const status = err instanceof NotFound ? 404 : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError ? 400 : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;
       if (status === 500) console.error(err);
       send(res, status, { error: message });
