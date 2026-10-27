@@ -19,6 +19,8 @@ export interface RunOptions {
   /** Parent environment for agent processes (defaults to process.env). */
   env?: Env;
   signal?: AbortSignal;
+  /** Git ref to start from, e.g. an earlier run's branch to build on its result. Defaults to HEAD. */
+  base?: string;
 }
 
 export interface RunOutcome {
@@ -49,8 +51,16 @@ export function newRunId(date = new Date()): string {
 
 /** Run a team's workflow to completion: succeeded, failed, or escalated to a human. */
 export async function runTeam(opts: RunOptions): Promise<RunOutcome> {
+  return (await startRun(opts)).done;
+}
+
+/**
+ * Create the run (workspace and record) and start it in the background.
+ * Resolves as soon as the run id exists, so a UI can follow it from the first event.
+ */
+export async function startRun(opts: RunOptions): Promise<{ runId: string; done: Promise<RunOutcome> }> {
   const runId = newRunId();
-  const workspace = await Workspace.create(opts.repo, runId, opts.team.isolation);
+  const workspace = await Workspace.create(opts.repo, runId, opts.team.isolation, opts.base);
   opts.store.createRun({
     id: runId,
     team: opts.team.name,
@@ -58,8 +68,22 @@ export async function runTeam(opts: RunOptions): Promise<RunOutcome> {
     repo: workspace.repo,
     goal: opts.goal,
     branch: workspace.branch,
+    base: opts.base,
   });
-  return new Engine(opts, runId, workspace).run();
+  return { runId, done: new Engine(opts, runId, workspace).run() };
+}
+
+/** The agent.finished / agent.error payload, shared by workflow steps, chat and ask. */
+export function finishedData(agent: AgentConfig, result: AgentResult): Record<string, unknown> {
+  return {
+    ok: result.ok,
+    model: agent.model ?? null,
+    turns: result.turns,
+    cost_usd: result.costUsd,
+    duration_ms: result.durationMs,
+    tokens: result.tokens ?? null,
+    ...(result.ok ? {} : { error: result.error ?? 'unknown error' }),
+  };
 }
 
 class Engine {
@@ -224,9 +248,9 @@ class Engine {
       this.costUsd += result.costUsd;
       if (result.sessionId) this.store.saveSession(this.runId, agent.name, result.sessionId, cwd);
 
-      const finished = { ok: result.ok, turns: result.turns, cost_usd: result.costUsd, duration_ms: result.durationMs };
+      const finished = finishedData(agent, result);
       if (!result.ok) {
-        this.emit({ ...base, type: 'agent.error', data: { ...finished, error: result.error ?? 'unknown error' } });
+        this.emit({ ...base, type: 'agent.error', data: finished });
         throw new StepError(`${agent.name} failed on step ${step.id}: ${result.error ?? 'unknown error'}`);
       }
       this.emit({ ...base, type: 'agent.finished', data: finished });
@@ -313,6 +337,7 @@ export function buildInvocation(
       if (e.kind === 'text') emit({ ...base, type: 'agent.text', data: { text: clip(e.text, 4000) } });
       else if (e.kind === 'tool') emit({ ...base, type: 'agent.tool', data: { tool: e.tool, input: summarize(e.input) } });
       else if (e.kind === 'denied') emit({ ...base, type: 'scope.denied', data: { tool: e.tool, input: summarize(e.input), reason: e.reason } });
+      else if (e.kind === 'rate_limit') emit({ ...base, type: 'usage.limit', data: { ...e.info } });
     },
   };
 }

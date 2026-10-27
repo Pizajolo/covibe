@@ -58,20 +58,53 @@ export class EventStore {
     // WAL lets `covibe log --follow` and `covibe chat` read while a run writes.
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     this.db.exec(SCHEMA);
+    // Columns added after the first release; ALTER is a no-op once present.
+    const cols = new Set((this.db.prepare('PRAGMA table_info(runs)').all() as Row[]).map((r) => String(r.name)));
+    if (!cols.has('kind')) this.db.exec("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'workflow'");
+    if (!cols.has('base')) this.db.exec('ALTER TABLE runs ADD COLUMN base TEXT');
   }
 
   close() {
     this.db.close();
   }
 
-  createRun(run: Omit<RunRecord, 'status' | 'startedAt' | 'pid'>): RunRecord {
-    const record: RunRecord = { ...run, status: 'running', pid: process.pid, startedAt: now() };
+  createRun(run: Omit<RunRecord, 'status' | 'startedAt' | 'pid' | 'kind'> & { kind?: RunRecord['kind'] }): RunRecord {
+    const record: RunRecord = { ...run, kind: run.kind ?? 'workflow', status: 'running', pid: process.pid, startedAt: now() };
     this.db
       .prepare(
-        'INSERT INTO runs (id, team, team_file, repo, goal, status, pid, started_at, branch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO runs (id, kind, team, team_file, repo, goal, status, pid, started_at, branch, base) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       )
-      .run(record.id, record.team, record.teamFile, record.repo, record.goal, record.status, record.pid, record.startedAt, record.branch ?? null);
+      .run(record.id, record.kind, record.team, record.teamFile, record.repo, record.goal, record.status, record.pid, record.startedAt, record.branch ?? null, record.base ?? null);
     return record;
+  }
+
+  /** Mark runs whose owning process died as failed, so they stop showing as live. */
+  reapDeadRuns(): string[] {
+    const dead = (this.db.prepare("SELECT * FROM runs WHERE status = 'running'").all() as Row[]).map(toRun).filter((r) => !this.isLive(r));
+    for (const r of dead) {
+      this.finishRun(r.id, 'failed');
+      this.append(r.id, { type: 'run.finished', data: { status: 'failed', reason: 'interrupted: the process running it exited', loops: null, cost_usd: null } });
+    }
+    return dead.map((r) => r.id);
+  }
+
+  /** Events of one type across all runs (stats). */
+  eventsOfType(types: string[], since?: string): RunEvent[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM events WHERE type IN (${types.map(() => '?').join(',')}) AND ts >= ? ORDER BY id`)
+      .all(...types, since ?? '') as Row[];
+    return rows.map(toEvent);
+  }
+
+  /** Highest event id in the store (live feed cursor). */
+  lastEventId(): number {
+    const row = this.db.prepare('SELECT MAX(id) AS id FROM events').get() as Row;
+    return Number(row.id ?? 0);
+  }
+
+  /** Events of every run after a global cursor (live feed). */
+  eventsAfter(afterId: number, limit = 500): RunEvent[] {
+    return (this.db.prepare('SELECT * FROM events WHERE id > ? ORDER BY id LIMIT ?').all(afterId, limit) as Row[]).map(toEvent);
   }
 
   finishRun(id: string, status: RunStatus) {
@@ -123,15 +156,7 @@ export class EventStore {
 
   events(runId: string, afterId = 0): RunEvent[] {
     const rows = this.db.prepare('SELECT * FROM events WHERE run_id = ? AND id > ? ORDER BY id').all(runId, afterId) as Row[];
-    return rows.map((r) => ({
-      id: Number(r.id),
-      runId: String(r.run_id),
-      ts: String(r.ts),
-      type: r.type as RunEvent['type'],
-      step: r.step == null ? undefined : String(r.step),
-      agent: r.agent == null ? undefined : String(r.agent),
-      data: JSON.parse(String(r.data)),
-    }));
+    return rows.map(toEvent);
   }
 
   saveSession(runId: string, agent: string, sessionId: string, cwd: string) {
@@ -178,9 +203,22 @@ function now() {
   return new Date().toISOString();
 }
 
+function toEvent(r: Row): RunEvent {
+  return {
+    id: Number(r.id),
+    runId: String(r.run_id),
+    ts: String(r.ts),
+    type: r.type as RunEvent['type'],
+    step: r.step == null ? undefined : String(r.step),
+    agent: r.agent == null ? undefined : String(r.agent),
+    data: JSON.parse(String(r.data)),
+  };
+}
+
 function toRun(r: Row): RunRecord {
   return {
     id: String(r.id),
+    kind: (r.kind ?? 'workflow') as RunRecord['kind'],
     team: String(r.team),
     teamFile: String(r.team_file),
     repo: String(r.repo),
@@ -190,5 +228,6 @@ function toRun(r: Row): RunRecord {
     startedAt: String(r.started_at),
     finishedAt: r.finished_at == null ? undefined : String(r.finished_at),
     branch: r.branch == null ? undefined : String(r.branch),
+    base: r.base == null ? undefined : String(r.base),
   };
 }

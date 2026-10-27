@@ -1,0 +1,128 @@
+// Shapes the HTTP API returns. The UI imports these types directly.
+import type { RunEvent, RunKind, RunStatus } from '../events/types.js';
+
+export type { RunEvent, RunKind, RunStatus };
+
+export type AgentActivity = 'idle' | 'working' | 'done' | 'error' | 'waiting';
+
+export interface AgentState {
+  name: string;
+  status: AgentActivity;
+  /** Step the agent is in (or was last in). */
+  step?: string;
+  /** What it is doing right now, e.g. "Edit web/app.tsx". */
+  activity?: string;
+  lastText?: string;
+  invocations: number;
+  turns: number;
+  costUsd: number;
+  tokens: number;
+  /** Messages waiting for its next turn. */
+  inbox: number;
+  updatedAt?: string;
+}
+
+export type StepStatus = 'pending' | 'running' | 'done' | 'passed' | 'failed' | 'skipped';
+
+export interface BoardCard {
+  agent: string;
+  round: number;
+  status: 'working' | 'done' | 'error' | 'skipped';
+  costUsd: number;
+  summary?: string;
+}
+
+export interface StepState {
+  id: string;
+  status: StepStatus;
+  rounds: number;
+  gate?: string;
+  cards: BoardCard[];
+}
+
+export interface RunSummary {
+  id: string;
+  projectId: string;
+  projectName: string;
+  kind: RunKind;
+  team: string;
+  goal: string;
+  status: RunStatus;
+  reason?: string;
+  startedAt: string;
+  finishedAt?: string;
+  branch?: string;
+  base?: string;
+  loops: number;
+  maxLoops?: number;
+  costUsd: number;
+  tokens: number;
+  errors: number;
+  agents: AgentState[];
+  steps: StepState[];
+  filesChanged: string[];
+}
+
+export interface ChatItem {
+  id: number;
+  ts: string;
+  kind: 'human' | 'agent' | 'tool' | 'note' | 'error';
+  text: string;
+  step?: string;
+  /** Human message still waiting for the agent's next turn. */
+  pending?: boolean;
+}
+
+export interface RunDetail {
+  summary: RunSummary;
+  events: RunEvent[];
+  threads: Record<string, ChatItem[]>;
+  /** Whether a chat message right now is queued (live run) or answered immediately. */
+  chatMode: 'queue' | 'answer';
+}
+
+export interface UsageWindow {
+  window: string;
+  status: string;
+  utilization?: number;
+  resetsAt?: number;
+  seenAt: string;
+}
+
+export interface Stats {
+  costUsd: { today: number; week: number; month: number; all: number };
+  tokens: { today: number; week: number; all: number; input: number; output: number; cacheRead: number };
+  runs: { total: number; running: number; succeeded: number; escalated: number; failed: number; questions: number };
+  activeAgents: number;
+  /** Last 14 days, oldest first. */
+  daily: { day: string; costUsd: number; tokens: number; runs: number }[];
+  byAgent: { agent: string; team: string; costUsd: number; tokens: number; turns: number }[];
+  byModel: { model: string; costUsd: number; tokens: number }[];
+  byTeam: { team: string; costUsd: number; runs: number }[];
+  /** Plan usage windows reported by Claude Code (subscription). */
+  usage: UsageWindow[];
+  gatePassRate?: number;
+}
+
+export interface TeamSummaryAgent {
+  name: string;
+  description?: string;
+  model?: string;
+  tools: string[];
+  writeScope?: string[];
+  backend: string;
+  canMessage: string[];
+  writes: boolean;
+  promptFile?: string;
+  outputSchema: boolean;
+}
+
+export interface TeamDetail {
+  id: string;
+  dir: string;
+  yaml: string;
+  /** team.yaml as plain data (even when invalid), for the form editors. */
+  doc: Record<string, unknown>;
+  problems: string[];
+  files: { path: string; size: number }[];
+}

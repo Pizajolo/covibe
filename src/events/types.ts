@@ -3,6 +3,9 @@
 
 export type RunStatus = 'running' | 'succeeded' | 'failed' | 'escalated';
 
+/** A workflow run, or a read-only question session with one agent. */
+export type RunKind = 'workflow' | 'ask';
+
 export type EventType =
   | 'run.started'
   | 'run.finished'
@@ -23,7 +26,9 @@ export type EventType =
   | 'git.merge'
   | 'message.queued'
   | 'message.delivered'
-  | 'backend.warning';
+  | 'backend.warning'
+  | 'chat.message'
+  | 'usage.limit';
 
 export interface RunEvent {
   id: number;
@@ -39,6 +44,7 @@ export type NewEvent = Omit<RunEvent, 'id' | 'ts' | 'runId'>;
 
 export interface RunRecord {
   id: string;
+  kind: RunKind;
   team: string;
   teamFile: string;
   repo: string;
@@ -49,6 +55,8 @@ export interface RunRecord {
   finishedAt?: string;
   /** Branch holding the merged result of a worktree run. */
   branch?: string;
+  /** Git ref the run started from. */
+  base?: string;
 }
 
 export interface InboxMessage {

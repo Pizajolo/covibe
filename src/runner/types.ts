@@ -32,7 +32,24 @@ export type AgentStreamEvent =
   | { kind: 'session'; sessionId: string }
   | { kind: 'text'; text: string }
   | { kind: 'tool'; tool: string; input: unknown }
-  | { kind: 'denied'; tool: string; input: unknown; reason: string };
+  | { kind: 'denied'; tool: string; input: unknown; reason: string }
+  /** Subscription plan usage, as reported by Claude Code. */
+  | { kind: 'rate_limit'; info: RateLimitInfo };
+
+export interface RateLimitInfo {
+  status: string;
+  window?: string;
+  /** Fraction of the window used, 0..1, when reported. */
+  utilization?: number;
+  resetsAt?: number;
+}
+
+export interface TokenUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
 
 export interface AgentResult {
   ok: boolean;
@@ -43,8 +60,10 @@ export interface AgentResult {
   structured?: unknown;
   error?: string;
   turns: number;
+  /** Estimated cost in USD (on a subscription this is what the usage would cost on the API). */
   costUsd: number;
   durationMs: number;
+  tokens?: TokenUsage;
 }
 
 /**

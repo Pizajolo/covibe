@@ -47,7 +47,7 @@ export class Workspace {
     readonly branch: string | undefined,
   ) {}
 
-  static async create(repo: string, runId: string, isolation: Isolation): Promise<Workspace> {
+  static async create(repo: string, runId: string, isolation: Isolation, base = 'HEAD'): Promise<Workspace> {
     if (isolation === 'none') return new Workspace(repo, runId, isolation, repo, undefined);
     const top = (await git(repo, ['rev-parse', '--show-toplevel'])).trim();
     await git(top, ['rev-parse', '--verify', 'HEAD']).catch(() => {
@@ -59,7 +59,10 @@ export class Workspace {
     if (!existsSync(join(root, '.gitignore'))) writeFileSync(join(root, '.gitignore'), '*\n');
     const dir = join(root, 'worktrees', runId, '_integration');
     const branch = `covibe/${runId}`;
-    await git(top, ['worktree', 'add', '-q', '-b', branch, dir, 'HEAD']);
+    await git(top, ['rev-parse', '--verify', `${base}^{commit}`]).catch(() => {
+      throw new GitError(`cannot start from "${base}": no such branch or commit`);
+    });
+    await git(top, ['worktree', 'add', '-q', '-b', branch, dir, base]);
     return new Workspace(top, runId, isolation, dir, branch);
   }
 

@@ -8,5 +8,11 @@ process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
   return (emitWarning as (...a: unknown[]) => void)(warning, ...rest);
 }) as typeof process.emitWarning;
 
+// `covibe log | head` closes the pipe early; that is not an error.
+process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EPIPE') process.exit(0);
+  throw err;
+});
+
 const { main } = await import('./main.js');
 process.exitCode = await main(process.argv.slice(2));

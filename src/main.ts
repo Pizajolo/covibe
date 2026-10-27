@@ -17,6 +17,7 @@ Usage:
   covibe runs                                  List recent runs
   covibe log <run> [--follow] [--json]         Show a run's event log
   covibe chat <run> <agent> <message...>       Talk to an agent of a run
+  covibe app [--port <n>] [--no-open]          Open the covibe app in your browser
 
 Options:
   --repo <dir>   Repository the team works on (default: current directory)
@@ -38,6 +39,8 @@ export async function main(argv: string[]): Promise<number> {
       follow: { type: 'boolean', short: 'f' },
       json: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
+      port: { type: 'string' },
+      'no-open': { type: 'boolean' },
     },
   });
   const [command, ...args] = positionals;
@@ -58,6 +61,8 @@ export async function main(argv: string[]): Promise<number> {
         return await log(args[0], values);
       case 'chat':
         return await chatCommand(args, values.repo);
+      case 'app':
+        return await app(values.port ? Number(values.port) : undefined, !values['no-open']);
       default:
         console.error(`unknown command "${command}"\n\n${USAGE}`);
         return 1;
@@ -166,6 +171,25 @@ async function log(id: string | undefined, values: { repo?: string; follow?: boo
   } finally {
     store.close();
   }
+}
+
+async function app(port: number | undefined, open: boolean): Promise<number> {
+  const { startServer } = await import('./server/app.js');
+  const server = await startServer({ port });
+  console.log(`covibe is running at ${bold(server.url)}`);
+  console.log(dim('This link carries an access token; do not share it. Press Ctrl-C to stop.'));
+  if (open) {
+    const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open';
+    try {
+      execFileSync(opener, [server.url], { stdio: 'ignore' });
+    } catch {
+      // no browser available; the URL is printed above
+    }
+  }
+  await new Promise<void>((resolve) => process.once('SIGINT', resolve));
+  console.log(dim('\nstopping…'));
+  await server.close();
+  return 0;
 }
 
 async function chatCommand(args: string[], repo: string | undefined): Promise<number> {

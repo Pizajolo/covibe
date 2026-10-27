@@ -67,8 +67,18 @@ export class ClaudeSdkRunner implements AgentRunner {
               inv.onEvent({ kind: 'tool', tool: block.name, input: block.input });
             }
           }
+        } else if (msg.type === 'rate_limit_event') {
+          const info = msg.rate_limit_info;
+          inv.onEvent({ kind: 'rate_limit', info: { status: info.status, window: info.rateLimitType, utilization: info.utilization, resetsAt: info.resetsAt } });
         } else if (msg.type === 'result') {
-          const base = { sessionId: msg.session_id, turns: msg.num_turns, costUsd: msg.total_cost_usd, durationMs: Date.now() - started };
+          const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+          for (const u of Object.values(msg.modelUsage ?? {})) {
+            tokens.input += u.inputTokens;
+            tokens.output += u.outputTokens;
+            tokens.cacheRead += u.cacheReadInputTokens;
+            tokens.cacheWrite += u.cacheCreationInputTokens;
+          }
+          const base = { sessionId: msg.session_id, turns: msg.num_turns, costUsd: msg.total_cost_usd, durationMs: Date.now() - started, tokens };
           if (msg.subtype === 'success' && !msg.is_error) {
             return { ...base, ok: true, text: msg.result, structured: msg.structured_output };
           }
