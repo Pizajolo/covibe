@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { desktop, get, post, type ChatItem, type DiffResult, type RunDetail, type RunEvent, type RunSummary } from '../api';
 import { Composer } from '../components/Composer';
+import { deskNote, DeskPill, deskState, OfficeLegend, OfficeStage, Portrait, useFigures, type DeskState } from '../components/Office';
 import {
   IconAlert,
   IconBranch,
@@ -9,6 +10,7 @@ import {
   IconClock,
   IconFlow,
   IconFolder,
+  IconHome,
   IconInfo,
   IconLoop,
   IconRuns,
@@ -23,7 +25,7 @@ import { AgentStatus, Avatar, Copy, Empty, LoopBadge, Modal, RunStatusPill, useA
 import { go, useData, useLive } from '../data';
 import { clock, duration, money, tokens, toolText } from '../format';
 
-type Tab = 'board' | 'activity' | 'chat' | 'changes';
+type Tab = 'office' | 'board' | 'activity' | 'chat' | 'changes';
 type Delivery = 'queue' | 'steer' | 'interrupt';
 
 const DELIVERY: Record<Delivery, { label: string; pending: string; help: (a: string) => string; toast: (a: string) => string }> = {
@@ -82,7 +84,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
   if (!detail) return <Toolbar title="Loading…" />;
   const run = detail.summary;
   const isAsk = run.kind === 'ask';
-  const tab: Tab = (['board', 'activity', 'chat', 'changes'].includes(tabParam ?? '') ? tabParam : isAsk ? 'chat' : 'board') as Tab;
+  const tab: Tab = (['office', 'board', 'activity', 'chat', 'changes'].includes(tabParam ?? '') ? tabParam : isAsk ? 'chat' : 'office') as Tab;
   const setTab = (t: Tab) => go('runs', projectId, runId, t);
   const openChat = (agent: string) => {
     setChatWith(agent);
@@ -128,7 +130,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
           </div>
           <Banner run={run} />
           <Questions run={run} projectId={projectId} onAnswered={reload} />
-          {!isAsk && (
+          {!isAsk && tab !== 'office' && (
             <div className="members">
               {run.agents.map((a, i) => (
                 <div key={a.name} className="member card" onClick={() => openChat(a.name)} title={`Chat with ${a.name}`}>
@@ -151,6 +153,11 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
 
         <nav className="tabs">
           {!isAsk && (
+            <button className={tab === 'office' ? 'on' : ''} onClick={() => setTab('office')}>
+              <IconHome width={14} height={14} /> Office
+            </button>
+          )}
+          {!isAsk && (
             <button className={tab === 'board' ? 'on' : ''} onClick={() => setTab('board')}>
               <IconFlow width={14} height={14} /> Board
             </button>
@@ -168,6 +175,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
           )}
         </nav>
 
+        {tab === 'office' && <OfficeTab detail={detail} projectId={projectId} selected={chatWith} onSelect={setChatWith} onSent={reload} />}
         {tab === 'board' && <Board run={run} onOpen={openChat} />}
         {tab === 'activity' && <Activity events={detail.events} run={run} roots={detail.roots} />}
         {tab === 'chat' && <Chat detail={detail} projectId={projectId} selected={chatWith} onSelect={setChatWith} onSent={reload} />}
@@ -349,6 +357,193 @@ function StepBadge({ status }: { status: string }) {
   return <span className={`pill ${cls}`}>{label}</span>;
 }
 
+// ---------------------------------------------------------------- office
+
+type Pane = 'overview' | 'chat' | 'activity';
+const LEGEND: DeskState[] = ['working', 'asking', 'needs', 'held', 'done', 'sleeping', 'stopped'];
+
+/** The run as an office, with the picked member's details, chat and activity beside it. */
+function OfficeTab({ detail, projectId, selected, onSelect, onSent }: { detail: RunDetail; projectId: string; selected?: string; onSelect: (a?: string) => void; onSent: () => void }) {
+  const run = detail.summary;
+  const figures = useFigures(run, detail.members);
+  const agent = run.agents.find((a) => a.name === selected);
+  const [pane, setPane] = useState<Pane>('overview');
+  const [legendOpen, setLegendOpen] = useState(false);
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => e.key === 'Escape' && !(e.target as HTMLElement).matches('textarea, input') && onSelect(undefined);
+    window.addEventListener('keydown', on);
+    return () => window.removeEventListener('keydown', on);
+  }, [onSelect]);
+
+  if (!run.agents.length) return <Empty icon={<IconHome />} title="Nobody in the office yet">Members show up at their desks once the run starts.</Empty>;
+  const pick = (name: string) => {
+    if (name === selected) return onSelect(undefined);
+    const a = run.agents.find((x) => x.name === name);
+    // A member waiting for you opens on its question; otherwise on what it is doing.
+    if (a?.waitingOn === 'human') setPane('overview');
+    onSelect(name);
+  };
+
+  return (
+    <div className="office">
+      <div className="office-floor">
+        <OfficeStage run={run} members={detail.members} answering={detail.answering} selected={agent?.name} onSelect={pick}>
+          <div className="row tiny faint" style={{ gap: 8 }}>
+            <span className="grow">Click a desk to see what a member is doing and to talk to it.</span>
+            <button className="btn sm ghost" onClick={() => setLegendOpen((o) => !o)} aria-expanded={legendOpen}>
+              {legendOpen ? 'Hide the legend' : 'What the desks show'}
+            </button>
+          </div>
+          {legendOpen && <OfficeLegend figure={figures.get(agent?.name ?? run.agents[0]!.name)} states={LEGEND} />}
+        </OfficeStage>
+      </div>
+      {agent && (
+        <aside className="office-panel" aria-label={`${agent.name} details`}>
+          <MemberPanel detail={detail} projectId={projectId} agent={agent.name} pane={pane} setPane={setPane} onClose={() => onSelect(undefined)} onSent={onSent} figure={figures.get(agent.name)!} />
+        </aside>
+      )}
+    </div>
+  );
+}
+
+function MemberPanel({
+  detail,
+  projectId,
+  agent,
+  pane,
+  setPane,
+  onClose,
+  onSent,
+  figure,
+}: {
+  detail: RunDetail;
+  projectId: string;
+  agent: string;
+  pane: Pane;
+  setPane: (p: Pane) => void;
+  onClose: () => void;
+  onSent: () => void;
+  figure: Parameters<typeof Portrait>[0]['figure'];
+}) {
+  const run = detail.summary;
+  const a = run.agents.find((x) => x.name === agent)!;
+  const member = detail.members.find((m) => m.name === agent);
+  const state = deskState(a, run, detail.answering.includes(agent));
+  const events = useMemo(() => detail.events.filter((e) => e.agent === agent), [detail.events, agent]);
+  const question = run.questions.find((q) => q.from === agent && (q.status === 'open' || q.status === 'lead'));
+  const answered = run.questions.filter((q) => q.from === agent && q.status === 'answered').slice(-3);
+
+  return (
+    <>
+      <div className="office-panel-head">
+        <Portrait figure={figure} state={state} />
+        <div className="who">
+          <h2>{agent}</h2>
+          <div className="row wrap" style={{ gap: 6 }}>
+            <DeskPill state={state} />
+            {member?.lead && <span className="pill">Team lead</span>}
+            {member?.curator && <span className="pill">Curator</span>}
+          </div>
+        </div>
+        <button className="btn sm ghost icon-btn" onClick={onClose} aria-label="Close member details" title="Close (Esc)">
+          <IconX />
+        </button>
+      </div>
+      {member?.description && <p className="office-panel-desc">{member.description}</p>}
+      <nav className="tabs" role="tablist">
+        {(['overview', 'chat', 'activity'] as Pane[]).map((p) => (
+          <button key={p} role="tab" aria-selected={pane === p} className={pane === p ? 'on' : ''} onClick={() => setPane(p)}>
+            {p === 'overview' ? 'Overview' : p === 'chat' ? 'Chat' : 'Activity'}
+            {p === 'chat' && a.inbox ? <span className="badge">{a.inbox}</span> : null}
+          </button>
+        ))}
+      </nav>
+
+      {pane === 'chat' && <Chat detail={detail} projectId={projectId} selected={agent} onSelect={() => undefined} onSent={onSent} single />}
+
+      {pane === 'activity' && (
+        <div className="office-pane">
+          {events.length === 0 && <p className="small faint">{agent} has not done anything in this run yet.</p>}
+          <div className="timeline compact">
+            {events.slice(-80).reverse().map((e) => {
+              const d = describe(e, detail.roots);
+              if (!d) return null;
+              return (
+                <div key={e.id} className={`tl-row ${d.cls}`}>
+                  <span className="time">{clock(e.ts)}</span>
+                  <span className="what">{d.text}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {pane === 'overview' && (
+        <div className="office-pane col" style={{ gap: 14 }}>
+          <div className="office-now">
+            <span className="label">Right now</span>
+            {question ? (
+              <div>
+                {question.status === 'open' ? (
+                  <><strong>Waiting for your answer:</strong> {question.forHuman ?? question.question} <span className="faint">Answer it in the box at the top of the run.</span></>
+                ) : (
+                  <><strong>Asked {question.lead}:</strong> {question.question}</>
+                )}
+              </div>
+            ) : (
+              <div className={state === 'working' ? 'mono small' : 'small'}>{deskNote(a, state, run)}</div>
+            )}
+            {a.lastText && state !== 'sleeping' && <div className="small muted office-said">“{a.lastText}”</div>}
+          </div>
+          <dl className="office-facts">
+            <div><dt>Model</dt><dd>{member?.model ?? 'default'}</dd></div>
+            <div><dt>Cost this run</dt><dd className="num">{money(a.costUsd)}</dd></div>
+            <div><dt>Turns</dt><dd className="num">{a.turns} in {a.invocations} {a.invocations === 1 ? 'session' : 'sessions'}</dd></div>
+            <div><dt>Tokens</dt><dd className="num">{tokens(a.tokens)}</dd></div>
+            {a.step && <div><dt>Last step</dt><dd>{a.step}</dd></div>}
+            {a.inbox > 0 && <div><dt>Messages waiting</dt><dd className="num">{a.inbox}</dd></div>}
+          </dl>
+          {member && (
+            <>
+              <Chips label="Can change" items={!member.writes ? [] : member.writeScope ?? ['anything in its worktree']} empty="nothing (read-only)" />
+              <Chips label="Tools" items={member.tools} empty="none" />
+              <Chips label="Can message" items={member.canMessage} empty="nobody" />
+            </>
+          )}
+          {answered.length > 0 && (
+            <div className="col" style={{ gap: 6 }}>
+              <span className="label">Answered questions</span>
+              {answered.map((q) => (
+                <div key={q.id} className="small">
+                  <div>{q.question}</div>
+                  <div className="muted">→ {q.answeredBy === 'human' ? 'You' : q.answeredBy}: {q.answer}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn" onClick={() => setPane('chat')}>
+              <IconChat /> Talk to {agent}
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function Chips({ label, items, empty }: { label: string; items: string[]; empty: string }) {
+  return (
+    <div className="col" style={{ gap: 6 }}>
+      <span className="label">{label}</span>
+      <div className="row wrap" style={{ gap: 6 }}>
+        {items.length ? items.map((i) => <span key={i} className="chip static mono">{i}</span>) : <span className="small faint">{empty}</span>}
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- activity
 
 function describe(e: RunEvent, roots: string[] = []): { cls: string; text: string } | null {
@@ -456,7 +651,7 @@ function Activity({ events, run, roots }: { events: RunEvent[]; run: RunSummary;
 
 // ---------------------------------------------------------------- chat
 
-function Chat({ detail, projectId, selected, onSelect, onSent }: { detail: RunDetail; projectId: string; selected?: string; onSelect: (a: string) => void; onSent: () => void }) {
+function Chat({ detail, projectId, selected, onSelect, onSent, single }: { detail: RunDetail; projectId: string; selected?: string; onSelect: (a: string) => void; onSent: () => void; single?: boolean }) {
   const run = detail.summary;
   const names = run.agents.length ? run.agents.map((a) => a.name) : Object.keys(detail.threads);
   const agent = selected && names.includes(selected) ? selected : names[0];
@@ -489,7 +684,7 @@ function Chat({ detail, projectId, selected, onSelect, onSent }: { detail: RunDe
 
   return (
     <div className="chat">
-      {names.length > 1 && (
+      {names.length > 1 && !single && (
         <div className="chat-list">
           {names.map((n, i) => {
             const a = run.agents.find((x) => x.name === n);

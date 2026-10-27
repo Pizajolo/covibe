@@ -7,6 +7,23 @@ let id = 0;
 const ev = (type: RunEvent['type'], data: Record<string, unknown>, extra: Partial<RunEvent> = {}): RunEvent => ({ id: ++id, runId: 'r1', ts: '2026-10-27T10:00:01.000Z', type, data, ...extra });
 
 describe('projections', () => {
+  it("shows the lead answering a teammate's question without making it a step", () => {
+    const live = { ...run, status: 'running' as const };
+    const events = [
+      ev('run.started', { steps: ['plan', 'build'] }),
+      ev('agent.started', {}, { step: 'plan', agent: 'manager' }),
+      ev('agent.finished', { turns: 1, cost_usd: 0.1 }, { step: 'plan', agent: 'manager' }),
+      ev('agent.started', {}, { step: 'build', agent: 'dev' }),
+      ev('question.asked', { id: 1, question: 'Formal?', context: null, to: 'manager' }, { step: 'build', agent: 'dev' }),
+      ev('agent.started', { resumed: true, question: true }, { step: 'question', agent: 'manager' }),
+    ];
+    const asking = summarizeRun(live, events, { id: 'p', name: 'app' }, true, ['manager', 'dev']);
+    expect(asking.agents.find((a) => a.name === 'manager')).toMatchObject({ status: 'working', step: 'plan', activity: "answering dev's question" });
+    expect(asking.agents.find((a) => a.name === 'dev')).toMatchObject({ status: 'asking', waitingOn: 'manager' });
+    expect(asking.steps.map((s) => s.id)).toEqual(['plan', 'build']);
+    expect(asking.steps.find((s) => s.id === 'build')!.cards.map((c) => c.agent)).toEqual(['dev']);
+  });
+
   it('shortens worktree and project paths', () => {
     expect(shortenPaths('/Users/me/.covibe/worktrees/app-1a2b3c4d5e/20261027-101500-ab12/frontend/web/x.tsx')).toBe('web/x.tsx');
     expect(shortenPaths('/code/app/.covibe/worktrees/20261027-101500-ab12/_integration/api/a.ts')).toBe('api/a.ts');

@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { ConfigError, DEFAULT_SANDBOX_NETWORK, DEFAULT_SANDBOX_WRITE } from '../config/load.js';
+import type { TeamConfig } from '../config/types.js';
 import { acceptIntoNote, brainLog, BrainError, curate, deleteNote, ensureBrain, listNotes, readNote, writeNote } from '../engine/brain.js';
 import { ask, chat } from '../engine/chat.js';
 import { cleanupWorktrees, worktreeReport } from '../engine/cleanup.js';
@@ -35,7 +36,7 @@ import { EventStore } from '../events/store.js';
 import type { DeliveryMode, RunEvent, RunRecord } from '../events/types.js';
 import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
-import type { AppSettings, RunDetail, RunSummary, TeamDetail } from './api-types.js';
+import type { AppSettings, MemberInfo, RunDetail, RunSummary, TeamDetail } from './api-types.js';
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
 import { chatThreads, computeStats, summarizeRun } from './projections.js';
 
@@ -182,6 +183,26 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       return { load: () => library.loadFile(run.teamFile) };
     }
     return { load: () => library.load(listing.id) };
+  };
+
+  const membersOf = (run: RunRecord): MemberInfo[] => {
+    let team: TeamConfig;
+    try {
+      team = teamForRun(run).load();
+    } catch {
+      return [];
+    }
+    return Object.values(team.agents).map((a) => ({
+      name: a.name,
+      description: a.description,
+      model: a.model,
+      tools: a.tools,
+      writeScope: a.writeScope,
+      writes: a.writes,
+      canMessage: a.canMessage,
+      lead: team.lead === a.name,
+      curator: team.brain.curator === a.name,
+    }));
   };
 
   // ---- live feed: poll every store for new events and fan them out
@@ -421,6 +442,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const events = store.events(run.id);
       return {
         summary: summary(project, run, events),
+        members: membersOf(run),
         events,
         threads: chatThreads(events, [project.path]),
         roots: [project.path],

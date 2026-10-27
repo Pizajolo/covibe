@@ -166,6 +166,11 @@ describe('server', () => {
       (d) => d.summary.paused,
     );
     expect(paused.summary).toMatchObject({ status: 'running', questions: [{ id: 1, from: 'builder', status: 'open', question: 'CommonJS or ES modules?' }] });
+    // Member details for the office: build-and-review has no manager, so nobody leads.
+    expect(paused.members.map((m) => [m.name, m.lead, m.writes])).toEqual([
+      ['builder', false, true],
+      ['reviewer', false, false],
+    ]);
     const overview = await api('GET', '/api/overview');
     expect(overview.runs.find((r: { id: string }) => r.id === runId)).toMatchObject({ paused: true });
 

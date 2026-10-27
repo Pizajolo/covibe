@@ -71,6 +71,8 @@ export function summarizeRun(
   const openCards = new Map<string, BoardCard>();
   const questions = new Map<number, QuestionView>();
   let paused = false;
+  /** lead → the member whose question it is answering */
+  const answeringFor = new Map<string, string>();
 
   for (const e of events) {
     const d = e.data as D;
@@ -110,8 +112,8 @@ export function summarizeRun(
       case 'agent.started': {
         const a = agent(e.agent!);
         a.status = 'working';
-        a.step = e.step;
-        a.activity = d.resumed ? 'resuming…' : 'starting…';
+        if (e.step !== QUESTION_STEP) a.step = e.step;
+        a.activity = e.step === QUESTION_STEP && answeringFor.has(e.agent!) ? `answering ${answeringFor.get(e.agent!)}'s question` : d.resumed ? 'resuming…' : 'starting…';
         a.invocations += 1;
         a.updatedAt = e.ts;
         if (e.step && e.step !== 'chat' && e.step !== QUESTION_STEP) {
@@ -172,6 +174,7 @@ export function summarizeRun(
       case 'question.asked': {
         const toLead = d.to !== 'human';
         questions.set(d.id, { id: d.id, from: e.agent!, status: toLead ? 'lead' : 'open', question: d.question, context: d.context ?? undefined, lead: toLead ? d.to : undefined, askedAt: e.ts });
+        if (toLead) answeringFor.set(d.to, e.agent!);
         const a = agent(e.agent!);
         a.waitingOn = d.to;
         a.activity = `asked ${toLead ? d.to : 'you'}: ${String(d.question).slice(0, 80)}`;

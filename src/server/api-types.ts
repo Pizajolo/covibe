@@ -162,8 +162,26 @@ export interface ChatItem {
   delivery?: 'queue' | 'steer' | 'interrupt';
 }
 
+/** A member as the team file defines it (member details in the office). */
+export interface MemberInfo {
+  name: string;
+  description?: string;
+  model?: string;
+  tools: string[];
+  /** Globs it may change; undefined = anything in its worktree. */
+  writeScope?: string[];
+  writes: boolean;
+  canMessage: string[];
+  /** Answers teammates' questions first. */
+  lead: boolean;
+  /** Maintains the project brain. */
+  curator: boolean;
+}
+
 export interface RunDetail {
   summary: RunSummary;
+  /** The team's members as its file defines them now; empty when the file cannot be loaded. */
+  members: MemberInfo[];
   events: RunEvent[];
   threads: Record<string, ChatItem[]>;
   /** Whether a chat message right now is queued (live run) or answered immediately. */
