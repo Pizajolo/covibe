@@ -2,14 +2,16 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { del, get, post, put, type EditOp, type TeamDetail, type TeamListing } from '../api';
 import { CodeEditor } from '../components/CodeEditor';
 import { Composer } from '../components/Composer';
-import { IconAlert, IconArrowLeft, IconArrowRight, IconCheck, IconCode, IconCopy, IconFile, IconFlow, IconGear, IconLoop, IconPlay, IconPlus, IconTeam, IconTrash } from '../components/icons';
+import { DesignChat } from '../components/DesignChat';
+import { IconAlert, IconArrowLeft, IconChat, IconArrowRight, IconCheck, IconCode, IconCopy, IconFile, IconFlow, IconGear, IconLoop, IconPlay, IconPlus, IconTeam, IconTrash } from '../components/icons';
 import { Toolbar } from '../components/Toolbar';
+import { SkillPicker } from './Skills';
 import { Avatar, Empty, Modal, useAction, useToast } from '../components/ui';
 import { go, href, useData, useLive } from '../data';
 
 type Doc = Record<string, any>;
 type Edit = (ops: EditOp[]) => Promise<void>;
-type Tab = 'members' | 'workflow' | 'yaml' | 'files' | 'settings';
+type Tab = 'members' | 'workflow' | 'yaml' | 'files' | 'settings' | 'chat';
 
 const KNOWN_TOOLS: [string, string][] = [
   ['Read', 'Read files'],
@@ -31,7 +33,7 @@ export function TeamEditor({ teamId, tab: tabParam }: { teamId: string; tab?: st
   const { value: team, error, setValue, reload } = useLive(() => get<TeamDetail>(`/api/teams/${teamId}`), [teamId]);
   const [goal, setGoal] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const tab: Tab = (['members', 'workflow', 'yaml', 'files', 'settings'].includes(tabParam ?? '') ? tabParam : 'members') as Tab;
+  const tab: Tab = (['members', 'workflow', 'yaml', 'files', 'settings', 'chat'].includes(tabParam ?? '') ? tabParam : 'members') as Tab;
 
   const edit: Edit = useCallback(
     async (ops) => {
@@ -87,6 +89,7 @@ export function TeamEditor({ teamId, tab: tabParam }: { teamId: string; tab?: st
       <nav className="tabs">
         {(
           [
+            ['chat', 'Chat', <IconChat width={14} height={14} />],
             ['members', 'Members', <IconTeam width={14} height={14} />],
             ['workflow', 'Workflow', <IconFlow width={14} height={14} />],
             ['settings', 'Team settings', <IconGear width={14} height={14} />],
@@ -114,6 +117,11 @@ export function TeamEditor({ teamId, tab: tabParam }: { teamId: string; tab?: st
                 </ul>
               </div>
             </div>
+          </div>
+        )}
+        {tab === 'chat' && (
+          <div style={{ padding: 20, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <DesignChat teamId={teamId} height={Math.max(420, window.innerHeight - 220)} onTeam={() => void reload()} />
           </div>
         )}
         {tab === 'members' && <Members teamId={teamId} doc={doc} edit={edit} files={team.files.map((f) => f.path)} onFiles={reload} />}
@@ -273,7 +281,7 @@ function Members({ teamId, doc, edit, files, onFiles }: { teamId: string; doc: D
       </div>
       <div className="split-main">
         {current ? (
-          <MemberForm key={current} teamId={teamId} name={current} index={names.indexOf(current)} agent={agents[current]!} names={names} edit={edit} files={files} onFiles={onFiles} onDeleted={() => setSelected(undefined)} />
+          <MemberForm key={current} teamId={teamId} name={current} index={names.indexOf(current)} agent={agents[current]!} names={names} edit={edit} files={files} onFiles={onFiles} onDeleted={() => setSelected(undefined)} teamSkills={doc.defaults?.skills} />
         ) : (
           <Empty icon={<IconTeam />} title="No members" action={<button className="btn primary" onClick={() => setAdding(true)}><IconPlus /> Add member</button>} />
         )}
@@ -289,7 +297,7 @@ function roleLine(a: Doc): string {
   return `${a.model ?? 'default model'} · ${writes ? (a.scope?.write ? `writes ${a.scope.write.join(', ') || 'nothing'}` : 'writes anywhere') : 'read-only'}`;
 }
 
-function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, onDeleted }: { teamId: string; name: string; index: number; agent: Doc; names: string[]; edit: Edit; files: string[]; onFiles: () => void; onDeleted: () => void }) {
+function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, onDeleted, teamSkills }: { teamId: string; name: string; index: number; agent: Doc; names: string[]; edit: Edit; files: string[]; onFiles: () => void; onDeleted: () => void; teamSkills?: string[] }) {
   const p = (...k: (string | number)[]) => ['agents', name, ...k];
   const tools: string[] = Array.isArray(agent.tools) ? agent.tools : [];
   const writes = tools.some((t) => WRITE_TOOLS.has(t));
@@ -372,6 +380,16 @@ function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, o
             );
           })}
         </div>
+      </section>
+
+      <section className="form-section">
+        <h3>Skills</h3>
+        <SkillPicker
+          value={Array.isArray(agent.skills) ? agent.skills : []}
+          inherited={(Array.isArray(teamSkills) ? teamSkills : []).map((n: string) => ({ name: n, why: 'from the team' }))}
+          onChange={(v) => void edit([{ op: 'set', path: p('skills'), value: v.length ? v : null }])}
+        />
+        <span className="tiny faint">Claude loads a skill when a task calls for it. Manage skills under Skills in the sidebar.</span>
       </section>
 
       <section className="form-section">
@@ -1175,6 +1193,38 @@ function TeamSettings({ doc, edit }: { doc: Doc; edit: Edit }) {
             {d.isolation === 'none'
               ? 'Members change your working copy directly. Only use this for read-only teams: shell commands are not limited to allowed paths in this mode.'
               : 'Each member that writes code gets its own git worktree; covibe merges their work into a branch per run. Your checkout is never touched.'}
+          </span>
+        </section>
+        <section className="form-section">
+          <h3>Skills for every member</h3>
+          <SkillPicker value={Array.isArray(d.skills) ? d.skills : []} onChange={(v) => void edit([{ op: 'set', path: ['defaults', 'skills'], value: v.length ? v : null }])} />
+        </section>
+        <section className="form-section">
+          <h3>Project brain</h3>
+          <div className="row wrap">
+            <label className="field" style={{ minWidth: 220 }}>
+              Curator
+              <select className="input" value={doc.brain?.curator ?? ''} onChange={(e) => void edit([{ op: 'set', path: ['brain'], value: e.target.value ? { curator: e.target.value, ...(doc.brain?.curate ? { curate: doc.brain.curate } : {}) } : null }])}>
+                <option value="">Nobody: I review proposals myself</option>
+                {Object.keys(doc.agents ?? {}).map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {doc.brain?.curator && (
+              <label className="field" style={{ minWidth: 220 }}>
+                When it reviews proposals
+                <select className="input" value={doc.brain?.curate ?? 'after_run'} onChange={(e) => void edit([{ op: 'set', path: ['brain', 'curate'], value: e.target.value }])}>
+                  <option value="after_run">At the end of every run</option>
+                  <option value="manual">Only when I ask</option>
+                </select>
+              </label>
+            )}
+          </div>
+          <span className="tiny faint">
+            Every member reads the project's brain (shared notes) and can propose additions. Only the curator edits the notes; it needs the Write or Edit tool.
           </span>
         </section>
         <section className="form-section">

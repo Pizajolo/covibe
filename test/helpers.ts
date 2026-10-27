@@ -42,6 +42,8 @@ export interface ScriptedTurn {
   fail?: string;
   /** Keep working until this many live messages arrived (or 5 s passed). */
   awaitLive?: number;
+  /** Custom (covibe) tools to call, in order. */
+  call?: { tool: string; args: Record<string, unknown> }[];
 }
 
 export type Script = (inv: AgentInvocation, call: number) => ScriptedTurn;
@@ -52,6 +54,8 @@ export class ScriptedRunner implements AgentRunner {
   denied: { agent: string; tool: string; reason: string }[] = [];
   /** Messages delivered to agents while they were working. */
   live: { agent: string; text: string; priority: string }[] = [];
+  /** What custom tools answered. */
+  toolResults: { agent: string; tool: string; result: string }[] = [];
   /** Resolves when an agent starts working (to time live messages in tests). */
   working = new Map<string, () => void>();
   whenWorking(agent: string) {
@@ -87,6 +91,17 @@ export class ScriptedRunner implements AgentRunner {
       writeFiles(inv.cwd, turn.bashWrite);
     }
     for (const m of turn.send ?? []) inv.sendMessage(m.to, m.text);
+    for (const c of turn.call ?? []) {
+      const tool = inv.customTools?.find((t) => t.name === c.tool);
+      if (!tool) throw new Error(`${inv.agentName} has no tool ${c.tool} (has: ${(inv.customTools ?? []).map((t) => t.name).join(', ') || 'none'})`);
+      let result: string;
+      try {
+        result = await tool.run(c.args);
+      } catch (err) {
+        result = `Error: ${(err as Error).message}`;
+      }
+      this.toolResults.push({ agent: inv.agentName, tool: c.tool, result });
+    }
     if (turn.awaitLive) {
       const got: string[] = [];
       await new Promise<void>((resolve) => {

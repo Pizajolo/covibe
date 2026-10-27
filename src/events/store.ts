@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { DeliveryMode, InboxMessage, NewEvent, RunEvent, RunRecord, RunStatus } from './types.js';
+import type { BrainProposal, DeliveryMode, InboxMessage, NewEvent, ProposalStatus, RunEvent, RunRecord, RunStatus } from './types.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -32,6 +32,20 @@ CREATE TABLE IF NOT EXISTS sessions (
   session_id TEXT NOT NULL,
   cwd TEXT NOT NULL,
   PRIMARY KEY (run_id, agent)
+);
+CREATE TABLE IF NOT EXISTS brain_proposals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT,
+  agent TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  reason TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  decided_by TEXT,
+  decision_note TEXT,
+  note_path TEXT
 );
 CREATE TABLE IF NOT EXISTS inbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,6 +121,11 @@ export class EventStore {
   /** Events of every run after a global cursor (live feed). */
   eventsAfter(afterId: number, limit = 500): RunEvent[] {
     return (this.db.prepare('SELECT * FROM events WHERE id > ? ORDER BY id LIMIT ?').all(afterId, limit) as Row[]).map(toEvent);
+  }
+
+  /** Mark a run live again in this process (a design conversation getting a new message). */
+  reopenRun(id: string) {
+    this.db.prepare("UPDATE runs SET status = 'running', pid = ?, finished_at = NULL WHERE id = ?").run(process.pid, id);
   }
 
   finishRun(id: string, status: RunStatus) {
@@ -188,6 +207,36 @@ export class EventStore {
     return rows.map((r) => toInbox(r, runId, to));
   }
 
+  addProposal(p: { runId?: string; agent: string; title: string; content: string; reason?: string }): BrainProposal {
+    const ts = now();
+    const r = this.db
+      .prepare('INSERT INTO brain_proposals (run_id, agent, title, content, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(p.runId ?? null, p.agent, p.title, p.content, p.reason ?? null, ts);
+    return this.getProposal(Number(r.lastInsertRowid))!;
+  }
+
+  getProposal(id: number): BrainProposal | undefined {
+    const row = this.db.prepare('SELECT * FROM brain_proposals WHERE id = ?').get(id) as Row | undefined;
+    return row ? toProposal(row) : undefined;
+  }
+
+  proposals(status?: ProposalStatus, limit = 200): BrainProposal[] {
+    const rows = status
+      ? (this.db.prepare('SELECT * FROM brain_proposals WHERE status = ? ORDER BY id DESC LIMIT ?').all(status, limit) as Row[])
+      : (this.db.prepare('SELECT * FROM brain_proposals ORDER BY id DESC LIMIT ?').all(limit) as Row[]);
+    return rows.map(toProposal);
+  }
+
+  decideProposal(id: number, d: { status: 'accepted' | 'rejected'; by: string; note?: string; notePath?: string }): BrainProposal {
+    const current = this.getProposal(id);
+    if (!current) throw new Error(`proposal #${id} not found`);
+    if (current.status !== 'pending') throw new Error(`proposal #${id} was already ${current.status}`);
+    this.db
+      .prepare('UPDATE brain_proposals SET status = ?, decided_at = ?, decided_by = ?, decision_note = ?, note_path = ? WHERE id = ?')
+      .run(d.status, now(), d.by, d.note ?? null, d.notePath ?? null, id);
+    return this.getProposal(id)!;
+  }
+
   markDelivered(ids: number[]) {
     if (!ids.length) return;
     this.db.prepare(`UPDATE inbox SET delivered_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`).run(now(), ...ids);
@@ -205,6 +254,24 @@ export class EventStore {
     }
     return rows.map((r) => toInbox(r, runId, to));
   }
+}
+
+function toProposal(r: Row): BrainProposal {
+  const opt = (v: string | number | null | undefined) => (v == null ? undefined : String(v));
+  return {
+    id: Number(r.id),
+    runId: opt(r.run_id),
+    agent: String(r.agent),
+    title: String(r.title),
+    content: String(r.content),
+    reason: opt(r.reason),
+    status: r.status as ProposalStatus,
+    createdAt: String(r.created_at),
+    decidedAt: opt(r.decided_at),
+    decidedBy: opt(r.decided_by),
+    decisionNote: opt(r.decision_note),
+    notePath: opt(r.note_path),
+  };
 }
 
 function toInbox(r: Row, runId: string, to: string): InboxMessage {

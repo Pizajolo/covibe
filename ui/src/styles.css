@@ -512,3 +512,33 @@ table.table td.r, table.table th.r { text-align: right; }
 .pipe-card .agent-line .x:hover { color: var(--bad); }
 .loop-handle { position: absolute; right: 8px; bottom: 8px; width: 22px; height: 22px; border-radius: 50%; background: var(--surface); border: 1.5px solid var(--warn); color: var(--warn); display: grid; place-items: center; cursor: grab; z-index: 2; }
 .loop-handle svg { width: 12px; height: 12px; }
+
+/* markdown (notes, skills) */
+.markdown { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.markdown h1 { font-size: 18px; margin: 4px 0 10px; }
+.markdown h2 { font-size: 15px; margin: 18px 0 8px; }
+.markdown h3, .markdown h4 { font-size: 13px; margin: 14px 0 6px; }
+.markdown p { margin: 0 0 10px; }
+.markdown ul, .markdown ol { margin: 0 0 10px; padding-left: 22px; }
+.markdown code { background: rgba(127,127,127,.14); padding: 1px 5px; border-radius: 4px; }
+.markdown pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow-x: auto; }
+.markdown pre code { background: none; padding: 0; }
+.markdown blockquote { margin: 0 0 10px; padding-left: 12px; border-left: 3px solid var(--border-strong); color: var(--text-2); }
+
+/* wizard */
+.wizard-steps { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--text-3); }
+.wizard-steps .on { color: var(--text); font-weight: 600; }
+.wizard-steps .done { color: var(--good); }
+.choice-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.choice { border: 1px solid var(--border-strong); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 6px; cursor: default; background: var(--surface); text-align: left; font: inherit; color: var(--text); }
+.choice:hover { border-color: var(--accent); }
+.choice.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.choice svg { width: 20px; height: 20px; color: var(--accent); }
+@media (max-width: 760px) { .choice-grid { grid-template-columns: 1fr; } }
+
+/* design chat */
+.design { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; min-height: 0; }
+.design-chat { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--window); overflow: hidden; }
+.design-chat .thread { min-height: 240px; }
+.design-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+@media (max-width: 900px) { .design { grid-template-columns: 1fr; } }

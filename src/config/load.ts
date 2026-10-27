@@ -139,6 +139,7 @@ interface RawAgent {
   backend?: RawBackend;
   limits?: Partial<Limits>;
   sandbox?: RawSandbox;
+  skills?: string[];
 }
 interface RawBranch {
   agent: string;
@@ -166,7 +167,9 @@ interface RawTeam {
     max_parallel?: number;
     setting_sources?: SettingSource[];
     sandbox?: RawSandbox;
+    skills?: string[];
   };
+  brain?: { curator?: string; curate?: 'after_run' | 'manual' };
   agents: Record<string, RawAgent>;
   workflow: { on_gate_fail?: RawPolicy; steps: RawStep[] };
 }
@@ -248,6 +251,7 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
       limits: { ...defaultLimits, ...a.limits },
       writes: a.tools.some((t) => WRITE_TOOLS.has(t)),
       sandbox: resolveSandbox(a.tools, defaults.sandbox, a.sandbox),
+      skills: [...new Set([...(defaults.skills ?? []), ...(a.skills ?? [])])],
     };
     if (a.scope?.write && !agents[name].writes) {
       problems.push(`${where}/scope: has a write scope but no tool that can write`);
@@ -314,8 +318,16 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
     }
   });
 
+  const curator = raw.brain?.curator;
+  if (curator) {
+    const c = agents[curator];
+    if (!c) problems.push(`/brain/curator: unknown agent "${curator}"`);
+    else if (!c.tools.some((t) => t === 'Write' || t === 'Edit')) problems.push(`/brain/curator: ${curator} needs the Write or Edit tool to maintain the notes`);
+  }
+
   if (problems.length) throw new ConfigError(file, problems);
   return {
+    brain: { curator, curate: raw.brain?.curate ?? 'after_run' },
     name: raw.name,
     description: raw.description,
     file,

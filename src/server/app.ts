@@ -6,16 +6,36 @@ import type { AddressInfo } from 'node:net';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { ConfigError, DEFAULT_SANDBOX_NETWORK, DEFAULT_SANDBOX_WRITE } from '../config/load.js';
+import { acceptIntoNote, brainLog, BrainError, curate, deleteNote, ensureBrain, listNotes, readNote, writeNote } from '../engine/brain.js';
 import { ask, chat } from '../engine/chat.js';
 import { cleanupWorktrees, worktreeReport } from '../engine/cleanup.js';
-import { startRun } from '../engine/engine.js';
+import { buildInvocation, newRunId, startRun } from '../engine/engine.js';
+import { brainRoot } from '../home.js';
+import {
+  ANTHROPIC_SKILLS,
+  createSkill,
+  deleteSkill,
+  getSkill,
+  installGithub,
+  listSkills,
+  readSkillFile,
+  scanGithub,
+  setEveryone,
+  SkillError,
+  skillMd,
+  updateSkill,
+  writeSkillFile,
+} from '../skills.js';
+import { backendEnv } from '../runner/backend.js';
+import type { EnvironmentInfo } from '../runner/types.js';
+import { ARCHITECT, design } from './designer.js';
 import { GitError } from '../engine/workspace.js';
 import { EventStore } from '../events/store.js';
 import type { DeliveryMode, RunEvent, RunRecord } from '../events/types.js';
 import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
 import type { AppSettings, RunDetail, RunSummary, TeamDetail } from './api-types.js';
-import { BadRequest, Library, NotFound, rawDoc, type EditOp, type Project } from './library.js';
+import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
 import { chatThreads, computeStats, summarizeRun } from './projections.js';
 
 const exec = promisify(execFile);
@@ -64,6 +84,32 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const answering = new Set<string>();
   const busyIn = (runId: string) => new Set([...answering].filter((k) => k.startsWith(`${runId}/`)).map((k) => k.slice(runId.length + 1)));
   const cursors = new Map<string, number>();
+
+  // Conversations that belong to the library rather than a project (team design).
+  const libraryStore = new EventStore(join(library.home, 'library.db'));
+  libraryStore.reapDeadRuns();
+  cursors.set('_library', libraryStore.lastEventId());
+
+  let environment: { at: number; info: Promise<EnvironmentInfo> } | undefined;
+  const discover = (): Promise<EnvironmentInfo> => {
+    if (!environment || Date.now() - environment.at > 600_000) {
+      const info = runner.discover ? runner.discover(backendEnv({ type: 'subscription' }).env) : Promise.resolve({ skills: [] });
+      environment = { at: Date.now(), info: info.catch(() => ({ skills: [] })) };
+    }
+    return environment.info;
+  };
+  /** Skill name → the team members that have it (directly or from team defaults). */
+  const skillUsage = () => {
+    const used = new Map<string, { team: string; agent: string }[]>();
+    for (const t of library.teams()) {
+      const doc = rawDoc(library.readFile(t.id, 'team.yaml')) as { defaults?: { skills?: string[] }; agents?: Record<string, { skills?: string[] }> };
+      for (const [agent, a] of Object.entries(doc.agents ?? {})) {
+        for (const s of new Set([...(doc.defaults?.skills ?? []), ...(a?.skills ?? [])])) (used.get(s) ?? used.set(s, []).get(s)!).push({ team: t.name, agent });
+      }
+    }
+    return used;
+  };
+  let catalog: { at: number; data: Promise<Awaited<ReturnType<typeof scanGithub>>> } | undefined;
 
   const storeFor = (project: Project): EventStore => {
     let s = stores.get(project.id);
@@ -140,6 +186,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   // ---- live feed: poll every store for new events and fan them out
   const poll = setInterval(() => {
     if (!sse.size) return;
+    let libCursor = cursors.get('_library') ?? 0;
+    for (const e of libraryStore.eventsAfter(libCursor)) {
+      const line = `event: run-event\ndata: ${JSON.stringify({ projectId: '_library', event: e })}\n\n`;
+      for (const res of sse) res.write(line);
+      libCursor = e.id;
+    }
+    cursors.set('_library', libCursor);
     for (const p of library.projects()) {
       if (!existsSync(p.path)) continue;
       const store = storeFor(p);
@@ -172,7 +225,146 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   autoCleanTimer.unref();
 
   const routes: Route[] = [
-    ['GET', '/api/overview', () => ({ projects: library.projects(), teams: library.teams(), runs: allRuns(30), stats: stats(), home: library.home })],
+    ['GET', '/api/overview', () => ({ projects: library.projects(), teams: library.teams(), runs: allRuns(30), stats: stats(), home: library.home, defaultParent: library.defaultParent() })],
+    ['GET', '/api/environment', () => discover()],
+
+    // ---- skills
+    ['GET', '/api/skills', async () => {
+      const used = skillUsage();
+      const env = await discover();
+      return {
+        library: listSkills().map((s) => ({ ...s, usedBy: used.get(s.name) ?? [] })),
+        builtin: env.skills.map((s) => ({ ...s, usedBy: used.get(s.name) ?? [] })),
+      };
+    }],
+    ['GET', '/api/skills/catalog', async () => {
+      if (!catalog || Date.now() - catalog.at > 3_600_000) {
+        catalog = { at: Date.now(), data: scanGithub(ANTHROPIC_SKILLS) };
+        catalog.data.catch(() => (catalog = undefined));
+      }
+      const installed = new Set(listSkills().map((s) => s.name));
+      const data = await catalog.data;
+      return { source: ANTHROPIC_SKILLS, commit: data.commit, skills: data.skills.map((s) => ({ ...s, installed: installed.has(s.name) })) };
+    }],
+    ['POST', '/api/skills/github/scan', async (_p, body) => {
+      const r = await scanGithub(str(body, 'url'));
+      return { repo: `${r.ref.owner}/${r.ref.repo}`, commit: r.commit, skills: r.skills };
+    }],
+    ['POST', '/api/skills/github/install', async (_p, body) => {
+      const paths = (body as { paths?: unknown }).paths;
+      if (!Array.isArray(paths) || !paths.every((x) => typeof x === 'string')) throw new BadRequest('"paths" must list the skill folders to install');
+      return installGithub(str(body, 'url'), paths as string[]);
+    }],
+    ['POST', '/api/skills', (_p, body) => createSkill({ name: str(body, 'name'), description: str(body, 'description'), body: str(body, 'body', true) })],
+    ['GET', '/api/skills/:name', (p) => {
+      const detail = getSkill(p.name!);
+      return { ...detail, skill: { ...detail.skill, usedBy: skillUsage().get(p.name!) ?? [] }, skillMd: readSkillFile(p.name!, 'SKILL.md') };
+    }],
+    ['GET', '/api/skills/:name/file', (p, _b, q) => ({ content: readSkillFile(p.name!, q.get('path') ?? '') })],
+    ['PUT', '/api/skills/:name/file', (p, body) => (writeSkillFile(p.name!, str(body, 'path'), str(body, 'content', true)), getSkill(p.name!))],
+    ['PUT', '/api/skills/:name/everyone', (p, body) => setEveryone(p.name!, !!(body as { everyone?: unknown }).everyone)],
+    ['POST', '/api/skills/:name/update', (p) => updateSkill(p.name!)],
+    ['DELETE', '/api/skills/:name', (p) => (deleteSkill(p.name!), { ok: true })],
+    ['POST', '/api/skills/:name/describe', (p, body) => {
+      // Rewrite the frontmatter from the form, keeping the body.
+      const current = readSkillFile(p.name!, 'SKILL.md');
+      const bodyText = current.replace(/^---[\s\S]*?---\r?\n?/, '');
+      writeSkillFile(p.name!, 'SKILL.md', skillMd(p.name!, str(body, 'description'), typeof (body as { body?: unknown }).body === 'string' ? String((body as { body: string }).body) : bodyText));
+      return getSkill(p.name!);
+    }],
+
+    // ---- project brain
+    ['GET', '/api/projects/:pid/brain', async (p) => {
+      const project = library.project(p.pid!);
+      await ensureBrain(project.path);
+      const store = storeFor(project);
+      const curators = library.teams().flatMap((t) => {
+        const doc = rawDoc(library.readFile(t.id, 'team.yaml')) as { brain?: { curator?: string } };
+        return doc.brain?.curator ? [{ teamId: t.id, team: t.name, curator: doc.brain.curator }] : [];
+      });
+      return { dir: brainRoot(project.path), notes: listNotes(project.path), proposals: store.proposals(), log: await brainLog(project.path), curators };
+    }],
+    ['GET', '/api/projects/:pid/brain/note', (p, _b, q) => ({ path: q.get('path'), content: readNote(library.project(p.pid!).path, q.get('path') ?? '') })],
+    ['PUT', '/api/projects/:pid/brain/note', async (p, body) => {
+      const project = library.project(p.pid!);
+      const commit = await writeNote(project.path, str(body, 'path'), str(body, 'content', true));
+      return { commit, notes: listNotes(project.path) };
+    }],
+    ['DELETE', '/api/projects/:pid/brain/note', async (p, _b, q) => {
+      const project = library.project(p.pid!);
+      await deleteNote(project.path, q.get('path') ?? '');
+      return { notes: listNotes(project.path) };
+    }],
+    ['POST', '/api/projects/:pid/brain/proposals/:id', async (p, body) => {
+      const project = library.project(p.pid!);
+      const store = storeFor(project);
+      const proposal = store.getProposal(Number(p.id));
+      if (!proposal) throw new NotFound(`proposal #${p.id} not found`);
+      const decision = (body as { decision?: unknown }).decision;
+      if (decision !== 'accept' && decision !== 'reject') throw new BadRequest('"decision" must be accept or reject');
+      const requested = (body as { notePath?: unknown }).notePath;
+      const notePath = decision === 'accept' ? await acceptIntoNote(project.path, proposal, typeof requested === 'string' && requested ? requested : undefined) : undefined;
+      const decided = store.decideProposal(proposal.id, { status: decision === 'accept' ? 'accepted' : 'rejected', by: 'you', note: typeof (body as { note?: unknown }).note === 'string' ? String((body as { note: string }).note) : undefined, notePath });
+      if (proposal.runId && store.getRun(proposal.runId)) store.append(proposal.runId, { type: 'brain.decided', agent: 'you', data: { id: decided.id, status: decided.status, note_path: notePath ?? null } });
+      return decided;
+    }],
+    ['POST', '/api/projects/:pid/brain/curate', async (p, body) => {
+      const project = library.project(p.pid!);
+      const team = library.load(str(body, 'team'));
+      if (!team.brain.curator) throw new BadRequest(`team ${team.name} has no curator (set brain.curator in Team settings)`);
+      const store = storeFor(project);
+      if (!store.proposals('pending').length) throw new BadRequest('there are no pending proposals');
+      const run = store.createRun({ id: newRunId(), kind: 'curate', team: team.name, teamFile: team.file, repo: project.path, goal: 'Review proposals for the project brain' });
+      store.append(run.id, { type: 'run.started', data: { team: team.name, goal: run.goal, kind: 'curate', steps: ['curate'] } });
+      void curate({ team, store, runner, repo: project.path, runId: run.id, buildInvocation })
+        .catch((err) => store.append(run.id, { type: 'agent.error', step: 'curate', agent: team.brain.curator, data: { ok: false, error: (err as Error).message } }))
+        .finally(() => {
+          store.finishRun(run.id, 'succeeded');
+          store.append(run.id, { type: 'run.finished', data: { status: 'succeeded', loops: 0, cost_usd: null } });
+        });
+      return { runId: run.id, projectId: project.id };
+    }],
+
+    // ---- team design chat
+    ['POST', '/api/design', async (_p, body) => {
+      const b = body as { team?: unknown; name?: unknown; template?: unknown; project?: unknown };
+      let teamId = typeof b.team === 'string' && b.team ? b.team : undefined;
+      if (!teamId) teamId = library.createTeam(typeof b.name === 'string' && b.name.trim() ? b.name : 'new-team', typeof b.template === 'string' ? b.template : 'starter').id;
+      else library.teamDir(teamId);
+      const project = typeof b.project === 'string' && b.project ? library.project(b.project) : undefined;
+      const settings = library.settings();
+      const { runId, done } = await design({ library, store: libraryStore, runner, teamId, projectPath: project?.path, message: str(body, 'message'), model: settings.designerModel, builtinSkills: async () => (await discover()).skills });
+      answering.add(`${runId}/${ARCHITECT}`);
+      void done.finally(() => answering.delete(`${runId}/${ARCHITECT}`));
+      return { runId, teamId };
+    }],
+    ['POST', '/api/design/:rid', async (p, body) => {
+      const run = libraryStore.getRun(p.rid!);
+      if (!run) throw new NotFound('conversation not found');
+      if (answering.has(`${run.id}/${ARCHITECT}`)) throw new BadRequest('the architect is still answering');
+      const settings = library.settings();
+      const { done } = await design({ library, store: libraryStore, runner, teamId: run.team, runId: run.id, message: str(body, 'message'), model: settings.designerModel, builtinSkills: async () => (await discover()).skills });
+      answering.add(`${run.id}/${ARCHITECT}`);
+      void done.finally(() => answering.delete(`${run.id}/${ARCHITECT}`));
+      return { runId: run.id, teamId: run.team };
+    }],
+    ['GET', '/api/design/:rid', (p) => {
+      const run = libraryStore.getRun(p.rid!);
+      if (!run) throw new NotFound('conversation not found');
+      const events = libraryStore.events(run.id);
+      return {
+        runId: run.id,
+        teamId: run.team,
+        busy: answering.has(`${run.id}/${ARCHITECT}`),
+        thread: chatThreads(events, run.repo ? [run.repo] : [])[ARCHITECT] ?? [],
+        saves: events.filter((e) => e.type === 'team.saved').map((e) => ({ ts: e.ts, ...e.data })),
+        costUsd: events.filter((e) => e.type === 'agent.finished' || e.type === 'agent.error').reduce((n, e) => n + Number(e.data.cost_usd ?? 0), 0),
+      };
+    }],
+    ['GET', '/api/teams/:tid/design', (p) => {
+      const latest = libraryStore.listRuns(200).find((r) => r.kind === 'design' && r.team === p.tid);
+      return { runId: latest?.id ?? null };
+    }],
     ['GET', '/api/stats', () => stats()],
     ['GET', '/api/settings', () => library.settings()],
     ['PUT', '/api/settings', (_p, body) => library.updateSettings(body as Partial<AppSettings>)],
@@ -188,7 +380,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       return cleanupWorktrees(project.path, storeFor(project), { runIds, olderThanDays });
     }],
     ['GET', '/api/projects', () => library.projects()],
-    ['POST', '/api/projects', (_p, body) => library.addProject(str(body, 'path'))],
+    ['POST', '/api/projects', (_p, body) => library.addProject(str(body, 'path'), { init: !!(body as { init?: unknown }).init })],
+    ['POST', '/api/projects/create', (_p, body) => library.createProject(str(body, 'parent'), str(body, 'name'))],
+    ['POST', '/api/projects/clone', (_p, body) => library.cloneProject(str(body, 'url'), str(body, 'parent'), typeof (body as { name?: unknown }).name === 'string' ? String((body as { name: string }).name) : undefined)],
     ['DELETE', '/api/projects/:pid', (p) => (library.removeProject(p.pid!), { ok: true })],
 
     ['GET', '/api/templates', () => library.templates()],
@@ -330,10 +524,17 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       }
       send(res, 404, { error: 'not found' });
     } catch (err) {
-      const status = err instanceof NotFound ? 404 : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError ? 400 : 500;
+      const status =
+        err instanceof NeedsGit
+          ? 409
+          : err instanceof NotFound
+            ? 404
+            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof BrainError
+              ? 400
+              : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;
       if (status === 500) console.error(err);
-      send(res, status, { error: message });
+      send(res, status, { error: message, ...(err instanceof NeedsGit ? { code: 'needs_git' } : {}) });
     }
   });
 
@@ -354,6 +555,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       // Give aborted runs a moment to record their end.
       await new Promise((r) => setTimeout(r, 200));
       for (const s of stores.values()) s.close();
+      libraryStore.close();
     },
   };
 }

@@ -4,7 +4,7 @@
 export type RunStatus = 'running' | 'succeeded' | 'failed' | 'escalated';
 
 /** A workflow run, or a read-only question session with one agent. */
-export type RunKind = 'workflow' | 'ask';
+export type RunKind = 'workflow' | 'ask' | 'curate' | 'design';
 
 export type EventType =
   | 'run.started'
@@ -29,7 +29,11 @@ export type EventType =
   | 'backend.warning'
   | 'chat.message'
   | 'usage.limit'
-  | 'workspace.cleaned';
+  | 'workspace.cleaned'
+  | 'brain.proposed'
+  | 'brain.decided'
+  | 'brain.updated'
+  | 'team.saved';
 
 export interface RunEvent {
   id: number;
@@ -67,6 +71,23 @@ export interface RunRecord {
  * fall back to queue when the agent is not working.
  */
 export type DeliveryMode = 'queue' | 'steer' | 'interrupt';
+
+export type ProposalStatus = 'pending' | 'accepted' | 'rejected';
+
+export interface BrainProposal {
+  id: number;
+  runId?: string;
+  agent: string;
+  title: string;
+  content: string;
+  reason?: string;
+  status: ProposalStatus;
+  createdAt: string;
+  decidedAt?: string;
+  decidedBy?: string;
+  decisionNote?: string;
+  notePath?: string;
+}
 
 export interface InboxMessage {
   id: number;

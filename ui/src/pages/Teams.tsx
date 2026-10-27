@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { get, post, type Template, type TeamListing } from '../api';
-import { IconAlert, IconCheck, IconPlus, IconTeam } from '../components/icons';
+import { DesignChat } from '../components/DesignChat';
+import { IconAlert, IconChat, IconCheck, IconPlus, IconTeam } from '../components/icons';
 import { Toolbar } from '../components/Toolbar';
 import { Avatar, Empty, Modal, useAction } from '../components/ui';
 import { go, href, useData, useLive } from '../data';
@@ -70,10 +71,35 @@ function TeamCard({ team }: { team: TeamListing }) {
 }
 
 export function NewTeam({ onClose }: { onClose: () => void }) {
-  const { refresh } = useData();
+  const { refresh, overview } = useData();
   const { value: templates } = useLive(() => get<Template[]>('/api/templates'), []);
   const [template, setTemplate] = useState('feature-team');
   const [name, setName] = useState('');
+  const [chat, setChat] = useState(false);
+  const [project, setProject] = useState('');
+  if (chat)
+    return (
+      <Modal title="Design a team with chat" onClose={() => (void refresh(), onClose())} wide>
+        <div className="row">
+          <label className="field grow">
+            Name
+            <input className="input" value={name} placeholder="e.g. web-app team" onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label className="field grow">
+            For project (lets Claude look at the code)
+            <select className="input" value={project} onChange={(e) => setProject(e.target.value)}>
+              <option value="">No project</option>
+              {overview?.projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <DesignChat key={project} projectId={project || undefined} name={name || 'new-team'} height={440} onTeam={() => void refresh()} />
+      </Modal>
+    );
   const [create, busy] = useAction(async () => {
     const t = await post<TeamListing>('/api/teams', { name: name || template, template });
     await refresh();
@@ -104,9 +130,16 @@ export function NewTeam({ onClose }: { onClose: () => void }) {
         Name
         <input className="input" autoFocus value={name} placeholder="e.g. web-app team" onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void create()} />
       </label>
+      <button className="template" style={{ textAlign: 'left', font: 'inherit', background: 'var(--accent-soft)', borderColor: 'var(--accent)' }} onClick={() => setChat(true)}>
+        <IconChat width={18} height={18} style={{ color: 'var(--accent)', flex: 'none' }} />
+        <div className="col" style={{ gap: 2 }}>
+          <strong>Design it with chat</strong>
+          <span className="small muted">Describe the team you need; Claude sets it up and you refine it by talking.</span>
+        </div>
+      </button>
       <div className="col">
         <span className="small muted" style={{ fontWeight: 500 }}>
-          Start from
+          Or start from a template
         </span>
         {(templates ?? []).map((t) => (
           <div key={t.id} className={`template ${template === t.id ? 'on' : ''}`} onClick={() => setTemplate(t.id)}>

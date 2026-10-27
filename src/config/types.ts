@@ -50,6 +50,13 @@ export interface AgentConfig {
   writes: boolean;
   /** Set when the agent has Bash and sandboxing is on. */
   sandbox?: SandboxConfig;
+  /** Skill names (team defaults plus the agent's own). */
+  skills: string[];
+}
+
+export interface BrainConfig {
+  curator?: string;
+  curate: 'after_run' | 'manual';
 }
 
 export interface GateFailPolicy {
@@ -96,6 +103,7 @@ export interface TeamConfig {
   settingSources: SettingSource[];
   agents: Record<string, AgentConfig>;
   steps: Step[];
+  brain: BrainConfig;
 }
 
 export type JsonSchema = Record<string, unknown>;

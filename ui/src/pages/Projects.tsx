@@ -3,7 +3,7 @@ import { del, desktop, get, post } from '../api';
 import { IconFolder, IconPlus, IconTrash } from '../components/icons';
 import { Toolbar } from '../components/Toolbar';
 import { Empty, Modal, RunStatusPill, useAction, useToast } from '../components/ui';
-import { useData, useLive } from '../data';
+import { go, openNewProject, useData, useLive } from '../data';
 import { ago, money } from '../format';
 
 interface WorktreeInfo {
@@ -37,12 +37,7 @@ export function Projects() {
     await refresh();
   });
 
-  const pick = async () => {
-    if (desktop) {
-      const p = await desktop.pickFolder();
-      if (p) await add(p);
-    } else setTyping(true);
-  };
+  const pick = () => openNewProject();
 
   const projects = overview?.projects ?? [];
   const runsFor = (id: string) => overview?.runs.filter((r) => r.projectId === id) ?? [];
@@ -51,7 +46,7 @@ export function Projects() {
     <>
       <Toolbar title="Projects" sub="Git repositories your teams work on">
         <button className="btn primary" onClick={() => void pick()} disabled={adding}>
-          <IconPlus /> Add project
+          <IconPlus /> New project
         </button>
       </Toolbar>
       <div className="content">
@@ -62,7 +57,7 @@ export function Projects() {
                 {projects.map((p) => {
                   const runs = runsFor(p.id);
                   return (
-                    <div key={p.id} className="list-row">
+                    <div key={p.id} className="list-row clickable" onClick={(e) => !(e.target as HTMLElement).closest('button') && go('projects', p.id)}>
                       <IconFolder width={20} height={20} style={{ color: 'var(--accent)', flex: 'none' }} />
                       <div className="grow col" style={{ gap: 2 }}>
                         <strong>{p.name}</strong>

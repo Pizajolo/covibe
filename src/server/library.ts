@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
@@ -24,6 +25,7 @@ interface LibraryConfig {
 
 export type { EditOp, Project, TeamFileInfo, TeamListing };
 
+const execAsync = promisify(execFile);
 const TEMPLATES_DIR = new URL('../../examples/', import.meta.url).pathname;
 const TEAM_FILE = 'team.yaml';
 
@@ -77,14 +79,25 @@ export class Library {
     return p;
   }
 
-  addProject(path: string): Project {
+  /**
+   * Add an existing folder. covibe needs git with at least one commit (each
+   * run branches off it); with `init`, a plain folder gets `git init` and a
+   * first commit of what is in it.
+   */
+  addProject(path: string, opts: { init?: boolean } = {}): Project {
     const dir = resolve(path.replace(/^~(?=$|\/)/, homedir()));
     if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new BadRequest(`${dir} is not a folder`);
     let top: string;
     try {
       top = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     } catch {
-      throw new BadRequest(`${dir} is not a git repository. Run "git init" and make a first commit, then add it again.`);
+      if (!opts.init) throw new NeedsGit(`${dir} is not a git repository yet.`);
+      initRepo(dir);
+      top = dir;
+    }
+    if (!hasCommit(top)) {
+      if (!opts.init) throw new NeedsGit(`${top} has no commits yet.`);
+      initRepo(top);
     }
     const config = this.read();
     const existing = config.projects.find((p) => p.path === top);
@@ -93,6 +106,41 @@ export class Library {
     config.projects.push(project);
     this.write(config);
     return project;
+  }
+
+  /** A new, empty project folder with a README and a first commit. */
+  createProject(parent: string, name: string): Project {
+    const folder = name.trim().replace(/[/\\]/g, '-');
+    if (!folder || folder.startsWith('.')) throw new BadRequest('give the project a name');
+    const dir = join(resolve(parent.replace(/^~(?=$|\/)/, homedir())), folder);
+    if (existsSync(dir) && readdirSync(dir).length) throw new BadRequest(`${dir} already exists and is not empty`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'README.md'), `# ${folder}\n`);
+    initRepo(dir);
+    return this.addProject(dir);
+  }
+
+  /** Clone a repository into `parent` and add it. */
+  async cloneProject(url: string, parent: string, name?: string): Promise<Project> {
+    if (!/^(https?:\/\/|git@|ssh:\/\/|file:\/\/)[^\s]+$/.test(url.trim())) throw new BadRequest('enter a git URL, e.g. https://github.com/owner/repo');
+    const base = resolve(parent.replace(/^~(?=$|\/)/, homedir()));
+    const folder = (name?.trim() || url.trim().replace(/\.git$/, '').split(/[/:]/).pop() || 'repo').replace(/[/\\]/g, '-');
+    const dir = join(base, folder);
+    if (existsSync(dir) && readdirSync(dir).length) throw new BadRequest(`${dir} already exists and is not empty`);
+    mkdirSync(base, { recursive: true });
+    try {
+      await execAsync('git', ['clone', '-q', url.trim(), dir], { timeout: 15 * 60_000, maxBuffer: 16 << 20, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+    } catch (err) {
+      const e = err as { stderr?: string; message: string };
+      throw new BadRequest(`Could not clone: ${(e.stderr || e.message).trim().split('\n').pop()}`);
+    }
+    return this.addProject(dir, { init: true });
+  }
+
+  /** Where new projects go by default. */
+  defaultParent(): string {
+    for (const d of ['Developer', 'Projects', 'Code', 'code', 'src']) if (existsSync(join(homedir(), d))) return join(homedir(), d);
+    return join(homedir(), 'Projects');
   }
 
   removeProject(id: string) {
@@ -332,5 +380,29 @@ function slug(s: string) {
   return out && !/^[a-z]/.test(out) ? `team-${out}` : out;
 }
 
+function hasCommit(dir: string): boolean {
+  try {
+    execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: dir, stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Written before the first commit of a folder that has none, so secrets and
+// dependency or build folders do not end up in history.
+const DEFAULT_GITIGNORE = ['node_modules/', '.env', '.env.*', '!.env.example', 'dist/', 'build/', '.next/', 'out/', 'target/', '.venv/', 'venv/', '__pycache__/', '*.pyc', '.DS_Store', '*.log', '.idea/', '.vscode/', ''].join('\n');
+
+function initRepo(dir: string) {
+  const env = { ...process.env, GIT_AUTHOR_NAME: 'covibe', GIT_AUTHOR_EMAIL: 'covibe@localhost', GIT_COMMITTER_NAME: 'covibe', GIT_COMMITTER_EMAIL: 'covibe@localhost' };
+  const run = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore', env });
+  if (!existsSync(join(dir, '.git'))) run('init', '-q', '-b', 'main');
+  if (!existsSync(join(dir, '.gitignore'))) writeFileSync(join(dir, '.gitignore'), DEFAULT_GITIGNORE);
+  run('add', '-A');
+  run('commit', '-q', '--allow-empty', '-m', 'Initial commit');
+}
+
+/** The folder is fine but needs git first; the UI offers to set it up. */
+export class NeedsGit extends Error {}
 export class NotFound extends Error {}
 export class BadRequest extends Error {}

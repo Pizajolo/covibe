@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import { desktop } from './api';
 import { Composer } from './components/Composer';
-import { IconFolder, IconGear, IconHome, IconPlus, IconRuns, IconTeam } from './components/icons';
+import { IconFolder, IconGear, IconHome, IconPlus, IconRuns, IconSparkle, IconTeam } from './components/icons';
+import { ProjectPage } from './pages/ProjectPage';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { NewProjectWizard } from './components/NewProjectWizard';
 import { Modal } from './components/ui';
 import { go, href, useData, useRoute } from './data';
 import { Home } from './pages/Home';
@@ -9,6 +12,7 @@ import { Projects } from './pages/Projects';
 import { RunView } from './pages/RunView';
 import { Runs } from './pages/Runs';
 import { Settings } from './pages/Settings';
+import { Skills } from './pages/Skills';
 import { TeamEditor } from './pages/TeamEditor';
 import { Teams } from './pages/Teams';
 
@@ -18,6 +22,12 @@ export function App() {
   const route = useRoute();
   const { overview, connected, error } = useData();
   const [composer, setComposer] = useState(false);
+  const [wizard, setWizard] = useState(false);
+  useEffect(() => {
+    const open = () => setWizard(true);
+    window.addEventListener('covibe:new-project', open);
+    return () => window.removeEventListener('covibe:new-project', open);
+  }, []);
   const section = route[0] ?? '';
   const running = overview?.runs.filter((r) => r.status === 'running') ?? [];
 
@@ -37,7 +47,9 @@ export function App() {
   else if (section === 'runs') page = <Runs />;
   else if (section === 'teams' && route[1]) page = <TeamEditor teamId={route[1]} tab={route[2]} />;
   else if (section === 'teams') page = <Teams />;
+  else if (section === 'projects' && route[1]) page = <ProjectPage projectId={route[1]} tab={route[2]} />;
   else if (section === 'projects') page = <Projects />;
+  else if (section === 'skills') page = <Skills tab={route[1]} name={route[2]} />;
   else if (section === 'settings') page = <Settings />;
   else page = <Home onNewGoal={() => setComposer(true)} />;
 
@@ -64,6 +76,7 @@ export function App() {
         {nav('runs', 'Runs', <IconRuns />, running.length ? <span className="count">{running.length} live</span> : null)}
         {nav('teams', 'Teams', <IconTeam />, <span className="count">{overview?.teams.length ?? ''}</span>)}
         {nav('projects', 'Projects', <IconFolder />, <span className="count">{overview?.projects.length ?? ''}</span>)}
+        {nav('skills', 'Skills', <IconSparkle />)}
         {nav('settings', 'Settings', <IconGear />)}
 
         {running.length > 0 && (
@@ -82,7 +95,10 @@ export function App() {
           {error ? 'Cannot reach covibe' : connected ? 'Live' : 'Connecting…'}
         </div>
       </aside>
-      <main className="main">{page}</main>
+      <main className="main">
+        <ErrorBoundary resetKey={route.join('/')}>{page}</ErrorBoundary>
+      </main>
+      {wizard && <NewProjectWizard onClose={() => setWizard(false)} />}
       {composer && (
         <Modal title="What should the team do?" onClose={() => setComposer(false)} wide>
           <div className="card" style={{ boxShadow: 'none' }}>
@@ -90,7 +106,7 @@ export function App() {
           </div>
           {!overview?.projects.length && (
             <p className="small muted">
-              First <a onClick={() => (setComposer(false), go('projects'))}>add a project</a> (a git repository on this Mac).
+              First <a onClick={() => (setComposer(false), setWizard(true))}>set up a project</a>.
             </p>
           )}
         </Modal>

@@ -37,6 +37,8 @@ export type EditOp =
 export interface AppSettings {
   /** Remove worktrees of runs finished this many days ago; null = never automatically. */
   autoCleanDays: number | null;
+  /** Model the team architect uses in design chats. */
+  designerModel?: string;
 }
 
 export interface Overview {
@@ -46,6 +48,8 @@ export interface Overview {
   stats: Stats;
   /** Library folder (teams, settings). */
   home: string;
+  /** Where new projects go by default. */
+  defaultParent: string;
 }
 
 export interface Template {

@@ -28,6 +28,12 @@ export interface AgentInvocation {
   onEvent(event: AgentStreamEvent): void;
   /** OS sandbox for shell commands; absent = unsandboxed. */
   sandbox?: SandboxConfig;
+  /** Extra folders the agent may read with its file tools (e.g. the project brain). */
+  readDirs?: string[];
+  /** Skills the agent may use (SDK names, e.g. "covibe:pdf" or a built-in "dataviz"), and the plugin folders that hold them. */
+  skills?: { names: string[]; pluginDirs: string[] };
+  /** Tools covibe provides to this agent (proposing to the brain, editing a team…). */
+  customTools?: CustomTool[];
   /**
    * Called with a control handle once the agent is working, and with null when
    * it can no longer take messages (its turn is over).
@@ -41,6 +47,25 @@ export interface AgentInvocation {
  * new one with the message.
  */
 export type LivePriority = 'next' | 'now';
+
+export type CustomParam =
+  | { type: 'string' | 'number' | 'boolean'; description: string; optional?: boolean; enum?: string[] }
+  | { type: 'files'; description: string; optional?: boolean };
+
+/** A tool covibe implements in-process and offers to an agent. */
+export interface CustomTool {
+  name: string;
+  description: string;
+  params: Record<string, CustomParam>;
+  /** Returns the text the agent sees. Throwing reports the error to the agent. */
+  run(args: Record<string, unknown>): Promise<string> | string;
+}
+
+/** What Claude Code offers on this machine, read without running a turn. */
+export interface EnvironmentInfo {
+  skills: { name: string; description: string }[];
+  account?: { email?: string; organization?: string; subscriptionType?: string; apiProvider?: string };
+}
 
 export interface AgentControl {
   /** Returns false when the agent can no longer take messages; deliver at its next turn instead. */
@@ -91,4 +116,6 @@ export interface AgentResult {
  */
 export interface AgentRunner {
   run(invocation: AgentInvocation): Promise<AgentResult>;
+  /** Built-in skills and account details (optional; the SDK runner implements it). */
+  discover?(env: Env): Promise<EnvironmentInfo>;
 }

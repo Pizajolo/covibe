@@ -12,10 +12,12 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type { AgentInvocation, AgentResult, AgentRunner, LivePriority, TokenUsage } from './types.js';
+import type { Env } from './backend.js';
+import type { AgentInvocation, AgentResult, AgentRunner, CustomTool, EnvironmentInfo, LivePriority, TokenUsage } from './types.js';
 
 const TEAM_SERVER = 'team';
 const SEND_MESSAGE_TOOL = `mcp__${TEAM_SERVER}__send_message`;
+const COVIBE_SERVER = 'covibe';
 /** After a turn ends with messages still unread, how long to wait for the turn that reads them. */
 const FOLLOW_UP_WAIT_MS = 30_000;
 
@@ -52,6 +54,10 @@ class Input implements AsyncIterable<SDKUserMessage> {
 }
 
 export class ClaudeSdkRunner implements AgentRunner {
+  discover(env: Env): Promise<EnvironmentInfo> {
+    return discoverEnvironment(env);
+  }
+
   async run(inv: AgentInvocation): Promise<AgentResult> {
     const started = Date.now();
     const abortController = new AbortController();
@@ -68,16 +74,27 @@ export class ClaudeSdkRunner implements AgentRunner {
       };
     };
 
+    const custom = inv.customTools ?? [];
+    const mcpServers: Options['mcpServers'] = {};
+    if (inv.canMessage.length) mcpServers[TEAM_SERVER] = teamServer(inv);
+    if (custom.length) mcpServers[COVIBE_SERVER] = customServer(custom);
+    const skillNames = inv.skills?.names ?? [];
+    const tools = skillNames.length ? [...inv.tools, 'Skill'] : inv.tools;
+
     const options: Options = {
       cwd: inv.cwd,
+      additionalDirectories: inv.readDirs,
+      plugins: inv.skills?.pluginDirs.map((path) => ({ type: 'local' as const, path, skipMcpDiscovery: true })),
+      // Only the listed skills are visible to this agent.
+      skills: skillNames.length ? skillNames : undefined,
       env: inv.env,
       model: inv.model,
       abortController,
       resume: inv.resumeSessionId,
       // Built-in tools are limited to the agent's list and pre-approved; anything
       // else is denied without prompting, since nobody is at the terminal.
-      tools: inv.tools,
-      allowedTools: [...inv.tools, ...(inv.canMessage.length ? [SEND_MESSAGE_TOOL] : [])],
+      tools,
+      allowedTools: [...tools, ...(inv.canMessage.length ? [SEND_MESSAGE_TOOL] : []), ...custom.map((t) => `mcp__${COVIBE_SERVER}__${t.name}`)],
       permissionMode: 'dontAsk',
       systemPrompt: { type: 'preset', preset: 'claude_code', append: inv.systemPrompt },
       settingSources: inv.settingSources,
@@ -85,7 +102,7 @@ export class ClaudeSdkRunner implements AgentRunner {
       maxBudgetUsd: inv.maxBudgetUsd,
       hooks: { PreToolUse: [{ hooks: [preToolUse] }] },
       outputFormat: inv.outputSchema ? { type: 'json_schema', schema: inv.outputSchema } : undefined,
-      mcpServers: inv.canMessage.length ? { [TEAM_SERVER]: teamServer(inv) } : undefined,
+      mcpServers: Object.keys(mcpServers).length ? mcpServers : undefined,
       // Shell commands run in the OS sandbox: writes stay in the working folder,
       // temp and the allowed caches; network only to listed domains; no escape hatch.
       sandbox: inv.sandbox
@@ -170,6 +187,31 @@ export class ClaudeSdkRunner implements AgentRunner {
   }
 }
 
+/**
+ * Read Claude Code's built-in skills and the signed-in account. The init
+ * message arrives before any model call, and the session is closed right
+ * then, so this costs nothing.
+ */
+export async function discoverEnvironment(env: Env): Promise<EnvironmentInfo> {
+  const q = query({ prompt: 'hi', options: { cwd: process.cwd(), env, settingSources: [], tools: ['Skill'], permissionMode: 'dontAsk', maxTurns: 1 } });
+  const timer = setTimeout(() => q.close(), 30_000);
+  try {
+    const [account, commands] = await Promise.all([q.accountInfo().catch(() => undefined), q.supportedCommands().catch(() => [])]);
+    let names: string[] = [];
+    for await (const msg of q as AsyncIterable<SDKMessage>) {
+      if (msg.type === 'system' && msg.subtype === 'init') {
+        names = (msg as { skills?: string[] }).skills ?? [];
+        break;
+      }
+    }
+    const describe = new Map(commands.map((c) => [c.name, c.description]));
+    return { skills: names.map((name) => ({ name, description: describe.get(name) ?? '' })), account };
+  } finally {
+    clearTimeout(timer);
+    q.close();
+  }
+}
+
 function tokensOf(msg: SDKResultMessage): TokenUsage {
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   for (const u of Object.values(msg.modelUsage ?? {})) {
@@ -195,5 +237,39 @@ function teamServer(inv: AgentInvocation) {
         async ({ to, text }) => ({ content: [{ type: 'text', text: inv.sendMessage(to, text) }] }),
       ),
     ],
+  });
+}
+
+/** In-process MCP server for the tools covibe offers an agent. */
+function customServer(tools: CustomTool[]) {
+  const shape = (t: CustomTool) =>
+    Object.fromEntries(
+      Object.entries(t.params).map(([k, p]) => {
+        let schema: z.ZodTypeAny =
+          p.type === 'files'
+            ? z.array(z.object({ path: z.string(), content: z.string() }))
+            : p.type === 'number'
+              ? z.number()
+              : p.type === 'boolean'
+                ? z.boolean()
+                : p.enum
+                  ? z.enum(p.enum as [string, ...string[]])
+                  : z.string();
+        schema = schema.describe(p.description);
+        return [k, p.optional ? schema.optional() : schema];
+      }),
+    );
+  return createSdkMcpServer({
+    name: COVIBE_SERVER,
+    version: '1.0.0',
+    tools: tools.map((t) =>
+      tool(t.name, t.description, shape(t), async (args: Record<string, unknown>) => {
+        try {
+          return { content: [{ type: 'text', text: await t.run(args) }] };
+        } catch (err) {
+          return { content: [{ type: 'text', text: `Error: ${(err as Error).message}` }], isError: true };
+        }
+      }),
+    ),
   });
 }

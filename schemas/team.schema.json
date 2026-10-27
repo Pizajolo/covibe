@@ -39,6 +39,24 @@
     },
     "workflow": {
       "$ref": "#/$defs/workflow"
+    },
+    "brain": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The project brain: shared notes every member reads. Members propose additions; only the curator writes.",
+      "properties": {
+        "curator": {
+          "$ref": "#/$defs/identifier",
+          "description": "The member who reviews proposals and maintains the notes."
+        },
+        "curate": {
+          "enum": [
+            "after_run",
+            "manual"
+          ],
+          "description": "after_run (default): the curator reviews new proposals when a run ends. manual: only when you ask."
+        }
+      }
     }
   },
   "$defs": {
@@ -167,6 +185,15 @@
         },
         "sandbox": {
           "$ref": "#/$defs/sandbox"
+        },
+        "skills": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9:_-]{0,127}$"
+          },
+          "description": "Skills by name: from your covibe skill library, or ones Claude Code already has (built-in or in the project's .claude/skills)."
         }
       }
     },
@@ -231,6 +258,15 @@
         },
         "sandbox": {
           "$ref": "#/$defs/sandbox"
+        },
+        "skills": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9:_-]{0,127}$"
+          },
+          "description": "Skills by name: from your covibe skill library, or ones Claude Code already has (built-in or in the project's .claude/skills)."
         }
       }
     },

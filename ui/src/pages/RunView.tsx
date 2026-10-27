@@ -310,6 +310,10 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'chat.message': return { cls: '', text: `You: ${d.text}` };
     case 'backend.warning': return { cls: 'warn', text: String(d.message) };
     case 'usage.limit': return null; // shown as plan usage on Home
+    case 'brain.proposed': return { cls: '', text: `Proposed a brain note #${d.id}: ${d.title}` };
+    case 'brain.decided': return { cls: d.status === 'accepted' ? 'good' : '', text: `Brain proposal #${d.id} ${d.status}${d.note_path ? ` into ${d.note_path}` : ''}${d.note ? `: ${d.note}` : ''}` };
+    case 'brain.updated': return { cls: 'good', text: `Updated the project brain (${String(d.commit).slice(0, 7)})` };
+    case 'workspace.cleaned': return { cls: '', text: `Worktrees removed (${(Number(d.freed_kb) / 1024).toFixed(1)} MB freed)` };
     default: return { cls: '', text: JSON.stringify(d) };
   }
 }

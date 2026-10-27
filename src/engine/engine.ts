@@ -4,7 +4,10 @@ import type { AgentConfig, Branch, JsonSchema, Step, TeamConfig } from '../confi
 import type { EventStore } from '../events/store.js';
 import type { NewEvent, RunStatus } from '../events/types.js';
 import { backendEnv, BackendError, type Env } from '../runner/backend.js';
-import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent } from '../runner/types.js';
+import { brainRoot } from '../home.js';
+import { resolveSkills } from '../skills.js';
+import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent, CustomTool } from '../runner/types.js';
+import { brainPrompt, commitBrain, curate, ensureBrain, proposeTool } from './brain.js';
 import { evaluate, evaluateGate } from './expr.js';
 import { systemPrompt, turnPrompt } from './prompts.js';
 import { makeToolChecker } from './scope.js';
@@ -114,6 +117,8 @@ class Engine {
 
   async run(): Promise<RunOutcome> {
     const { steps } = this.team;
+    // The brain must exist before members are pointed at it.
+    await ensureBrain(this.workspace.repo).catch(() => undefined);
     this.emit({
       type: 'run.started',
       data: {
@@ -168,6 +173,16 @@ class Engine {
     } catch (err) {
       status = 'failed';
       reason = this.opts.signal?.aborted ? 'aborted' : (err as Error).message;
+    }
+
+    // Members' proposals from this run (and earlier ones) go to the curator.
+    const { curator, curate: when } = this.team.brain;
+    if (curator && when === 'after_run' && !this.opts.signal?.aborted && this.store.proposals('pending').length) {
+      try {
+        await curate({ team: this.team, store: this.store, runner: this.opts.runner, repo: this.workspace.repo, runId: this.runId, buildInvocation, env: this.opts.env, signal: this.opts.signal });
+      } catch (err) {
+        this.emit({ type: 'agent.error', step: 'curate', agent: curator, data: { ok: false, error: (err as Error).message } });
+      }
     }
 
     this.store.finishRun(this.runId, status);
@@ -255,6 +270,10 @@ class Engine {
       }
       this.emit({ ...base, type: 'agent.finished', data: finished });
 
+      if (this.team.brain.curator === agent.name) {
+        const commit = await commitBrain(this.workspace.repo, `${agent.name} during ${step.id}`, agent.name);
+        if (commit) this.emit({ ...base, type: 'brain.updated', data: { commit } });
+      }
       if (agent.writes) {
         const c = await this.workspace.collect(agent.name, agent.writeScope, `${step.id}: ${agent.name} (round ${this.context.loop})`);
         if (c.reverted.length) this.emit({ ...base, type: 'scope.violation', data: { files: c.reverted, scope: agent.writeScope ?? null } });
@@ -277,6 +296,7 @@ class Engine {
       ...p,
       root: this.team.isolation === 'none' ? this.workspace.repo : p.cwd,
       signal,
+      repo: this.workspace.repo,
     });
     // Stop live delivery even if a runner forgets to signal the end of its turn.
     return this.opts.runner.run(inv).finally(() => inv.onControl?.(null));
@@ -307,15 +327,36 @@ export function buildInvocation(
   store: EventStore,
   runId: string,
   agent: AgentConfig,
-  p: { cwd: string; root: string; prompt: string; resume?: string; env: Env; outputSchema?: JsonSchema; step: string; signal: AbortSignal },
+  p: {
+    cwd: string;
+    root: string;
+    prompt: string;
+    resume?: string;
+    env: Env;
+    outputSchema?: JsonSchema;
+    step: string;
+    signal: AbortSignal;
+    /** The project, for its brain. */
+    repo?: string;
+    extraTools?: CustomTool[];
+    /** A curation pass (the curator edits the brain and decides proposals). */
+    curating?: boolean;
+  },
 ): AgentInvocation {
   const base = { step: p.step, agent: agent.name };
   const emit = (e: NewEvent) => store.append(runId, e);
   let stopLive: (() => void) | undefined;
+  const brain = p.repo ? brainRoot(p.repo) : undefined;
+  const isCurator = !!brain && team.brain.curator === agent.name;
+  const tools: CustomTool[] = [...(brain && !isCurator && !p.curating ? [proposeTool(store, runId, agent.name, p.step)] : []), ...(p.extraTools ?? [])];
+  const sandbox = agent.sandbox && isCurator ? { ...agent.sandbox, allowWrite: [...agent.sandbox.allowWrite, brain!] } : agent.sandbox;
   return {
     agentName: agent.name,
     prompt: p.prompt,
-    systemPrompt: systemPrompt(team, agent),
+    systemPrompt: [systemPrompt(team, agent), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
+    readDirs: brain && !p.curating ? [brain] : undefined,
+    skills: resolveSkills(agent.skills),
+    customTools: tools.length ? tools : undefined,
     cwd: p.cwd,
     resumeSessionId: p.resume,
     model: agent.model,
@@ -327,14 +368,14 @@ export function buildInvocation(
     settingSources: team.settingSources,
     signal: p.signal,
     canMessage: agent.canMessage,
-    checkToolUse: makeToolChecker({ root: p.root, cwd: p.cwd, writeScope: agent.writes ? agent.writeScope : [] }),
+    checkToolUse: makeToolChecker({ root: p.root, cwd: p.cwd, writeScope: agent.writes ? agent.writeScope : [], extraRoots: isCurator && brain ? [brain] : undefined }),
     sendMessage: (to, text) => {
       if (!agent.canMessage.includes(to)) return `You cannot message ${to}.`;
       const m = store.enqueue(runId, to, agent.name, text, 'steer');
       emit({ ...base, type: 'message.queued', data: { id: m.id, to, text, mode: 'steer' } });
       return `Sent to ${to}. If ${to} is working it reads it between its tool calls; otherwise at the start of its next turn.`;
     },
-    sandbox: agent.sandbox,
+    sandbox,
     // While the agent works, hand it steer/interrupt messages from its inbox.
     // Polling the store (not an in-memory hook) also reaches runs started by
     // another process, such as the CLI.
@@ -355,12 +396,18 @@ export function buildInvocation(
       const timer = setInterval(deliver, 500);
       stopLive = () => clearInterval(timer);
     },
-    onEvent: (e: AgentStreamEvent) => {
-      if (e.kind === 'text') emit({ ...base, type: 'agent.text', data: { text: clip(e.text, 4000) } });
-      else if (e.kind === 'tool') emit({ ...base, type: 'agent.tool', data: { tool: e.tool, input: summarize(e.input) } });
-      else if (e.kind === 'denied') emit({ ...base, type: 'scope.denied', data: { tool: e.tool, input: summarize(e.input), reason: e.reason } });
-      else if (e.kind === 'rate_limit') emit({ ...base, type: 'usage.limit', data: { ...e.info } });
-    },
+    onEvent: eventSink(store, runId, base),
+  };
+}
+
+/** Turn an agent's stream into stored events (text, tool calls, denials, plan usage). */
+export function eventSink(store: EventStore, runId: string, base: { step?: string; agent?: string }) {
+  const emit = (e: NewEvent) => store.append(runId, e);
+  return (e: AgentStreamEvent) => {
+    if (e.kind === 'text') emit({ ...base, type: 'agent.text', data: { text: clip(e.text, 4000) } });
+    else if (e.kind === 'tool') emit({ ...base, type: 'agent.tool', data: { tool: e.tool, input: summarize(e.input) } });
+    else if (e.kind === 'denied') emit({ ...base, type: 'scope.denied', data: { tool: e.tool, input: summarize(e.input), reason: e.reason } });
+    else if (e.kind === 'rate_limit') emit({ ...base, type: 'usage.limit', data: { ...e.info } });
   };
 }
 

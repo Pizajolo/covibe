@@ -4,7 +4,7 @@ import { IconBolt, IconCheck, IconCoin, IconFolder, IconGauge, IconInfo, IconPlu
 import { RunCard, RunRow } from '../components/RunCard';
 import { Toolbar } from '../components/Toolbar';
 import { Empty } from '../components/ui';
-import { href, useData } from '../data';
+import { href, openNewProject, useData } from '../data';
 import { dayLabel, greeting, money, tokens, utilization, WINDOW_LABELS } from '../format';
 
 export function Home({ onNewGoal }: { onNewGoal: () => void }) {
@@ -209,20 +209,25 @@ function Tile({ icon, label, value, foot }: { icon: React.ReactNode; label: stri
 function Onboarding({ hasProject, hasTeam }: { hasProject: boolean; hasTeam: boolean }) {
   return (
     <div className="col" style={{ gap: 10 }}>
-      <h2>Get set up in three steps</h2>
+      <div className="row">
+        <h2 className="grow">Get set up in three steps</h2>
+        <button className="btn primary" onClick={openNewProject}>
+          <IconPlus /> Set up a project
+        </button>
+      </div>
       <div className="steps-onboard">
         <div className={`card onboard-step ${hasProject ? 'done' : ''}`}>
           <span className="n">{hasProject ? '✓' : 1}</span>
           <h3>Add a project</h3>
-          <p className="small muted">Pick a git repository on this Mac. Your checkout is never changed; each run works on its own branch.</p>
-          <a className="btn" href={href('projects')}>
+          <p className="small muted">Open a folder on this Mac, clone a repository, or start from scratch. Your checkout is never changed; each run works on its own branch.</p>
+          <button className="btn" onClick={openNewProject}>
             <IconFolder /> Add project
-          </a>
+          </button>
         </div>
         <div className={`card onboard-step ${hasTeam ? 'done' : ''}`}>
           <span className="n">{hasTeam ? '✓' : 2}</span>
           <h3>Create a team</h3>
-          <p className="small muted">Start from a template (feature team, builder + reviewer, or a single assistant) and adjust the members.</p>
+          <p className="small muted">Start from a template, or describe what you need and let Claude design the team for your project.</p>
           <a className="btn" href={href('teams')}>
             <IconTeam /> Create team
           </a>

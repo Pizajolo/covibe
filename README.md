@@ -34,6 +34,18 @@ The app is not code-signed. The first time, right-click covibe in Applications a
 
 To try the UI in a browser instead, run `covibe app`.
 
+### Getting started in the app
+
+**New project** walks you through three steps:
+
+1. **Where is the code?** Open a folder on your Mac, clone a repository (GitHub or any git URL), or start from
+   scratch. A folder without git can be set up for you: covibe runs `git init` and makes a first commit, leaving
+   out `node_modules`, `.env` files and build folders.
+2. **Who works on it?** Use a team you have, start from a template, or **design it with chat**.
+3. **What should they do first?** Give the first goal and watch the team start.
+
+![New project](docs/screenshots/new-project.png)
+
 ### What you can do
 
 | Screen | What it shows and does |
@@ -43,7 +55,10 @@ To try the UI in a browser instead, run `covibe app`.
 | **Chat** | While a member is working, choose **Now** (it reads your message between tool calls and adjusts), **Stop and redirect** (it ends its current turn and answers you first) or **Next turn**. After the run, the member resumes its session and answers right away; anything it changes is scope-checked and merged into the run's branch. |
 | **Ask a question** | A read-only session with one member in your project: it can read the code but not change it. Follow-up questions continue the same session. |
 | **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, report format, connection, limits), **Workflow** (a drag-and-drop graph: drag steps to reorder, drag members onto a step or between steps, drag a gate's ↺ handle onto an earlier step to set where failed work goes back; plus forms for gates and the fix loop), **Team settings** (connection, sandbox, limits), **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
-| **Projects** | The git repositories your teams work on, added with the folder picker, with the disk space their run worktrees use and a **Clean up** dialog. A finished run also has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
+| **Team chat** | Describe the team you need and an architect agent sets it up: it reads your project to fit the stack and folders, asks only if something important is unclear, and saves the team through a tool that refuses invalid files and hands the problems back to it. Keep talking to change it ("add a security reviewer", "use haiku for the tester"). Available in New project, New team, and every team's **Chat** tab. |
+| **Skills** | One library of skills for all teams: **write your own**, **add from GitHub** (a repository or a folder; private ones work if git can clone them), or install from **Anthropic's skills**. Claude Code's **built-in skills** are listed too. Give skills to a member, to every member of a team, or mark one **Everyone** to give it to all members of all teams. |
+| **Projects** | Each project has **Runs** and a **Brain** tab. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
+| **Brain** | The project's shared notes. Every member reads them before working and can **propose** additions; only the team's **curator** (or you) writes. Review proposals yourself (accept into a new or existing note, or reject) or ask the curator. Edit notes directly; every change is in the brain's own git history. |
 
 ![A live run: members, board and gates](docs/screenshots/run-board.png)
 
@@ -58,6 +73,8 @@ The app follows the system's light or dark appearance.
 |---|---|
 | ![Steering a working member from chat](docs/screenshots/chat-live.png) | ![Cleaning up worktrees](docs/screenshots/cleanup.png) |
 | ![Sandbox settings for shell commands](docs/screenshots/sandbox.png) | ![Dark mode](docs/screenshots/run-board-dark.png) |
+| ![Designing a team with chat](docs/screenshots/design-chat.png) | ![Skills: Anthropic's catalog](docs/screenshots/skills.png) |
+| ![The project brain with proposals](docs/screenshots/brain.png) | |
 
 **About the numbers.** Dollar amounts are Claude Code's estimate of what the usage would cost on the API. On a
 subscription you are not billed per token; usage counts against your plan's 5-hour and weekly limits, which the
@@ -169,6 +186,31 @@ workflow:
 See [`examples/feature-team/`](examples/feature-team) for the full file, its prompts and its report schemas. Put
 `# yaml-language-server: $schema=<path>/schemas/team.schema.json` at the top of a team file to get autocomplete
 and inline errors in editors.
+
+### Skills and the brain in the team file
+
+```yaml
+defaults:
+  skills: [house-style]          # every member of this team
+brain:
+  curator: reviewer              # maintains the project brain; needs Write or Edit
+  curate: after_run              # or: manual (only when you ask)
+agents:
+  reviewer:
+    skills: [code-review, pdf]   # library skills by name, or Claude Code built-ins
+```
+
+**Skills.** Library skills live in `~/.covibe/skills-plugin/skills/<name>/SKILL.md` (with any files they use),
+packaged as a local Claude Code plugin. Each member gets exactly its skills (team defaults, its own, and
+library skills marked Everyone) through the SDK's `skills` filter, so other installed skills stay hidden from
+it. Skills installed from GitHub remember where they came from and can be updated.
+
+**The brain.** Each project's brain is a folder of Markdown notes in `~/.covibe/brains/<repo>-<hash>/`,
+outside the repository, and its own git repository (so every change has an author and history). Every member
+can read it (it is added as a readable folder) and its system prompt lists the notes. Members other than the
+curator get a `propose_brain_note` tool; their file tools are blocked from the brain, and the shell sandbox
+cannot write there. The curator may edit the brain directly. With `curate: after_run`, the curator reviews
+pending proposals at the end of every run, merging accepted ones into notes and recording a decision for each.
 
 ### How the pieces fit
 
@@ -297,7 +339,7 @@ All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event t
 `run.started` `run.finished` `step.started` `step.finished` `step.skipped` `gate.passed` `gate.failed` `loop.goto`
 `agent.started` `agent.text` `agent.tool` `agent.finished` `agent.error` `scope.denied` `scope.violation`
 `git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit`
-`workspace.cleaned`
+`workspace.cleaned` `brain.proposed` `brain.decided` `brain.updated` `team.saved`
 
 `agent.finished` carries turns, estimated cost, duration, model and token counts; `usage.limit` carries the plan
 usage Claude Code reports (window, status, utilization, reset time). `message.queued` and `message.delivered` carry
@@ -344,4 +386,6 @@ npm run dev:ui      # then open http://localhost:5173/?token=<token printed by d
    activity, changes, chat and questions.
 3. **Safety and control (done):** OS sandbox for shell commands, chat that steers or interrupts a working member,
    worktree cleanup (manual, per run and automatic), drag-and-drop workflow graph.
-4. **Next:** resuming an escalated run from a step, code signing and notarization for the app.
+4. **Setup and knowledge (done):** setup flow (open, clone or create a project → team → first goal), team
+   design chat, skill library (yours, GitHub, Anthropic, built-in), project brain with a curator.
+5. **Next:** resuming an escalated run from a step, code signing and notarization for the app.

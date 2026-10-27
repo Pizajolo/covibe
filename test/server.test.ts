@@ -1,9 +1,11 @@
+import { execFileSync } from 'node:child_process';
 import { request } from 'node:http';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Library } from '../src/server/library.js';
 import { startServer, type CovibeServer } from '../src/server/app.js';
 import type { RunDetail, Stats, TeamDetail } from '../src/server/api-types.js';
-import { ScriptedRunner, tempDir, tempRepo } from './helpers.js';
+import { ScriptedRunner, tempDir, tempRepo, writeFiles } from './helpers.js';
 
 let server: CovibeServer | undefined;
 afterEach(async () => {
@@ -180,6 +182,95 @@ describe('server', () => {
     expect(await api('GET', `/api/projects/${project.id}/worktrees`)).toEqual([]);
     const detail = await api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`);
     expect(detail.summary.worktreesRemoved).toBe(true);
+  });
+
+  it('sets up projects: open (initialising git if asked), create empty, or clone', async () => {
+    const { api } = await setup();
+    const plain = tempDir('plain-');
+    writeFiles(plain, { 'app.js': 'x', '.env': 'SECRET=1', 'node_modules/a/index.js': 'y' });
+    await expect(api('POST', '/api/projects', { path: plain })).rejects.toMatchObject({ status: 409 });
+    const opened = await api('POST', '/api/projects', { path: plain, init: true });
+    const tracked = execFileSync('git', ['ls-files'], { cwd: opened.path, encoding: 'utf8' }).trim().split('\n');
+    expect(tracked).toEqual(['.gitignore', 'app.js']); // no secrets, no dependencies
+
+    const parent = tempDir('parent-');
+    const created = await api('POST', '/api/projects/create', { parent, name: 'fresh-app' });
+    expect(created).toMatchObject({ name: 'fresh-app', path: join(parent, 'fresh-app') });
+    expect(execFileSync('git', ['log', '--format=%s'], { cwd: created.path, encoding: 'utf8' }).trim()).toBe('Initial commit');
+
+    const cloned = await api('POST', '/api/projects/clone', { url: `file://${tempRepo()}`, parent, name: 'copy' });
+    expect(cloned.path).toBe(join(parent, 'copy'));
+    expect((await api('GET', '/api/overview')).projects).toHaveLength(3);
+    await expect(api('POST', '/api/projects/clone', { url: 'not a url', parent })).rejects.toThrow(/git URL/);
+  });
+
+  it('designs a team through chat: the architect saves only valid teams', async () => {
+    const library = new Library(tempDir('covibe-home-'));
+    let call = 0;
+    const runner = new ScriptedRunner({
+      architect: (inv) => {
+        call += 1;
+        if (call === 1) {
+          expect(inv.tools).toEqual(['Read', 'Grep', 'Glob']);
+          expect(inv.customTools!.map((t) => t.name)).toEqual(['get_team', 'read_team_file', 'save_team', 'list_skills', 'sandbox_defaults']);
+          expect(inv.prompt).toContain('A team for a Python API');
+          const yaml = 'version: 1\nname: api-team\nagents:\n  dev:\n    prompt: prompts/dev.md\n    tools: [Read, Edit, Bash]\nworkflow:\n  steps:\n    - { id: build, agent: dev }\n';
+          return {
+            call: [
+              { tool: 'save_team', args: { yaml: yaml.replace('version: 1', 'version: 2'), summary: 'first try' } },
+              { tool: 'save_team', args: { yaml, files: [{ path: 'prompts/dev.md', content: 'You build Python APIs.' }], summary: 'one developer' } },
+            ],
+            text: 'I set up a one-person team.',
+          };
+        }
+        expect(inv.resumeSessionId).toBe('session-architect');
+        return { call: [{ tool: 'get_team', args: {} }], text: 'Looked again.' };
+      },
+    });
+    server = await startServer({ library, runner, token: 't' });
+    const api = async (method: string, path: string, body?: unknown) => {
+      const res = await fetch(`http://127.0.0.1:${server!.port}${path}`, { method, headers: { authorization: 'Bearer t', 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error);
+      return json;
+    };
+    const started = await api('POST', '/api/design', { name: 'api team', message: 'A team for a Python API' });
+    expect(started.teamId).toBe('api-team');
+    const first = await until(() => api('GET', `/api/design/${started.runId}`), (d) => !d.busy && d.thread.some((i: { kind: string }) => i.kind === 'agent'));
+    expect(runner.toolResults.map((r) => r.result.split('\n')[0])).toEqual(['Not saved. team.yaml has problems:', 'Saved. The team is valid and ready to run.']);
+    expect(first.saves.map((s: { valid: boolean }) => s.valid)).toEqual([false, true]);
+    expect((await api('GET', '/api/teams/api-team')).problems).toEqual([]);
+    expect((await api('GET', '/api/teams/api-team/design')).runId).toBe(started.runId);
+
+    await api('POST', `/api/design/${started.runId}`, { message: 'check it' });
+    const second = await until(() => api('GET', `/api/design/${started.runId}`), (d) => !d.busy && d.thread.filter((i: { kind: string }) => i.kind === 'agent').length === 2);
+    expect(second.thread.filter((i: { kind: string }) => i.kind === 'human').map((i: { text: string }) => i.text)).toEqual(['A team for a Python API', 'check it']);
+  });
+
+  it('serves the brain: notes, your edits, and accepting proposals', async () => {
+    const { api } = await setup();
+    const project = await api('POST', '/api/projects', { path: tempRepo() });
+    const brain = await api('GET', `/api/projects/${project.id}/brain`);
+    expect(brain.notes.map((n: { path: string }) => n.path)).toEqual(['README.md']);
+    await api('PUT', `/api/projects/${project.id}/brain/note`, { path: 'deploy.md', content: '# Deploying\n\nUse make deploy.\n' });
+    await expect(api('PUT', `/api/projects/${project.id}/brain/note`, { path: '../escape.md', content: 'x' })).rejects.toMatchObject({ status: 400 });
+    const after = await api('GET', `/api/projects/${project.id}/brain`);
+    expect(after.notes.map((n: { title: string }) => n.title)).toEqual(['Project brain', 'Deploying']);
+    expect(after.log[0]).toMatchObject({ author: 'you', message: 'Edit deploy.md' });
+  });
+
+  it('manages library skills over the API', async () => {
+    const { api } = await setup();
+    await api('POST', '/api/skills', { name: 'house-style', description: 'Style guide. Use when writing code.', body: 'Tabs.' });
+    await api('PUT', '/api/skills/house-style/everyone', { everyone: true });
+    const list = await api('GET', '/api/skills');
+    expect(list.library).toEqual([expect.objectContaining({ name: 'house-style', everyone: true, usedBy: [] })]);
+    expect(list.builtin).toEqual([]);
+    const detail = await api('GET', '/api/skills/house-style');
+    expect(detail.skillMd).toContain('description: "Style guide. Use when writing code."');
+    await api('POST', '/api/skills/house-style/describe', { description: 'Updated.' });
+    expect((await api('GET', '/api/skills/house-style')).skill.description).toBe('Updated.');
+    await expect(api('POST', '/api/skills/github/scan', { url: 'nonsense' })).rejects.toThrow(/GitHub URL/);
   });
 
   it('streams events over SSE', async () => {

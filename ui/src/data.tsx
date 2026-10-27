@@ -95,6 +95,11 @@ export function useLive<T>(load: () => Promise<T>, deps: unknown[], match?: (e: 
   return { value, error, reload, setValue };
 }
 
+/** Open the new-project wizard from anywhere (the App listens). */
+export function openNewProject() {
+  window.dispatchEvent(new Event('covibe:new-project'));
+}
+
 // ---- tiny hash router
 
 export function useRoute(): string[] {

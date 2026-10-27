@@ -90,6 +90,15 @@ export function formatEvent(e: RunEvent): string {
     case 'message.delivered':
       text = dim(`✉ delivered message #${d.id} from ${d.from}${d.live ? (d.mode === 'interrupt' ? ' (interrupted its turn)' : ' (while working)') : ''}`);
       break;
+    case 'brain.proposed':
+      text = `✎ proposed brain note #${d.id}: ${d.title}`;
+      break;
+    case 'brain.decided':
+      text = `✎ brain proposal #${d.id} ${d.status}${d.note_path ? ` into ${d.note_path}` : ''}`;
+      break;
+    case 'brain.updated':
+      text = dim(`brain updated (${String(d.commit).slice(0, 7)})`);
+      break;
     case 'workspace.cleaned':
       text = dim(`worktrees removed (${(Number(d.freed_kb) / 1024).toFixed(1)} MB freed)`);
       break;

@@ -113,6 +113,7 @@ async function converse(p: {
   store.append(run.id, { ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, cwd: p.cwd, resumed: !!p.resume, chat: true } });
 
   const inv = buildInvocation(p.team, store, run.id, agent, {
+    repo: run.repo,
     cwd: p.cwd,
     root: run.branch ? p.cwd : run.repo,
     prompt: p.prompt,

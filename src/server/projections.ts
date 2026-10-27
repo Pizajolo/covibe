@@ -277,7 +277,7 @@ export function computeStats(
     const teamOf = new Map(src.runs.map((r) => [r.id, r.team]));
     for (const r of src.runs) {
       if (r.kind === 'ask') stats.runs.questions += 1;
-      else {
+      else if (r.kind === 'workflow') {
         stats.runs.total += 1;
         const st = r.status === 'running' && !src.live(r) ? 'failed' : r.status;
         stats.runs[st] += 1;

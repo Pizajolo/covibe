@@ -21,7 +21,7 @@ export function scopeMatcher(writeScope: string[] | undefined): (relPath: string
  * in worktree mode the engine also diffs the worktree after each turn and
  * discards out-of-scope changes (see Workspace.collect).
  */
-export function makeToolChecker(opts: { root: string; cwd: string; writeScope: string[] | undefined }) {
+export function makeToolChecker(opts: { root: string; cwd: string; writeScope: string[] | undefined; extraRoots?: string[] }) {
   const inScope = scopeMatcher(opts.writeScope);
   return (tool: string, input: unknown): string | undefined => {
     const field = PATH_FIELDS[tool];
@@ -29,6 +29,11 @@ export function makeToolChecker(opts: { root: string; cwd: string; writeScope: s
     const raw = (input as Record<string, unknown> | null)?.[field];
     if (typeof raw !== 'string') return `${tool}: missing ${field}`;
     const abs = isAbsolute(raw) ? raw : resolve(opts.cwd, raw);
+    // Folders this agent may write in full (the curator's brain folder).
+    for (const extra of opts.extraRoots ?? []) {
+      const r = relative(extra, abs);
+      if (r && !r.startsWith('..') && !isAbsolute(r)) return r.split(/[\\/]/)[0] === '.git' ? 'Writing inside .git is not allowed.' : undefined;
+    }
     const rel = relative(opts.root, abs);
     if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
       return `${raw} is outside your workspace (${opts.root}).`;

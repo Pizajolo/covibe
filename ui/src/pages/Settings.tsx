@@ -4,6 +4,45 @@ import { Toolbar } from '../components/Toolbar';
 import { useAction, useToast } from '../components/ui';
 import { useData, useLive } from '../data';
 
+function ClaudeAccount() {
+  const toast = useToast();
+  const { value: env } = useLive(() => get<{ skills: unknown[]; account?: { email?: string; subscriptionType?: string; apiProvider?: string; organization?: string } }>('/api/environment'), []);
+  const { value: settings, setValue } = useLive(() => get<AppSettings>('/api/settings'), []);
+  const [save] = useAction(async (model: string) => {
+    setValue(await put<AppSettings>('/api/settings', { designerModel: model }));
+    toast('Saved');
+  });
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Claude</h2>
+      </div>
+      <div className="card-pad col" style={{ gap: 10 }}>
+        <dl className="kv">
+          <dt>Signed in</dt>
+          <dd>{env ? (env.account?.email ? `${env.account.email}${env.account.subscriptionType ? ` · ${env.account.subscriptionType}` : ''}` : env.account?.subscriptionType ?? 'Not signed in (run claude login in Terminal)') : 'Checking…'}</dd>
+          {env?.account?.organization && (
+            <>
+              <dt>Organization</dt>
+              <dd>{env.account.organization}</dd>
+            </>
+          )}
+        </dl>
+        {settings && (
+          <label className="field" style={{ maxWidth: 320 }}>
+            Model for designing teams in chat
+            <select className="input" value={settings.designerModel ?? 'sonnet'} onChange={(e) => void save(e.target.value)}>
+              <option value="opus">Opus: best designs, costs more</option>
+              <option value="sonnet">Sonnet: good and quick (default)</option>
+              <option value="haiku">Haiku: cheapest</option>
+            </select>
+          </label>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DiskSpace() {
   const toast = useToast();
   const { value, setValue } = useLive(() => get<AppSettings>('/api/settings'), []);
@@ -97,6 +136,8 @@ export function Settings() {
               </div>
             </div>
           </div>
+
+          <ClaudeAccount />
 
           <DiskSpace />
 
