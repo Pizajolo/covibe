@@ -104,6 +104,8 @@ export interface TeamConfig {
   agents: Record<string, AgentConfig>;
   steps: Step[];
   brain: BrainConfig;
+  /** The member other members ask first when they need a decision; unset = questions go straight to the human. */
+  lead?: string;
 }
 
 export type JsonSchema = Record<string, unknown>;

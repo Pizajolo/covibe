@@ -20,6 +20,8 @@ const SEND_MESSAGE_TOOL = `mcp__${TEAM_SERVER}__send_message`;
 const COVIBE_SERVER = 'covibe';
 /** After a turn ends with messages still unread, how long to wait for the turn that reads them. */
 const FOLLOW_UP_WAIT_MS = 30_000;
+/** Longest a member may wait for an answer to its question, or in a paused run. */
+const MAX_WAIT_MS = 7 * 24 * 60 * 60_000;
 
 /** The prompt stream: the agent's first message, then anything sent while it works. */
 class Input implements AsyncIterable<SDKUserMessage> {
@@ -66,6 +68,7 @@ export class ClaudeSdkRunner implements AgentRunner {
 
     const preToolUse: HookCallback = async (input) => {
       if (input.hook_event_name !== 'PreToolUse') return {};
+      await inv.beforeToolUse?.();
       const reason = inv.checkToolUse(input.tool_name, input.tool_input);
       if (!reason) return {};
       inv.onEvent({ kind: 'denied', tool: input.tool_name, input: input.tool_input, reason });
@@ -87,10 +90,13 @@ export class ClaudeSdkRunner implements AgentRunner {
       plugins: inv.skills?.pluginDirs.map((path) => ({ type: 'local' as const, path, skipMcpDiscovery: true })),
       // Only the listed skills are visible to this agent.
       skills: skillNames.length ? skillNames : undefined,
-      env: inv.env,
+      // A member waiting for an answer sits in a tool call (ask_question) or a
+      // hook (run paused); lift Claude Code's limits on both to the longest wait.
+      env: { MCP_TOOL_TIMEOUT: String(MAX_WAIT_MS), ...inv.env },
       model: inv.model,
       abortController,
       resume: inv.resumeSessionId,
+      forkSession: inv.forkSession && !!inv.resumeSessionId,
       // Built-in tools are limited to the agent's list and pre-approved; anything
       // else is denied without prompting, since nobody is at the terminal.
       tools,
@@ -100,7 +106,7 @@ export class ClaudeSdkRunner implements AgentRunner {
       settingSources: inv.settingSources,
       maxTurns: inv.maxTurns,
       maxBudgetUsd: inv.maxBudgetUsd,
-      hooks: { PreToolUse: [{ hooks: [preToolUse] }] },
+      hooks: { PreToolUse: [{ hooks: [preToolUse], timeout: MAX_WAIT_MS / 1000 }] },
       outputFormat: inv.outputSchema ? { type: 'json_schema', schema: inv.outputSchema } : undefined,
       mcpServers: Object.keys(mcpServers).length ? mcpServers : undefined,
       // Shell commands run in the OS sandbox: writes stay in the working folder,

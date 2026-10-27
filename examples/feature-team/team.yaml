@@ -3,9 +3,12 @@
 # A feature team: the manager plans, frontend and backend build in parallel,
 # QA reviews, the tester writes and runs tests. Failed gates send findings
 # back to the builders, at most 3 times, then the run escalates to you.
+# Members ask the manager when they need a decision; if it cannot answer, the
+# question comes to you and the run pauses until you reply.
 version: 1
 name: feature-team
 description: Manager-led web feature team with an enforced review and test loop.
+lead: manager
 
 defaults:
   backend: { type: subscription }   # subscription | api_key | gateway | bedrock | vertex

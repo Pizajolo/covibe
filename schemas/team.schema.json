@@ -40,6 +40,17 @@
     "workflow": {
       "$ref": "#/$defs/workflow"
     },
+    "lead": {
+      "description": "The member others ask first when they need a decision. If it cannot answer, the question goes to the human and the run pauses until they reply. Defaults to an agent named manager; null sends questions straight to the human.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/identifier"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "brain": {
       "type": "object",
       "additionalProperties": false,

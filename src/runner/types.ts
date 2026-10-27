@@ -11,6 +11,8 @@ export interface AgentInvocation {
   cwd: string;
   /** Resume this session instead of starting a new one. */
   resumeSessionId?: string;
+  /** Resume into a copy of the session, leaving the original untouched (the lead answering a question mid-run). */
+  forkSession?: boolean;
   model?: string;
   tools: string[];
   outputSchema?: JsonSchema;
@@ -23,6 +25,8 @@ export interface AgentInvocation {
   canMessage: string[];
   /** Called before every tool use. Return a reason to deny it, or undefined to allow. */
   checkToolUse(tool: string, input: unknown): string | undefined;
+  /** Awaited before every tool use: the engine holds the agent here while its run is paused. */
+  beforeToolUse?(): Promise<void>;
   /** Deliver a message to a teammate's inbox; returns the text shown to the agent. */
   sendMessage(to: string, text: string): string;
   onEvent(event: AgentStreamEvent): void;

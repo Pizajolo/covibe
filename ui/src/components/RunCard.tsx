@@ -6,11 +6,11 @@ import { AgentStatus, Avatar, LoopBadge, RunStatusPill, Since } from './ui';
 
 /** A live run: goal, status and what each member is doing. */
 export function RunCard({ run }: { run: RunSummary }) {
-  const working = run.agents.filter((a) => a.status === 'working');
+  const working = run.agents.filter((a) => a.status === 'working' || a.status === 'asking');
   return (
     <a className="card card-pad col" href={href('runs', run.projectId, run.id)} style={{ color: 'var(--text)', gap: 12 }}>
       <div className="row">
-        <RunStatusPill status={run.status} kind={run.kind} />
+        <RunStatusPill status={run.status} kind={run.kind} paused={run.paused} />
         <LoopBadge loops={run.loops} max={run.maxLoops} />
         <span className="grow" />
         <span className="tiny faint num">
@@ -28,7 +28,7 @@ export function RunCard({ run }: { run: RunSummary }) {
           <div className="row" key={a.name}>
             <Avatar name={a.name} index={run.agents.indexOf(a)} size="sm" />
             <span style={{ fontWeight: 600, fontSize: 12 }}>{a.name}</span>
-            <span className="tiny muted ellipsis grow">{a.status === 'working' ? a.activity : ''}</span>
+            <span className="tiny muted ellipsis grow">{a.status === 'working' || a.status === 'asking' ? a.activity : ''}</span>
             <AgentStatus status={a.status} />
           </div>
         ))}
@@ -59,7 +59,7 @@ export function RunRow({ run }: { run: RunSummary }) {
         {money(run.costUsd)}
       </span>
       <div style={{ width: 96, display: 'flex', justifyContent: 'flex-end' }}>
-        <RunStatusPill status={run.status} kind={run.kind} />
+        <RunStatusPill status={run.status} kind={run.kind} paused={run.paused} />
       </div>
     </a>
   );

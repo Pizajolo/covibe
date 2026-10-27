@@ -4,18 +4,12 @@ import type { DeliveryMode, RunRecord } from '../events/types.js';
 import { backendEnv, type Env } from '../runner/backend.js';
 import type { AgentRunner } from '../runner/types.js';
 import { buildInvocation, finishedData, newRunId } from './engine.js';
+import { readOnly } from './scope.js';
 import { Workspace } from './workspace.js';
 
 export type ChatOutcome =
   | { mode: 'queued'; messageId: number; delivery: DeliveryMode }
   | { mode: 'replied'; text: string; ok: boolean; error?: string };
-
-const READ_ONLY_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS', 'WebSearch', 'WebFetch', 'TodoWrite']);
-
-/** The agent as it may act in a question session: same role and model, no tools that change anything. */
-export function readOnly(agent: AgentConfig): AgentConfig {
-  return { ...agent, tools: agent.tools.filter((t) => READ_ONLY_TOOLS.has(t)), writes: false, writeScope: [], canMessage: [], sandbox: undefined };
-}
 
 /**
  * Talk to one agent of a run. The rule is fixed so state is never ambiguous:

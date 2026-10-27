@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { BrainProposal, DeliveryMode, InboxMessage, NewEvent, ProposalStatus, RunEvent, RunRecord, RunStatus } from './types.js';
+import type { BrainProposal, DeliveryMode, InboxMessage, NewEvent, ProposalStatus, Question, QuestionStatus, RunEvent, RunRecord, RunStatus } from './types.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -56,12 +56,27 @@ CREATE TABLE IF NOT EXISTS inbox (
   ts TEXT NOT NULL,
   delivered_at TEXT
 );
+CREATE TABLE IF NOT EXISTS questions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  from_agent TEXT NOT NULL,
+  text TEXT NOT NULL,
+  context TEXT,
+  status TEXT NOT NULL,
+  for_human TEXT,
+  lead_note TEXT,
+  answer TEXT,
+  answered_by TEXT,
+  created_at TEXT NOT NULL,
+  answered_at TEXT
+);
+CREATE INDEX IF NOT EXISTS questions_run ON questions(run_id, status);
 `;
 
 type Row = Record<string, string | number | null>;
 type Listener = (e: RunEvent) => void;
 
-/** SQLite-backed store for runs, the event stream, agent sessions and inboxes. */
+/** SQLite-backed store for runs, the event stream, agent sessions, inboxes and members' questions. */
 export class EventStore {
   private db: DatabaseSync;
   private listeners = new Set<Listener>();
@@ -98,6 +113,7 @@ export class EventStore {
   reapDeadRuns(): string[] {
     const dead = (this.db.prepare("SELECT * FROM runs WHERE status = 'running'").all() as Row[]).map(toRun).filter((r) => !this.isLive(r));
     for (const r of dead) {
+      this.cancelQuestions(r.id);
       this.finishRun(r.id, 'failed');
       this.append(r.id, { type: 'run.finished', data: { status: 'failed', reason: 'interrupted: the process running it exited', loops: null, cost_usd: null } });
     }
@@ -237,6 +253,46 @@ export class EventStore {
     return this.getProposal(id)!;
   }
 
+  addQuestion(q: { runId: string; from: string; text: string; context?: string; status: 'lead' | 'open' }): Question {
+    const r = this.db
+      .prepare('INSERT INTO questions (run_id, from_agent, text, context, status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(q.runId, q.from, q.text, q.context ?? null, q.status, now());
+    return this.getQuestion(Number(r.lastInsertRowid))!;
+  }
+
+  getQuestion(id: number): Question | undefined {
+    const row = this.db.prepare('SELECT * FROM questions WHERE id = ?').get(id) as Row | undefined;
+    return row ? toQuestion(row) : undefined;
+  }
+
+  /** A run's questions, oldest first; only those with one of the given statuses if any are given. */
+  questions(runId: string, ...status: QuestionStatus[]): Question[] {
+    const rows = status.length
+      ? (this.db.prepare(`SELECT * FROM questions WHERE run_id = ? AND status IN (${status.map(() => '?').join(',')}) ORDER BY id`).all(runId, ...status) as Row[])
+      : (this.db.prepare('SELECT * FROM questions WHERE run_id = ? ORDER BY id').all(runId) as Row[]);
+    return rows.map(toQuestion);
+  }
+
+  /** The lead could not answer: the question now waits for the human. */
+  escalateQuestion(id: number, forHuman: string, leadNote?: string): Question {
+    this.db.prepare("UPDATE questions SET status = 'open', for_human = ?, lead_note = ? WHERE id = ? AND status = 'lead'").run(forHuman, leadNote ?? null, id);
+    return this.getQuestion(id)!;
+  }
+
+  answerQuestion(id: number, answer: string, by: string): Question {
+    const current = this.getQuestion(id);
+    if (!current) throw new Error(`question #${id} not found`);
+    if (current.status === 'answered') throw new Error(`question #${id} was already answered by ${current.answeredBy}`);
+    if (current.status === 'cancelled') throw new Error(`question #${id} was cancelled because its run ended`);
+    this.db.prepare("UPDATE questions SET status = 'answered', answer = ?, answered_by = ?, answered_at = ? WHERE id = ?").run(answer, by, now(), id);
+    return this.getQuestion(id)!;
+  }
+
+  /** Close a run's unanswered questions (the run ended). */
+  cancelQuestions(runId: string) {
+    this.db.prepare("UPDATE questions SET status = 'cancelled' WHERE run_id = ? AND status IN ('lead', 'open')").run(runId);
+  }
+
   markDelivered(ids: number[]) {
     if (!ids.length) return;
     this.db.prepare(`UPDATE inbox SET delivered_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`).run(now(), ...ids);
@@ -271,6 +327,24 @@ function toProposal(r: Row): BrainProposal {
     decidedBy: opt(r.decided_by),
     decisionNote: opt(r.decision_note),
     notePath: opt(r.note_path),
+  };
+}
+
+function toQuestion(r: Row): Question {
+  const opt = (v: string | number | null | undefined) => (v == null ? undefined : String(v));
+  return {
+    id: Number(r.id),
+    runId: String(r.run_id),
+    from: String(r.from_agent),
+    text: String(r.text),
+    context: opt(r.context),
+    status: r.status as QuestionStatus,
+    forHuman: opt(r.for_human),
+    leadNote: opt(r.lead_note),
+    answer: opt(r.answer),
+    answeredBy: opt(r.answered_by),
+    createdAt: String(r.created_at),
+    answeredAt: opt(r.answered_at),
   };
 }
 

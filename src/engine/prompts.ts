@@ -2,7 +2,7 @@ import type { AgentConfig, TeamConfig } from '../config/types.js';
 import type { InboxMessage } from '../events/types.js';
 
 /** Role prompt plus the team protocol, appended to Claude Code's system prompt. */
-export function systemPrompt(team: TeamConfig, agent: AgentConfig): string {
+export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAsk?: boolean } = {}): string {
   const teammates = Object.values(team.agents)
     .filter((a) => a.name !== agent.name)
     .map((a) => `- ${a.name}${a.description ? `: ${a.description}` : ''}`)
@@ -26,6 +26,14 @@ export function systemPrompt(team: TeamConfig, agent: AgentConfig): string {
   if (agent.canMessage.length) {
     lines.push(
       `You can message ${agent.canMessage.join(', ')} with the send_message tool. A teammate who is working reads it between its tool calls; otherwise at the start of its next turn.`,
+    );
+  }
+  if (opts.canAsk) {
+    const lead = team.lead && team.lead !== agent.name ? team.lead : undefined;
+    lines.push(
+      lead
+        ? `When you need a decision you cannot make from the goal, your task, the code or the project brain, ask ${lead} (the team lead) with the ask_question tool instead of guessing. If ${lead} cannot answer, it asks the human. You wait for the answer, which the tool returns. Look things up yourself before asking.`
+        : 'When you need a decision only the human can make, ask with the ask_question tool instead of guessing. The whole team pauses until they answer, which the tool returns, so look things up and decide what you can yourself first.',
     );
   }
   lines.push(

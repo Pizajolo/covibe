@@ -105,13 +105,29 @@ export function formatEvent(e: RunEvent): string {
     case 'backend.warning':
       text = yellow(`warning: ${d.message}`);
       break;
+    case 'question.asked':
+      text = `? asks ${d.to === 'human' ? 'you' : d.to} (#${d.id}): ${one(String(d.question), 200)}`;
+      break;
+    case 'question.escalated':
+      text = yellow(`? passes #${d.id} from ${d.from} to you: ${one(String(d.question), 200)}`) + (d.reason ? dim(` (${one(String(d.reason), 120)})`) : '');
+      break;
+    case 'question.answered':
+      text = green(`✓ #${d.id} answered by ${d.by === 'human' ? 'you' : d.by}: `) + one(String(d.answer), 200);
+      break;
+    case 'run.paused':
+      text = bold(yellow('⏸ run paused until you answer'));
+      break;
+    case 'run.resumed':
+      text = green('▶ run resumed');
+      break;
     default:
       text = JSON.stringify(d);
   }
   return `${time} ${dim(who.padEnd(18))} ${text}`;
 }
 
-export function formatRun(r: RunRecord): string {
-  const status = r.status === 'succeeded' ? green : r.status === 'running' ? cyan : r.status === 'escalated' ? yellow : red;
-  return `${r.id}  ${status(r.status.padEnd(9))}  ${r.team.padEnd(16)}  ${one(r.goal, 60)}`;
+/** One line per run; a live run waiting for your answer shows as paused. */
+export function formatRun(r: RunRecord, paused = false): string {
+  const status = paused ? yellow : r.status === 'succeeded' ? green : r.status === 'running' ? cyan : r.status === 'escalated' ? yellow : red;
+  return `${r.id}  ${status((paused ? 'paused' : r.status).padEnd(9))}  ${r.team.padEnd(16)}  ${one(r.goal, 60)}`;
 }

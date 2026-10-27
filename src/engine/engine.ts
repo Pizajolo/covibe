@@ -10,7 +10,8 @@ import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent, Custo
 import { brainPrompt, commitBrain, curate, ensureBrain, proposeTool } from './brain.js';
 import { evaluate, evaluateGate } from './expr.js';
 import { systemPrompt, turnPrompt } from './prompts.js';
-import { makeToolChecker } from './scope.js';
+import { ASK_TOOL, Deadline, LEAD_SCHEMA, leadPrompt, leadVerdict, QUESTION_STEP, RunPause, waitForAnswer, type LeadVerdict } from './questions.js';
+import { makeToolChecker, readOnly } from './scope.js';
 import { Workspace } from './workspace.js';
 
 export interface RunOptions {
@@ -52,7 +53,11 @@ export function newRunId(date = new Date()): string {
   return `${stamp}-${randomBytes(2).toString('hex')}`;
 }
 
-/** Run a team's workflow to completion: succeeded, failed, or escalated to a human. */
+/**
+ * Run a team's workflow to completion: succeeded, failed, or escalated to a
+ * human. Members can ask questions on the way (see questions.ts); while one
+ * waits for the human, the run pauses.
+ */
 export async function runTeam(opts: RunOptions): Promise<RunOutcome> {
   return (await startRun(opts)).done;
 }
@@ -97,6 +102,7 @@ class Engine {
   private readonly ajv = new Ajv2020({ strict: false, allErrors: true });
   private readonly validators = new WeakMap<JsonSchema, ValidateFunction>();
   private readonly warned = new Set<string>();
+  private readonly pause: RunPause;
   private costUsd = 0;
   private maxLoops: number | undefined;
 
@@ -109,6 +115,9 @@ class Engine {
     this.store = opts.store;
     this.context = { goal: opts.goal, loop: 0, feedback: {} };
     this.slots = new Semaphore(this.team.maxParallel);
+    this.pause = new RunPause((paused, questions) =>
+      this.emit(paused ? { type: 'run.paused', data: { questions } } : { type: 'run.resumed', data: {} }),
+    );
   }
 
   private emit(event: NewEvent) {
@@ -174,6 +183,7 @@ class Engine {
       status = 'failed';
       reason = this.opts.signal?.aborted ? 'aborted' : (err as Error).message;
     }
+    this.store.cancelQuestions(this.runId);
 
     // Members' proposals from this run (and earlier ones) go to the curator.
     const { curator, curate: when } = this.team.brain;
@@ -234,6 +244,8 @@ class Engine {
       throw err;
     }
 
+    // Nothing new starts while a question waits for the human.
+    await this.pause.wait(this.opts.signal);
     const release = await this.slots.acquire();
     try {
       const cwd = await this.workspace.prepare(agent.name, agent.writes);
@@ -286,20 +298,116 @@ class Engine {
     }
   }
 
-  private runAgent(
+  private async runAgent(
     agent: AgentConfig,
     p: { cwd: string; prompt: string; resume?: string; env: Env; outputSchema?: JsonSchema; step: string },
   ): Promise<AgentResult> {
-    const timeout = AbortSignal.timeout(agent.limits.timeout_min * 60_000);
-    const signal = this.opts.signal ? AbortSignal.any([this.opts.signal, timeout]) : timeout;
+    // The time limit does not count while the member waits for an answer or the run is paused.
+    const deadline = new Deadline(agent.limits.timeout_min * 60_000);
+    const untrack = this.pause.track(deadline);
+    const signal = this.opts.signal ? AbortSignal.any([this.opts.signal, deadline.signal]) : deadline.signal;
     const inv = buildInvocation(this.team, this.store, this.runId, agent, {
       ...p,
       root: this.team.isolation === 'none' ? this.workspace.repo : p.cwd,
       signal,
       repo: this.workspace.repo,
+      extraTools: [this.askTool(agent.name, p.step, deadline)],
+      // A paused run holds working members at their next tool call.
+      beforeToolUse: () => this.pause.wait(signal),
     });
-    // Stop live delivery even if a runner forgets to signal the end of its turn.
-    return this.opts.runner.run(inv).finally(() => inv.onControl?.(null));
+    try {
+      // Stop live delivery even if a runner forgets to signal the end of its turn.
+      return await this.opts.runner.run(inv).finally(() => inv.onControl?.(null));
+    } finally {
+      untrack();
+      deadline.dispose();
+    }
+  }
+
+  private askTool(from: string, step: string, deadline: Deadline): CustomTool {
+    const lead = this.team.lead && this.team.lead !== from ? this.team.lead : undefined;
+    return {
+      name: ASK_TOOL,
+      description: lead
+        ? `Ask ${lead}, the team lead, for a decision you cannot make yourself. If ${lead} cannot answer, the question goes to the human and the whole run pauses until they reply. Returns the answer.`
+        : 'Ask the human for a decision you cannot make yourself. The whole run pauses until they reply. Returns their answer.',
+      params: {
+        question: { type: 'string', description: 'What you need decided, with the options you see, so it can be answered without seeing your work.' },
+        context: { type: 'string', optional: true, description: 'What you found or tried, the files involved, and what you would do by default.' },
+      },
+      run: (args) => {
+        const context = typeof args.context === 'string' && args.context.trim() ? args.context.trim() : undefined;
+        return this.ask(from, step, String(args.question ?? '').trim(), context, deadline);
+      },
+    };
+  }
+
+  /** A member's question: the lead first, then the human (pausing the run). Returns the text the member sees. */
+  private async ask(from: string, step: string, text: string, context: string | undefined, deadline: Deadline): Promise<string> {
+    if (!text) throw new Error('the question is empty');
+    const lead = this.team.lead && this.team.lead !== from ? this.team.lead : undefined;
+    const release = deadline.hold();
+    try {
+      const { id } = this.store.addQuestion({ runId: this.runId, from, text, context, status: lead ? 'lead' : 'open' });
+      this.emit({ step, agent: from, type: 'question.asked', data: { id, question: text, context: context ?? null, to: lead ?? 'human' } });
+      if (lead) {
+        const verdict = await this.consultLead(lead, from, step, text, context);
+        if ('answer' in verdict) {
+          this.store.answerQuestion(id, verdict.answer, lead);
+          this.emit({ step, agent: from, type: 'question.answered', data: { id, by: lead, answer: verdict.answer } });
+          return `Answer from ${lead}:\n${verdict.answer}`;
+        }
+        this.store.escalateQuestion(id, verdict.forHuman, verdict.note);
+        this.emit({ step, agent: lead, type: 'question.escalated', data: { id, from, question: verdict.forHuman, reason: verdict.note ?? null } });
+      }
+      this.pause.add(id);
+      try {
+        const answered = await waitForAnswer(this.store, id, this.opts.signal);
+        return `Answer from the human:\n${answered.answer}`;
+      } finally {
+        this.pause.remove(id);
+      }
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * The lead answers in a read-only copy of its session from this run, so it
+   * knows the plan without its own session being touched. If anything goes
+   * wrong, the question goes on to the human.
+   */
+  private async consultLead(leadName: string, from: string, step: string, question: string, context: string | undefined): Promise<LeadVerdict> {
+    const lead = readOnly(this.team.agents[leadName]!);
+    const base = { step: QUESTION_STEP, agent: leadName };
+    const passOn = (why: string): LeadVerdict => ({ forHuman: question, note: `${leadName} could not answer: ${why}` });
+    try {
+      const { env } = backendEnv(lead.backend, this.opts.env ?? process.env);
+      const session = this.store.getSession(this.runId, leadName);
+      const cwd = session?.cwd ?? (await this.workspace.prepare(leadName, false));
+      this.emit({ ...base, type: 'agent.started', data: { model: lead.model ?? null, backend: lead.backend.type, cwd, resumed: !!session, question: true } });
+      const timeout = AbortSignal.timeout(lead.limits.timeout_min * 60_000);
+      const inv = buildInvocation(this.team, this.store, this.runId, lead, {
+        cwd,
+        root: this.team.isolation === 'none' ? this.workspace.repo : cwd,
+        prompt: leadPrompt({ goal: this.opts.goal, lead: leadName, from, step, question, context }),
+        resume: session?.sessionId,
+        fork: true,
+        env,
+        outputSchema: LEAD_SCHEMA,
+        step: QUESTION_STEP,
+        signal: this.opts.signal ? AbortSignal.any([this.opts.signal, timeout]) : timeout,
+        repo: this.workspace.repo,
+      });
+      const result = await this.opts.runner.run(inv).finally(() => inv.onControl?.(null));
+      this.costUsd += result.costUsd;
+      this.emit({ ...base, type: result.ok ? 'agent.finished' : 'agent.error', data: finishedData(lead, result) });
+      if (!result.ok) return passOn(result.error ?? 'unknown error');
+      return leadVerdict(result.structured ?? extractJson(result.text), question);
+    } catch (err) {
+      this.opts.signal?.throwIfAborted();
+      return passOn((err as Error).message);
+    }
   }
 
   private output(agent: AgentConfig, stepId: string, result: AgentResult, schema: JsonSchema | undefined): unknown {
@@ -341,6 +449,9 @@ export function buildInvocation(
     extraTools?: CustomTool[];
     /** A curation pass (the curator edits the brain and decides proposals). */
     curating?: boolean;
+    /** Resume into a copy of the session (see AgentInvocation.forkSession). */
+    fork?: boolean;
+    beforeToolUse?: () => Promise<void>;
   },
 ): AgentInvocation {
   const base = { step: p.step, agent: agent.name };
@@ -353,12 +464,13 @@ export function buildInvocation(
   return {
     agentName: agent.name,
     prompt: p.prompt,
-    systemPrompt: [systemPrompt(team, agent), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
+    systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL) }), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
     readDirs: brain && !p.curating ? [brain] : undefined,
     skills: resolveSkills(agent.skills),
     customTools: tools.length ? tools : undefined,
     cwd: p.cwd,
     resumeSessionId: p.resume,
+    forkSession: p.fork,
     model: agent.model,
     tools: agent.tools,
     outputSchema: p.outputSchema,
@@ -368,6 +480,7 @@ export function buildInvocation(
     settingSources: team.settingSources,
     signal: p.signal,
     canMessage: agent.canMessage,
+    beforeToolUse: p.beforeToolUse,
     checkToolUse: makeToolChecker({ root: p.root, cwd: p.cwd, writeScope: agent.writes ? agent.writeScope : [], extraRoots: isCurator && brain ? [brain] : undefined }),
     sendMessage: (to, text) => {
       if (!agent.canMessage.includes(to)) return `You cannot message ${to}.`;
