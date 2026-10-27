@@ -143,6 +143,8 @@ export class ClaudeSdkRunner implements AgentRunner {
     };
 
     let sessionId = inv.resumeSessionId;
+    /** Tool calls by id, so an image in a result can say which call showed it. */
+    const calls = new Map<string, { tool: string; input: unknown }>();
     let lastText = '';
     let last: SDKResultMessage | undefined;
     let turns = 0;
@@ -158,8 +160,14 @@ export class ClaudeSdkRunner implements AgentRunner {
               lastText = block.text;
               inv.onEvent({ kind: 'text', text: block.text });
             } else if (block.type === 'tool_use') {
+              calls.set(block.id, { tool: block.name, input: block.input });
               inv.onEvent({ kind: 'tool', tool: block.name, input: block.input });
             }
+          }
+        } else if (msg.type === 'user' && msg.parent_tool_use_id === null && Array.isArray(msg.message.content)) {
+          for (const img of resultImages(msg.message.content)) {
+            const call = calls.get(img.toolUseId);
+            inv.onEvent({ kind: 'image', tool: call?.tool ?? 'unknown', input: call?.input ?? null, mediaType: img.mediaType, data: img.data });
           }
         } else if (msg.type === 'rate_limit_event') {
           const info = msg.rate_limit_info;
@@ -216,6 +224,20 @@ export async function discoverEnvironment(env: Env): Promise<EnvironmentInfo> {
     clearTimeout(timer);
     q.close();
   }
+}
+
+/** Base64 images inside tool results: what the agent sees of a screenshot it read or a browser tool returned. */
+function resultImages(content: unknown[]): { toolUseId: string; mediaType: string; data: string }[] {
+  const out: { toolUseId: string; mediaType: string; data: string }[] = [];
+  for (const block of content as { type?: string; tool_use_id?: string; content?: unknown }[]) {
+    if (block?.type !== 'tool_result' || !Array.isArray(block.content)) continue;
+    for (const part of block.content as { type?: string; source?: { type?: string; media_type?: string; data?: string } }[]) {
+      if (part?.type === 'image' && part.source?.type === 'base64' && part.source.data) {
+        out.push({ toolUseId: block.tool_use_id ?? '', mediaType: part.source.media_type ?? 'image/png', data: part.source.data });
+      }
+    }
+  }
+  return out;
 }
 
 function tokensOf(msg: SDKResultMessage): TokenUsage {

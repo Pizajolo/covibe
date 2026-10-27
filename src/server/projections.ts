@@ -116,6 +116,7 @@ export function summarizeRun(
         a.activity = e.step === QUESTION_STEP && answeringFor.has(e.agent!) ? `answering ${answeringFor.get(e.agent!)}'s question` : d.resumed ? 'resuming…' : 'starting…';
         a.invocations += 1;
         a.updatedAt = e.ts;
+        a.browser = undefined;
         if (e.step && e.step !== 'chat' && e.step !== QUESTION_STEP) {
           const card: BoardCard = { agent: e.agent!, round: loops, status: 'working', costUsd: 0 };
           step(e.step).cards.push(card);
@@ -127,6 +128,13 @@ export function summarizeRun(
         const a = agent(e.agent!);
         a.activity = toolLabel(String(d.tool), d.input, [run.repo]);
         a.updatedAt = e.ts;
+        if (d.browser) a.browser = { url: d.browser.url ?? a.browser?.url, since: a.browser?.since ?? e.ts };
+        break;
+      }
+      case 'agent.view': {
+        const a = agent(e.agent!);
+        a.lastView = d.id;
+        a.views = (a.views ?? 0) + 1;
         break;
       }
       case 'agent.text': {

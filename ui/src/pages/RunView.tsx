@@ -5,6 +5,7 @@ import { deskNote, DeskPill, deskState, OfficeLegend, OfficeStage, Portrait, que
 import {
   IconAlert,
   IconBranch,
+  IconBrowser,
   IconChat,
   IconCheck,
   IconClock,
@@ -21,6 +22,7 @@ import {
   IconTrash,
   IconX,
 } from '../components/icons';
+import { BrowserPreview, viewSrc } from '../components/BrowserView';
 import { Toolbar } from '../components/Toolbar';
 import { AgentStatus, Avatar, Copy, Empty, LoopBadge, Modal, RunStatusPill, useAction, useToast } from '../components/ui';
 import { go, useData, useLive } from '../data';
@@ -319,6 +321,7 @@ function OfficeTab({ detail, projectId, selected, onSelect, onSent }: { detail: 
   const agent = run.agents.find((a) => a.name === selected);
   const [pane, setPane] = useState<Pane>('overview');
   const [legendOpen, setLegendOpen] = useState(false);
+  const [browserOf, setBrowserOf] = useState<string | undefined>();
   const { showQuestion } = useNotify();
   useEffect(() => {
     const on = (e: KeyboardEvent) => e.key === 'Escape' && !(e.target as HTMLElement).matches('textarea, input') && onSelect(undefined);
@@ -345,6 +348,7 @@ function OfficeTab({ detail, projectId, selected, onSelect, onSent }: { detail: 
           selected={agent?.name}
           onSelect={pick}
           onQuestion={(id) => showQuestion(projectId, run.id, id)}
+          onBrowser={setBrowserOf}
         >
           <div className="row tiny faint" style={{ gap: 8 }}>
             <span className="grow">Click a desk to see what a member is doing and to talk to it.</span>
@@ -357,9 +361,20 @@ function OfficeTab({ detail, projectId, selected, onSelect, onSent }: { detail: 
       </div>
       {agent && (
         <aside className="office-panel" aria-label={`${agent.name} details`}>
-          <MemberPanel detail={detail} projectId={projectId} agent={agent.name} pane={pane} setPane={setPane} onClose={() => onSelect(undefined)} onSent={onSent} figure={figures.get(agent.name)!} />
+          <MemberPanel
+            detail={detail}
+            projectId={projectId}
+            agent={agent.name}
+            pane={pane}
+            setPane={setPane}
+            onClose={() => onSelect(undefined)}
+            onSent={onSent}
+            onBrowser={() => setBrowserOf(agent.name)}
+            figure={figures.get(agent.name)!}
+          />
         </aside>
       )}
+      {browserOf && <BrowserPreview detail={detail} projectId={projectId} agent={browserOf} onClose={() => setBrowserOf(undefined)} />}
     </div>
   );
 }
@@ -372,6 +387,7 @@ function MemberPanel({
   setPane,
   onClose,
   onSent,
+  onBrowser,
   figure,
 }: {
   detail: RunDetail;
@@ -381,6 +397,7 @@ function MemberPanel({
   setPane: (p: Pane) => void;
   onClose: () => void;
   onSent: () => void;
+  onBrowser: () => void;
   figure: Parameters<typeof Portrait>[0]['figure'];
 }) {
   const run = detail.summary;
@@ -460,6 +477,22 @@ function MemberPanel({
             )}
             {a.lastText && state !== 'sleeping' && <div className="small muted office-said">“{a.lastText}”</div>}
           </div>
+          {(a.browser || a.lastView !== undefined) && (
+            <div className="col" style={{ gap: 6 }}>
+              <span className="label">{a.browser ? 'In its browser' : 'Last thing it looked at'}</span>
+              {a.lastView !== undefined && (
+                <button className="office-view" onClick={onBrowser} title={`See what ${agent} sees`}>
+                  <img src={viewSrc(projectId, run.id, a.lastView)} alt={`The last screenshot ${agent} looked at`} />
+                </button>
+              )}
+              <div className="row small" style={{ gap: 8 }}>
+                <span className="grow ellipsis mono tiny">{a.browser?.url ?? (a.browser ? 'a page it did not name' : '')}</span>
+                <button className="btn sm" onClick={onBrowser}>
+                  <IconBrowser /> {a.views ? `${a.views} screenshot${a.views > 1 ? 's' : ''}` : 'Preview'}
+                </button>
+              </div>
+            </div>
+          )}
           <dl className="office-facts">
             <div><dt>Model</dt><dd>{member?.model ?? 'default'}</dd></div>
             <div><dt>Cost this run</dt><dd className="num">{money(a.costUsd)}</dd></div>
@@ -526,6 +559,7 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'agent.tool': return { cls: 'tool', text: toolText(String(d.tool), d.input, roots) };
     case 'agent.finished': return { cls: 'good', text: `Finished · ${d.turns} turns · ${money(d.cost_usd)} · ${tokens((d.tokens?.input ?? 0) + (d.tokens?.output ?? 0) + (d.tokens?.cacheRead ?? 0) + (d.tokens?.cacheWrite ?? 0))} tokens` };
     case 'agent.error': return { cls: 'error', text: `Failed: ${d.error}` };
+    case 'agent.view': return { cls: 'tool', text: `Looked at ${d.file ? String(d.file).split('/').pop() : `an image from ${d.tool}`}` };
     case 'scope.denied': return { cls: 'warn', text: `Blocked ${d.tool}: ${d.reason}` };
     case 'scope.violation': return { cls: 'warn', text: `Discarded out-of-scope changes: ${(d.files as string[]).join(', ')}` };
     case 'git.commit': return { cls: '', text: `Committed ${String(d.commit).slice(0, 8)}: ${(d.files as string[]).join(', ')}` };

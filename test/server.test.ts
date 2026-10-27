@@ -186,6 +186,39 @@ describe('server', () => {
     expect(runner.toolResults).toContainEqual({ agent: 'builder', tool: 'ask_question', result: 'Answer from the human:\nES modules.' });
   });
 
+  it('shows what a member sees in its browser', async () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    const { api, base } = await setup({
+      builder: () => ({
+        stream: [
+          { kind: 'tool', tool: 'Bash', input: { command: `npx playwright screenshot http://localhost:5173/ shot.png ${'x'.repeat(400)}` } },
+          { kind: 'tool', tool: 'Read', input: { file_path: 'shot.png' } },
+          { kind: 'image', tool: 'Read', input: { file_path: 'shot.png' }, mediaType: 'image/png', data: png.toString('base64') },
+        ],
+        write: { 'src/a.js': 'export const a = 1;' },
+        text: 'Built.',
+      }),
+    });
+    const project = await api('POST', '/api/projects', { path: tempRepo() });
+    const team = await api('POST', '/api/teams', { name: 'duo', template: 'build-and-review' });
+    const { runId } = await api('POST', '/api/runs', { project: project.id, team: team.id, goal: 'Add module a' });
+    const done = await until(
+      () => api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`),
+      (d) => d.summary.status !== 'running',
+    );
+    const builder = done.summary.agents.find((a) => a.name === 'builder')!;
+    // The reviewer sends it back once, so it browsed in both of its turns.
+    expect(builder).toMatchObject({ browser: { url: 'http://localhost:5173/' }, lastView: 2, views: 2 });
+    expect(done.events.find((e) => e.type === 'agent.view')).toMatchObject({ agent: 'builder', data: { id: 1, file: 'shot.png' } });
+
+    // An <img> sends the token in the query.
+    const res = await fetch(`${base}/api/runs/${project.id}/${runId}/views/1?token=test-token`);
+    expect(res.headers.get('content-type')).toBe('image/png');
+    expect(Buffer.from(await res.arrayBuffer())).toEqual(png);
+    expect((await fetch(`${base}/api/runs/${project.id}/${runId}/views/1`)).status).toBe(401);
+    await expect(api('GET', `/api/runs/${project.id}/${runId}/views/9`)).rejects.toThrow(/not kept/);
+  });
+
   it('reorders and inserts workflow steps without losing comments', async () => {
     const { api } = await setup();
     const team = await api('POST', '/api/teams', { name: 'flow', template: 'feature-team' });

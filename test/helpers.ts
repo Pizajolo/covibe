@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { AgentInvocation, AgentResult, AgentRunner } from '../src/runner/types.js';
+import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent } from '../src/runner/types.js';
 
 export function tempDir(prefix = 'covibe-test-') {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -44,6 +44,8 @@ export interface ScriptedTurn {
   awaitLive?: number;
   /** Custom (covibe) tools to call, in order. */
   call?: { tool: string; args: Record<string, unknown> }[];
+  /** Stream events to send as is (tool calls, images it saw…). */
+  stream?: AgentStreamEvent[];
 }
 
 export type Script = (inv: AgentInvocation, call: number) => ScriptedTurn;
@@ -92,6 +94,7 @@ export class ScriptedRunner implements AgentRunner {
       inv.onEvent({ kind: 'tool', tool: 'Bash', input: { command: 'generate files' } });
       writeFiles(inv.cwd, turn.bashWrite);
     }
+    for (const e of turn.stream ?? []) inv.onEvent(e);
     for (const m of turn.send ?? []) inv.sendMessage(m.to, m.text);
     for (const c of turn.call ?? []) {
       const tool = inv.customTools?.find((t) => t.name === c.tool);

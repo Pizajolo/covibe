@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentState, MemberInfo, RunSummary } from '../api';
 import { money } from '../format';
 import { drawPortrait, drawScene, figureFor, kindOf, layout, spotBox, W, type BoardStep, type DeskState, type Figure, type Scene } from './office-art';
+import { IconBrowser } from './icons';
 import { DESK_HELP, DESK_LABEL, deskNote, deskQuestion, deskState } from './office-state';
 
 export { DESK_LABEL, deskNote, deskState, questionDesk } from './office-state';
@@ -108,6 +109,7 @@ export function OfficeStage({
   selected,
   onSelect,
   onQuestion,
+  onBrowser,
   children,
 }: {
   run: RunSummary;
@@ -117,6 +119,8 @@ export function OfficeStage({
   onSelect: (name: string) => void;
   /** Open a question for you; its desk (the lead's, usually) shows a question mark. */
   onQuestion?: (id: number) => void;
+  /** Open what a member sees in its browser; members using one show a browser button. */
+  onBrowser?: (name: string) => void;
   /** Shown under the room, at its width. */
   children?: React.ReactNode;
 }) {
@@ -127,7 +131,10 @@ export function OfficeStage({
   const hovered = useRef<string | undefined>(undefined);
   const desks = run.agents.map((a, i) => {
     const state = deskState(a, run, answering.includes(a.name));
-    return { agent: a, state, note: deskNote(a, state, run), question: deskQuestion(a, run), ...spots[i]! };
+    const busy = answering.includes(a.name);
+    // The browser button shows while the member's latest turn uses a browser and the run (or a chat) is live.
+    const browsing = !!a.browser && (busy || (run.status === 'running' && state !== 'sleeping'));
+    return { agent: a, state, note: deskNote(a, state, run), question: deskQuestion(a, run), browsing, ...spots[i]! };
   });
   const scene: Scene = {
     w: W,
@@ -160,6 +167,23 @@ export function OfficeStage({
                   onClick={() => onQuestion(d.question!.id)}
                 >
                   ?
+                </button>
+              ),
+          )}
+        {onBrowser &&
+          desks.map(
+            (d) =>
+              d.browsing && (
+                <button
+                  key={`web-${d.agent.name}`}
+                  className={`office-web ${d.agent.lastView ? 'seen' : ''}`}
+                  aria-label={`${d.agent.name} is using a browser${d.agent.browser?.url ? ` on ${d.agent.browser.url}` : ''}. See what it sees`}
+                  title={`What ${d.agent.name} sees${d.agent.browser?.url ? ` · ${d.agent.browser.url}` : ''}`}
+                  // Right of the head, opposite the thought bubble.
+                  style={{ left: `${((d.cx + 19) / W) * 100}%`, top: `${((d.by - 23) / h) * 100}%` }}
+                  onClick={() => onBrowser(d.agent.name)}
+                >
+                  <IconBrowser />
                 </button>
               ),
           )}

@@ -119,6 +119,11 @@ export interface AgentState {
   inbox: number;
   /** Who it waits on for an answer to its question (the lead's name, or "human"). */
   waitingOn?: string;
+  /** Set when its latest turn drives a browser (Playwright, Chromium…): the page it last named, if any. */
+  browser?: { url?: string; since: string };
+  /** The newest image it saw this run (a screenshot it read; see agent.view), and how many it saw. */
+  lastView?: number;
+  views?: number;
   updatedAt?: string;
 }
 

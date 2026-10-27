@@ -63,6 +63,11 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
   return json as T;
 }
 
+/** A URL for an element that cannot send headers (an <img>): the token goes in the query. */
+export function authedUrl(path: string): string {
+  return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+}
+
 export const get = <T>(path: string) => api<T>('GET', path);
 export const post = <T>(path: string, body: unknown = {}) => api<T>('POST', path, body);
 export const put = <T>(path: string, body: unknown) => api<T>('PUT', path, body);

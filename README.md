@@ -51,7 +51,7 @@ To try the UI in a browser instead, run `covibe app`.
 | Screen | What it shows and does |
 |---|---|
 | **Home** | Today's and this week's estimated spend, tokens, members working now, run outcomes, gate pass rate; your plan's 5-hour and weekly usage as reported by Claude Code; spend per day and per team member; live runs and recent ones. Give a new goal or ask a question right there (⌘N anywhere). |
-| **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; click a desk for the member's details, chat and activity), **Board** (a column per workflow step, a card per member and fix round, gate results), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch). Stop a run, or start a **new goal on this result**. |
+| **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; a member driving a browser gets a browser button above its desk that shows what it sees (see [Browser preview](#browser-preview)); click a desk for the member's details, chat and activity), **Board** (a column per workflow step, a card per member and fix round, gate results), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch). Stop a run, or start a **new goal on this result**. |
 | **Chat** | While a member is working, choose **Now** (it reads your message between tool calls and adjusts), **Stop and redirect** (it ends its current turn and answers you first) or **Next turn**. After the run, the member resumes its session and answers right away; anything it changes is scope-checked and merged into the run's branch. |
 | **Ask a question** | A read-only session with one member in your project: it can read the code but not change it. Follow-up questions continue the same session. |
 | **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, report format, connection, limits), **Workflow** (a drag-and-drop graph: drag steps to reorder, drag members onto a step or between steps, drag a gate's ↺ handle onto an earlier step to set where failed work goes back; plus forms for gates and the fix loop), **Team settings** (connection, sandbox, limits), **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
@@ -358,6 +358,15 @@ can type an option's number.
 A member waits up to 7 days for an answer. Stopping the run cancels open questions; so does quitting the app or
 the terminal that runs it, since runs do not survive their process yet.
 
+## Browser preview
+
+When a member builds or tests a website with a browser (a Bash command running Playwright, Puppeteer, headless
+Chromium and the like, or a browser MCP tool), the Office shows a browser button above its desk. It opens what the
+member sees: the screenshots it looked at, newest first and following new ones live, and the address it went to,
+which you can open in your own browser. Claude sees a page only when it takes a screenshot and reads it (or a
+browser tool returns one), so that is what the preview shows; a test run that takes no screenshot shows the address
+only. covibe keeps the newest 40 images per member and run in the project's `.covibe/covibe.db`.
+
 ## Notifications
 
 The bell at the top right of the app lists the questions waiting for you and the latest notifications from the past
@@ -370,7 +379,7 @@ the bell and which also go out as system notifications (sent while the app is in
 All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event types:
 
 `run.started` `run.finished` `step.started` `step.finished` `step.skipped` `gate.passed` `gate.failed` `loop.goto`
-`agent.started` `agent.text` `agent.tool` `agent.finished` `agent.error` `scope.denied` `scope.violation`
+`agent.started` `agent.text` `agent.tool` `agent.view` `agent.finished` `agent.error` `scope.denied` `scope.violation`
 `git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit`
 `workspace.cleaned` `brain.proposed` `brain.decided` `brain.updated` `team.saved` `question.asked`
 `question.escalated` `question.answered` `run.paused` `run.resumed`
@@ -389,7 +398,8 @@ src/engine/workspace.ts    git worktrees, commits, merges, out-of-scope discard
 src/engine/scope.ts        pre-tool-use write-scope checks
 src/engine/chat.ts         queue-or-resume chat
 src/engine/questions.ts    members' questions: the lead first, then you; pausing the run
-src/events/store.ts        SQLite runs, events, sessions, inbox, questions (node:sqlite, WAL)
+src/engine/browser.ts      spotting members that drive a browser, and the page they go to
+src/events/store.ts        SQLite runs, events, sessions, inbox, questions, images members saw (node:sqlite, WAL)
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
 src/runner/backend.ts      per-agent environment for each backend
 src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.0.0.1, token)

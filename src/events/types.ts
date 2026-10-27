@@ -20,6 +20,7 @@ export type EventType =
   | 'agent.tool'
   | 'agent.finished'
   | 'agent.error'
+  | 'agent.view'
   | 'scope.denied'
   | 'scope.violation'
   | 'git.commit'

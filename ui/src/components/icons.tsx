@@ -17,6 +17,7 @@ export const IconPlus = base(<path d="M8 3v10M3 8h10" />);
 export const IconPlay = base(<path d="M5 3.2v9.6L12.5 8z" fill="currentColor" stroke="none" />);
 export const IconStop = base(<rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor" stroke="none" />);
 export const IconChat = base(<path d="M2.5 4A1.5 1.5 0 0 1 4 2.5h8A1.5 1.5 0 0 1 13.5 4v5.5A1.5 1.5 0 0 1 12 11H7l-3 2.5V11a1.5 1.5 0 0 1-1.5-1.5z" />);
+export const IconBrowser = base(<><rect x="1.8" y="2.5" width="12.4" height="11" rx="1.5" /><path d="M1.8 5.5h12.4M4 4h.1M5.6 4h.1" /></>);
 export const IconBell = base(<><path d="M4 11.5V7a4 4 0 0 1 8 0v4.5l1.2 1.2H2.8z" /><path d="M6.6 13.8a1.5 1.5 0 0 0 2.8 0" /></>);
 export const IconQuestion = base(<><circle cx="8" cy="8" r="6" /><path d="M6.3 6.2a1.8 1.8 0 1 1 2.4 1.7c-.5.2-.7.6-.7 1.1v.3M8 11.3v.1" /></>);
 export const IconCheck = base(<path d="m3.5 8.5 3 3 6-7" />);

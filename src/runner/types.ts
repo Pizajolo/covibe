@@ -83,7 +83,9 @@ export type AgentStreamEvent =
   | { kind: 'tool'; tool: string; input: unknown }
   | { kind: 'denied'; tool: string; input: unknown; reason: string }
   /** Subscription plan usage, as reported by Claude Code. */
-  | { kind: 'rate_limit'; info: RateLimitInfo };
+  | { kind: 'rate_limit'; info: RateLimitInfo }
+  /** An image in a tool's result, which the agent sees (a screenshot it read, say); base64 data. */
+  | { kind: 'image'; tool: string; input: unknown; mediaType: string; data: string };
 
 export interface RateLimitInfo {
   status: string;

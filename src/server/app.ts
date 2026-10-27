@@ -484,6 +484,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       c.abort();
       return { ok: true };
     }],
+    ['GET', '/api/runs/:pid/:rid/views/:vid', (p) => {
+      const { store, run } = findRun(p.pid!, p.rid!);
+      const view = store.getView(run.id, Number(p.vid));
+      if (!view) throw new NotFound(`image ${p.vid} is not kept any more`);
+      return new Raw(view.data, view.mediaType);
+    }],
     ['POST', '/api/runs/:pid/:rid/questions/:qid/answer', (p, body) => {
       const { store, run } = findRun(p.pid!, p.rid!);
       if (!store.isLive(run)) throw new BadRequest('this run has ended, so nobody is waiting for the answer');
@@ -568,7 +574,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         const params = match(pattern, url.pathname);
         if (!params) continue;
         const body = method === 'GET' || method === 'DELETE' ? {} : await readJson(req);
-        return send(res, 200, await handler(params, body, url.searchParams));
+        const out = await handler(params, body, url.searchParams);
+        if (out instanceof Raw) {
+          res.writeHead(200, { 'content-type': out.type, 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' });
+          return res.end(out.data);
+        }
+        return send(res, 200, out);
       }
       send(res, 404, { error: 'not found' });
     } catch (err) {
@@ -643,6 +654,14 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   } catch {
     throw new BadRequest('invalid JSON');
   }
+}
+
+/** A route's answer sent as is (an image), not as JSON. */
+class Raw {
+  constructor(
+    readonly data: Buffer,
+    readonly type: string,
+  ) {}
 }
 
 function send(res: ServerResponse, status: number, body: unknown) {

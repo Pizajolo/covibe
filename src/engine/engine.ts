@@ -10,6 +10,7 @@ import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent, Custo
 import { brainPrompt, commitBrain, curate, ensureBrain, proposeTool } from './brain.js';
 import { evaluate, evaluateGate } from './expr.js';
 import { systemPrompt, turnPrompt } from './prompts.js';
+import { browserActivity } from './browser.js';
 import { ASK_TOOL, Deadline, LEAD_SCHEMA, leadPrompt, leadVerdict, QUESTION_STEP, questionOptions, RunPause, waitForAnswer, type LeadVerdict } from './questions.js';
 import { makeToolChecker, readOnly } from './scope.js';
 import { Workspace } from './workspace.js';
@@ -516,12 +517,25 @@ export function buildInvocation(
   };
 }
 
-/** Turn an agent's stream into stored events (text, tool calls, denials, plan usage). */
+/** Larger images are not kept (screenshots are well below this). */
+const MAX_VIEW_BYTES = 10 << 20;
+
+/** Turn an agent's stream into stored events (text, tool calls, denials, plan usage, images it saw). */
 export function eventSink(store: EventStore, runId: string, base: { step?: string; agent?: string }) {
   const emit = (e: NewEvent) => store.append(runId, e);
   return (e: AgentStreamEvent) => {
     if (e.kind === 'text') emit({ ...base, type: 'agent.text', data: { text: clip(e.text, 4000) } });
-    else if (e.kind === 'tool') emit({ ...base, type: 'agent.tool', data: { tool: e.tool, input: summarize(e.input) } });
+    else if (e.kind === 'tool') {
+      // A browser call carries the page it goes to, read from the full input (the stored one is clipped).
+      const browser = browserActivity(e.tool, e.input);
+      emit({ ...base, type: 'agent.tool', data: { tool: e.tool, input: summarize(e.input), ...(browser ? { browser } : {}) } });
+    } else if (e.kind === 'image' && base.agent) {
+      const data = Buffer.from(e.data, 'base64');
+      if (!data.length || data.length > MAX_VIEW_BYTES || !/^image\/(png|jpeg|gif|webp)$/.test(e.mediaType)) return;
+      const id = store.addView(runId, base.agent, e.mediaType, data);
+      const file = typeof (e.input as { file_path?: unknown })?.file_path === 'string' ? (e.input as { file_path: string }).file_path : null;
+      emit({ ...base, type: 'agent.view', data: { id, tool: e.tool, file, media_type: e.mediaType, bytes: data.length } });
+    }
     else if (e.kind === 'denied') emit({ ...base, type: 'scope.denied', data: { tool: e.tool, input: summarize(e.input), reason: e.reason } });
     else if (e.kind === 'rate_limit') emit({ ...base, type: 'usage.limit', data: { ...e.info } });
   };
