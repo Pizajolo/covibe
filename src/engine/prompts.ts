@@ -32,8 +32,8 @@ export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAs
     const lead = team.lead && team.lead !== agent.name ? team.lead : undefined;
     lines.push(
       lead
-        ? `When you need a decision you cannot make from the goal, your task, the code or the project brain, ask ${lead} (the team lead) with the ask_question tool instead of guessing. If ${lead} cannot answer, it asks the human. You wait for the answer, which the tool returns. Look things up yourself before asking.`
-        : 'When you need a decision only the human can make, ask with the ask_question tool instead of guessing. The whole team pauses until they answer, which the tool returns, so look things up and decide what you can yourself first.',
+        ? `When you need a decision you cannot make from the goal, your task, the code or the project brain, ask ${lead} (the team lead) with the ask_question tool instead of guessing. If ${lead} cannot answer, it asks the human. You wait for the answer, which the tool returns. Look things up yourself before asking. When it is a choice between a few answers, pass them as options.`
+        : 'When you need a decision only the human can make, ask with the ask_question tool instead of guessing. The whole team pauses until they answer, which the tool returns, so look things up and decide what you can yourself first. When it is a choice between a few answers, pass them as options.',
     );
   }
   lines.push(

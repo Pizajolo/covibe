@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { desktop, get, post, type ChatItem, type DiffResult, type RunDetail, type RunEvent, type RunSummary } from '../api';
 import { Composer } from '../components/Composer';
-import { deskNote, DeskPill, deskState, OfficeLegend, OfficeStage, Portrait, useFigures, type DeskState } from '../components/Office';
+import { deskNote, DeskPill, deskState, OfficeLegend, OfficeStage, Portrait, questionDesk, useFigures, type DeskState } from '../components/Office';
 import {
   IconAlert,
   IconBranch,
@@ -13,6 +13,7 @@ import {
   IconHome,
   IconInfo,
   IconLoop,
+  IconQuestion,
   IconRuns,
   IconSend,
   IconSpinner,
@@ -24,6 +25,7 @@ import { Toolbar } from '../components/Toolbar';
 import { AgentStatus, Avatar, Copy, Empty, LoopBadge, Modal, RunStatusPill, useAction, useToast } from '../components/ui';
 import { go, useData, useLive } from '../data';
 import { clock, duration, money, tokens, toolText } from '../format';
+import { useNotify } from '../notify';
 
 type Tab = 'office' | 'board' | 'activity' | 'chat' | 'changes';
 type Delivery = 'queue' | 'steer' | 'interrupt';
@@ -116,6 +118,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
           <div className="row wrap" style={{ gap: 14 }}>
             <RunStatusPill status={run.status} kind={run.kind} paused={run.paused} />
             <LoopBadge loops={run.loops} max={run.maxLoops} />
+            <QuestionsWaiting run={run} projectId={projectId} />
             <Fact icon={<IconClock />} label={duration(run.startedAt, run.finishedAt)} />
             <Fact label={`${money(run.costUsd)} est.`} title="Estimated API-equivalent cost" />
             <Fact label={`${tokens(run.tokens)} tokens`} />
@@ -129,7 +132,6 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
             )}
           </div>
           <Banner run={run} />
-          <Questions run={run} projectId={projectId} onAnswered={reload} />
           {!isAsk && tab !== 'office' && (
             <div className="members">
               {run.agents.map((a, i) => (
@@ -203,68 +205,16 @@ function Fact({ icon, label, title }: { icon?: React.ReactNode; label: string; t
   );
 }
 
-/** Questions from members: the ones waiting for you, with a box to answer, and the ones the lead is answering. */
-function Questions({ run, projectId, onAnswered }: { run: RunSummary; projectId: string; onAnswered: () => Promise<unknown> }) {
-  const live = run.questions.filter((q) => q.status === 'open' || q.status === 'lead');
-  if (!live.length) return null;
+/** Questions for you open in a popup; this brings a dismissed one back. */
+function QuestionsWaiting({ run, projectId }: { run: RunSummary; projectId: string }) {
+  const { showQuestion } = useNotify();
+  const open = run.status === 'running' ? run.questions.filter((q) => q.status === 'open') : [];
+  if (!open.length) return null;
   return (
-    <>
-      {live.map((q) =>
-        q.status === 'lead' ? (
-          <div key={q.id} className="banner info">
-            <IconInfo />
-            <div>
-              <strong>{q.from} asked {q.lead}:</strong> {q.question} <span className="faint">{q.lead} is answering; it comes to you only if {q.lead} cannot.</span>
-            </div>
-          </div>
-        ) : (
-          <QuestionForYou key={q.id} q={q} runId={run.id} projectId={projectId} onAnswered={onAnswered} />
-        ),
-      )}
-    </>
-  );
-}
-
-function QuestionForYou({ q, runId, projectId, onAnswered }: { q: RunSummary['questions'][number]; runId: string; projectId: string; onAnswered: () => Promise<unknown> }) {
-  const [text, setText] = useState('');
-  const toast = useToast();
-  const [answer, answering] = useAction(async () => {
-    await post(`/api/runs/${projectId}/${runId}/questions/${q.id}/answer`, { answer: text });
-    setText('');
-    toast(`Answered. ${q.from} carries on.`);
-    await onAnswered();
-  });
-  return (
-    <div className="banner warn question">
-      <div className="row">
-        <IconAlert />
-        <div>
-          <strong>{q.from} asks you:</strong> {q.forHuman ?? q.question}
-          {q.context && <div className="why">{q.from}'s context: {q.context}</div>}
-          {q.leadNote && <div className="why">Why it comes to you: {q.leadNote}</div>}
-          <div className="why">The team is paused until you answer.</div>
-        </div>
-      </div>
-      <div className="answer">
-        <textarea
-          className="input"
-          rows={2}
-          value={text}
-          placeholder="Your answer"
-          aria-label={`Answer to ${q.from}`}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && text.trim()) {
-              e.preventDefault();
-              void answer();
-            }
-          }}
-        />
-        <button className="btn primary" disabled={!text.trim() || answering} onClick={() => void answer()}>
-          Answer
-        </button>
-      </div>
-    </div>
+    <button className="btn sm ask-btn" onClick={() => showQuestion(projectId, run.id, open[0]!.id)}>
+      <IconQuestion />
+      {open.length === 1 ? `${open[0]!.from} asks you` : `${open.length} questions for you`}
+    </button>
   );
 }
 
@@ -369,6 +319,7 @@ function OfficeTab({ detail, projectId, selected, onSelect, onSent }: { detail: 
   const agent = run.agents.find((a) => a.name === selected);
   const [pane, setPane] = useState<Pane>('overview');
   const [legendOpen, setLegendOpen] = useState(false);
+  const { showQuestion } = useNotify();
   useEffect(() => {
     const on = (e: KeyboardEvent) => e.key === 'Escape' && !(e.target as HTMLElement).matches('textarea, input') && onSelect(undefined);
     window.addEventListener('keydown', on);
@@ -387,7 +338,14 @@ function OfficeTab({ detail, projectId, selected, onSelect, onSent }: { detail: 
   return (
     <div className="office">
       <div className="office-floor">
-        <OfficeStage run={run} members={detail.members} answering={detail.answering} selected={agent?.name} onSelect={pick}>
+        <OfficeStage
+          run={run}
+          members={detail.members}
+          answering={detail.answering}
+          selected={agent?.name}
+          onSelect={pick}
+          onQuestion={(id) => showQuestion(projectId, run.id, id)}
+        >
           <div className="row tiny faint" style={{ gap: 8 }}>
             <span className="grow">Click a desk to see what a member is doing and to talk to it.</span>
             <button className="btn sm ghost" onClick={() => setLegendOpen((o) => !o)} aria-expanded={legendOpen}>
@@ -430,7 +388,8 @@ function MemberPanel({
   const member = detail.members.find((m) => m.name === agent);
   const state = deskState(a, run, detail.answering.includes(agent));
   const events = useMemo(() => detail.events.filter((e) => e.agent === agent), [detail.events, agent]);
-  const question = run.questions.find((q) => q.from === agent && (q.status === 'open' || q.status === 'lead'));
+  const question = run.questions.find((q) => (q.from === agent || (q.status === 'open' && questionDesk(run, q) === agent)) && (q.status === 'open' || q.status === 'lead'));
+  const { showQuestion } = useNotify();
   const answered = run.questions.filter((q) => q.from === agent && q.status === 'answered').slice(-3);
 
   return (
@@ -486,7 +445,12 @@ function MemberPanel({
             {question ? (
               <div>
                 {question.status === 'open' ? (
-                  <><strong>Waiting for your answer:</strong> {question.forHuman ?? question.question} <span className="faint">Answer it in the box at the top of the run.</span></>
+                  <>
+                    <strong>{question.from === agent ? 'Waiting for your answer:' : `Has ${question.from}'s question for you:`}</strong> {question.forHuman ?? question.question}{' '}
+                    <button className="btn sm" style={{ marginTop: 6 }} onClick={() => showQuestion(projectId, run.id, question.id)}>
+                      <IconQuestion /> Answer
+                    </button>
+                  </>
                 ) : (
                   <><strong>Asked {question.lead}:</strong> {question.question}</>
                 )}

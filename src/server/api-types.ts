@@ -39,6 +39,41 @@ export interface AppSettings {
   autoCleanDays: number | null;
   /** Model the team architect uses in design chats. */
   designerModel?: string;
+  /** Which notifications show under the bell and which also go out as system notifications. */
+  notifications: Record<NotificationKind, NotifyChoice>;
+}
+
+/**
+ * question: a member asks you. limit: the plan's usage is close to or at its
+ * limit. stopped: a run stopped or ran out of fix rounds. error: a run failed.
+ * done: a run finished with every gate passed.
+ */
+export type NotificationKind = 'question' | 'limit' | 'stopped' | 'error' | 'done';
+
+export interface NotifyChoice {
+  /** List it under the bell. */
+  bell: boolean;
+  /** Also send a system notification. */
+  push: boolean;
+}
+
+export interface AppNotification {
+  /** Stable across reloads: project and event. */
+  id: string;
+  kind: NotificationKind;
+  title: string;
+  body?: string;
+  ts: string;
+  projectId: string;
+  runId: string;
+  /** The run's goal. */
+  goal?: string;
+  /** For a question: its id, and whether it still waits for you. */
+  questionId?: number;
+  open?: boolean;
+  /** Show under the bell / send as a system notification, from the settings. */
+  bell: boolean;
+  push: boolean;
 }
 
 export interface Overview {
@@ -95,6 +130,8 @@ export interface QuestionView {
   status: 'lead' | 'open' | 'answered' | 'cancelled';
   question: string;
   context?: string;
+  /** Answers to pick from, when it is a choice (the lead's, once it passed the question on). */
+  options?: string[];
   /** Set when the lead passed it on: the question as put to you, and why. */
   forHuman?: string;
   leadNote?: string;

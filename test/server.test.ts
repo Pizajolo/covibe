@@ -207,9 +207,16 @@ describe('server', () => {
 
   it('lists and cleans up worktrees, and stores settings', async () => {
     const { api } = await setup();
-    expect(await api('GET', '/api/settings')).toEqual({ autoCleanDays: null });
-    expect(await api('PUT', '/api/settings', { autoCleanDays: 7 })).toEqual({ autoCleanDays: 7 });
+    const on = { bell: true, push: true };
+    const notifications = { question: on, limit: on, stopped: on, error: on, done: on };
+    expect(await api('GET', '/api/settings')).toEqual({ autoCleanDays: null, notifications });
+    expect(await api('PUT', '/api/settings', { autoCleanDays: 7 })).toEqual({ autoCleanDays: 7, notifications });
     await expect(api('PUT', '/api/settings', { autoCleanDays: -1 })).rejects.toThrow(/between/);
+    // Notification choices change one kind and one channel at a time.
+    expect((await api('PUT', '/api/settings', { notifications: { done: { push: false } } })).notifications).toEqual({ ...notifications, done: { bell: true, push: false } });
+    expect((await api('GET', '/api/settings')).notifications.done).toEqual({ bell: true, push: false });
+    await expect(api('PUT', '/api/settings', { notifications: { lunch: { push: false } } })).rejects.toThrow(/unknown notification kind/);
+    await expect(api('PUT', '/api/settings', { notifications: { done: { push: 'yes' } } })).rejects.toThrow(/true or false/);
 
     const project = await api('POST', '/api/projects', { path: tempRepo() });
     const team = await api('POST', '/api/teams', { name: 'duo', template: 'build-and-review' });
@@ -222,6 +229,11 @@ describe('server', () => {
     expect(await api('GET', `/api/projects/${project.id}/worktrees`)).toEqual([]);
     const detail = await api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`);
     expect(detail.summary.worktreesRemoved).toBe(true);
+
+    // The finished run is under the bell, but not pushed: done notifications were switched off for push above.
+    expect(await api('GET', '/api/notifications')).toEqual([expect.objectContaining({ kind: 'done', title: 'Job done', body: 'g', projectId: project.id, runId, bell: true, push: false })]);
+    await api('PUT', '/api/settings', { notifications: { done: { bell: false } } });
+    expect(await api('GET', '/api/notifications')).toEqual([]);
   });
 
   it('sets up projects: open (initialising git if asked), create empty, or clone', async () => {

@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentState, MemberInfo, RunSummary } from '../api';
 import { money } from '../format';
 import { drawPortrait, drawScene, figureFor, kindOf, layout, spotBox, W, type BoardStep, type DeskState, type Figure, type Scene } from './office-art';
-import { DESK_HELP, DESK_LABEL, deskNote, deskState } from './office-state';
+import { DESK_HELP, DESK_LABEL, deskNote, deskQuestion, deskState } from './office-state';
 
-export { DESK_LABEL, deskNote, deskState } from './office-state';
+export { DESK_LABEL, deskNote, deskState, questionDesk } from './office-state';
 export type { DeskState } from './office-art';
 
 /** Light or dark, following the app's theme. */
@@ -107,6 +107,7 @@ export function OfficeStage({
   answering,
   selected,
   onSelect,
+  onQuestion,
   children,
 }: {
   run: RunSummary;
@@ -114,6 +115,8 @@ export function OfficeStage({
   answering: string[];
   selected?: string;
   onSelect: (name: string) => void;
+  /** Open a question for you; its desk (the lead's, usually) shows a question mark. */
+  onQuestion?: (id: number) => void;
   /** Shown under the room, at its width. */
   children?: React.ReactNode;
 }) {
@@ -124,7 +127,7 @@ export function OfficeStage({
   const hovered = useRef<string | undefined>(undefined);
   const desks = run.agents.map((a, i) => {
     const state = deskState(a, run, answering.includes(a.name));
-    return { agent: a, state, note: deskNote(a, state, run), ...spots[i]! };
+    return { agent: a, state, note: deskNote(a, state, run), question: deskQuestion(a, run), ...spots[i]! };
   });
   const scene: Scene = {
     w: W,
@@ -143,6 +146,23 @@ export function OfficeStage({
     <div className="office-room" style={{ ['--ratio' as string]: W / h }}>
       <div className="office-stage" style={{ aspectRatio: `${W} / ${h}` }}>
         <canvas ref={canvas} width={W} height={h} aria-hidden />
+        {onQuestion &&
+          desks.map(
+            (d) =>
+              d.question && (
+                <button
+                  key={`ask-${d.agent.name}`}
+                  className="office-ask"
+                  aria-label={`${d.question.from} asks you: ${d.question.forHuman ?? d.question.question}. Answer`}
+                  title={`${d.question.from} asks you: ${d.question.forHuman ?? d.question.question}`}
+                  // Over the thought bubble beside the head (see stateBubble in office-art).
+                  style={{ left: `${((d.cx - 17) / W) * 100}%`, top: `${((d.by - 23) / h) * 100}%` }}
+                  onClick={() => onQuestion(d.question!.id)}
+                >
+                  ?
+                </button>
+              ),
+          )}
         {desks.map((d) => {
           const box = spotBox(d.cx, d.by);
           return (

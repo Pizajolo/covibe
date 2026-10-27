@@ -36,9 +36,9 @@ import { EventStore } from '../events/store.js';
 import type { DeliveryMode, RunEvent, RunRecord } from '../events/types.js';
 import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
-import type { AppSettings, MemberInfo, RunDetail, RunSummary, TeamDetail } from './api-types.js';
+import type { MemberInfo, RunDetail, RunSummary, TeamDetail } from './api-types.js';
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
-import { chatThreads, computeStats, summarizeRun } from './projections.js';
+import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, summarizeRun } from './projections.js';
 
 const exec = promisify(execFile);
 const UI_DIR = new URL('../../dist-ui/', import.meta.url).pathname;
@@ -165,6 +165,21 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
             activeAgents,
           };
         }),
+    );
+  };
+
+  /** The bell's list, from the last week of every project. */
+  const notifications = () => {
+    const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
+    return collectNotifications(
+      library
+        .projects()
+        .filter((p) => existsSync(p.path))
+        .map((p) => {
+          const store = storeFor(p);
+          return { projectId: p.id, events: store.eventsOfType(NOTIFY_EVENTS, since), run: (id: string) => store.getRun(id), live: (r: RunRecord) => store.isLive(r) };
+        }),
+      library.settings().notifications,
     );
   };
 
@@ -389,7 +404,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     }],
     ['GET', '/api/stats', () => stats()],
     ['GET', '/api/settings', () => library.settings()],
-    ['PUT', '/api/settings', (_p, body) => library.updateSettings(body as Partial<AppSettings>)],
+    ['PUT', '/api/settings', (_p, body) => library.updateSettings(body as Parameters<Library['updateSettings']>[0])],
+    ['GET', '/api/notifications', () => notifications()],
     ['GET', '/api/projects/:pid/worktrees', async (p) => {
       const project = library.project(p.pid!);
       return worktreeReport(project.path, storeFor(project));

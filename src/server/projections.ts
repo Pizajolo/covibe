@@ -2,7 +2,7 @@
 // talks to SDKs or git; everything is derived from stored events.
 import type { RunEvent, RunRecord } from '../events/types.js';
 import { QUESTION_STEP } from '../engine/questions.js';
-import type { AgentState, BoardCard, ChatItem, QuestionView, RunSummary, Stats, StepState, UsageWindow } from './api-types.js';
+import type { AgentState, AppNotification, BoardCard, ChatItem, NotificationKind, NotifyChoice, QuestionView, RunSummary, Stats, StepState, UsageWindow } from './api-types.js';
 
 type D = Record<string, any>;
 
@@ -173,7 +173,7 @@ export function summarizeRun(
         break;
       case 'question.asked': {
         const toLead = d.to !== 'human';
-        questions.set(d.id, { id: d.id, from: e.agent!, status: toLead ? 'lead' : 'open', question: d.question, context: d.context ?? undefined, lead: toLead ? d.to : undefined, askedAt: e.ts });
+        questions.set(d.id, { id: d.id, from: e.agent!, status: toLead ? 'lead' : 'open', question: d.question, context: d.context ?? undefined, options: d.options ?? undefined, lead: toLead ? d.to : undefined, askedAt: e.ts });
         if (toLead) answeringFor.set(d.to, e.agent!);
         const a = agent(e.agent!);
         a.waitingOn = d.to;
@@ -183,7 +183,7 @@ export function summarizeRun(
       }
       case 'question.escalated': {
         const q = questions.get(d.id);
-        if (q) Object.assign(q, { status: 'open', forHuman: d.question, leadNote: d.reason ?? undefined });
+        if (q) Object.assign(q, { status: 'open', forHuman: d.question, leadNote: d.reason ?? undefined, options: d.options ?? undefined });
         if (d.from) agent(d.from).waitingOn = 'human';
         break;
       }
@@ -397,4 +397,64 @@ export function computeStats(
   stats.usage = [...usage.values()].sort((a, b) => a.window.localeCompare(b.window));
   stats.gatePassRate = gates ? gatesPassed / gates : undefined;
   return stats;
+}
+
+/** The events notifications come from. */
+export const NOTIFY_EVENTS = ['question.asked', 'question.escalated', 'question.answered', 'usage.limit', 'run.finished'];
+
+const LIMIT_WINDOWS: Record<string, string> = {
+  five_hour: '5-hour',
+  seven_day: 'weekly',
+  seven_day_opus: 'weekly Opus',
+  seven_day_sonnet: 'weekly Sonnet',
+  seven_day_overage_included: 'weekly',
+  overage: 'extra usage',
+};
+
+/**
+ * What the bell lists, newest first: questions for you, plan limits coming
+ * close or reached, and workflow runs that stopped, failed or finished. Kinds
+ * switched off for both the bell and system notifications are left out.
+ */
+export function collectNotifications(
+  sources: { projectId: string; events: RunEvent[]; run: (id: string) => RunRecord | undefined; live: (r: RunRecord) => boolean }[],
+  settings: Record<NotificationKind, NotifyChoice>,
+  limit = 50,
+): AppNotification[] {
+  const out: AppNotification[] = [];
+  const limits = new Set<string>();
+  for (const src of sources) {
+    const answered = new Set(src.events.filter((e) => e.type === 'question.answered').map((e) => Number((e.data as D).id)));
+    for (const e of src.events) {
+      const d = e.data as D;
+      const run = src.run(e.runId);
+      const base = { id: `${src.projectId}:${e.id}`, ts: e.ts, projectId: src.projectId, runId: e.runId, goal: run?.goal };
+      const add = (kind: NotificationKind, n: Omit<AppNotification, 'id' | 'ts' | 'projectId' | 'runId' | 'kind' | 'bell' | 'push'>) => {
+        const choice = settings[kind];
+        if (choice.bell || choice.push) out.push({ ...base, kind, ...n, bell: choice.bell, push: choice.push });
+      };
+      if (e.type === 'question.escalated' || (e.type === 'question.asked' && d.to === 'human')) {
+        const id = Number(d.id);
+        const from = e.type === 'question.escalated' ? String(d.from) : e.agent;
+        add('question', { title: `${from} asks you`, body: String(d.question), questionId: id, open: !answered.has(id) && !!run && src.live(run) });
+      } else if (e.type === 'usage.limit' && (d.status === 'allowed_warning' || d.status === 'rejected')) {
+        // Every member reports the same window; one notification per window, state and reset.
+        const key = `${d.window}/${d.status}/${d.resetsAt}`;
+        if (limits.has(key)) continue;
+        limits.add(key);
+        const name = LIMIT_WINDOWS[String(d.window)] ?? 'plan';
+        const used = typeof d.utilization === 'number' ? Math.round(d.utilization > 1 ? d.utilization : d.utilization * 100) : undefined;
+        add('limit', {
+          title: d.status === 'rejected' ? `Reached your ${name} limit` : `Close to your ${name} limit`,
+          body: d.status === 'rejected' ? 'Members on your subscription wait until it resets.' : used !== undefined ? `${used}% used.` : undefined,
+        });
+      } else if (e.type === 'run.finished' && run?.kind === 'workflow') {
+        if (d.status === 'succeeded') add('done', { title: 'Job done', body: run.goal });
+        else if (d.status === 'escalated') add('stopped', { title: 'Stopped: out of fix rounds', body: run.goal });
+        else if (d.reason === 'aborted') add('stopped', { title: 'Run stopped', body: run.goal });
+        else add('error', { title: 'Run failed', body: d.reason ? `${run.goal}: ${d.reason}` : run.goal });
+      }
+    }
+  }
+  return out.sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, limit);
 }

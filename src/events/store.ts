@@ -93,6 +93,8 @@ export class EventStore {
     if (!cols.has('base')) this.db.exec('ALTER TABLE runs ADD COLUMN base TEXT');
     const inboxCols = new Set((this.db.prepare('PRAGMA table_info(inbox)').all() as Row[]).map((r) => String(r.name)));
     if (!inboxCols.has('mode')) this.db.exec("ALTER TABLE inbox ADD COLUMN mode TEXT NOT NULL DEFAULT 'queue'");
+    const questionCols = new Set((this.db.prepare('PRAGMA table_info(questions)').all() as Row[]).map((r) => String(r.name)));
+    if (!questionCols.has('options')) this.db.exec('ALTER TABLE questions ADD COLUMN options TEXT');
   }
 
   close() {
@@ -253,10 +255,10 @@ export class EventStore {
     return this.getProposal(id)!;
   }
 
-  addQuestion(q: { runId: string; from: string; text: string; context?: string; status: 'lead' | 'open' }): Question {
+  addQuestion(q: { runId: string; from: string; text: string; context?: string; options?: string[]; status: 'lead' | 'open' }): Question {
     const r = this.db
-      .prepare('INSERT INTO questions (run_id, from_agent, text, context, status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(q.runId, q.from, q.text, q.context ?? null, q.status, now());
+      .prepare('INSERT INTO questions (run_id, from_agent, text, context, options, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(q.runId, q.from, q.text, q.context ?? null, q.options ? JSON.stringify(q.options) : null, q.status, now());
     return this.getQuestion(Number(r.lastInsertRowid))!;
   }
 
@@ -274,8 +276,10 @@ export class EventStore {
   }
 
   /** The lead could not answer: the question now waits for the human. */
-  escalateQuestion(id: number, forHuman: string, leadNote?: string): Question {
-    this.db.prepare("UPDATE questions SET status = 'open', for_human = ?, lead_note = ? WHERE id = ? AND status = 'lead'").run(forHuman, leadNote ?? null, id);
+  escalateQuestion(id: number, forHuman: string, leadNote?: string, options?: string[]): Question {
+    this.db
+      .prepare("UPDATE questions SET status = 'open', for_human = ?, lead_note = ?, options = ? WHERE id = ? AND status = 'lead'")
+      .run(forHuman, leadNote ?? null, options ? JSON.stringify(options) : null, id);
     return this.getQuestion(id)!;
   }
 
@@ -338,6 +342,7 @@ function toQuestion(r: Row): Question {
     from: String(r.from_agent),
     text: String(r.text),
     context: opt(r.context),
+    options: r.options == null ? undefined : (JSON.parse(String(r.options)) as string[]),
     status: r.status as QuestionStatus,
     forHuman: opt(r.for_human),
     leadNote: opt(r.lead_note),

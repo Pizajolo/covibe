@@ -54,7 +54,8 @@ export type LivePriority = 'next' | 'now';
 
 export type CustomParam =
   | { type: 'string' | 'number' | 'boolean'; description: string; optional?: boolean; enum?: string[] }
-  | { type: 'files'; description: string; optional?: boolean };
+  | { type: 'files'; description: string; optional?: boolean }
+  | { type: 'list'; description: string; optional?: boolean };
 
 /** A tool covibe implements in-process and offers to an agent. */
 export interface CustomTool {

@@ -18,10 +18,26 @@ export const LEAD_SCHEMA = {
     answer: { type: 'string', description: 'Your answer (decision "answer").' },
     question_for_human: { type: 'string', description: 'The question as the human should see it, understandable without other context (decision "ask_human").' },
     reason: { type: 'string', description: 'Why only the human can answer (decision "ask_human").' },
+    options_for_human: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'The answers the human can pick from, if it is a choice (decision "ask_human"). They can still write their own.',
+    },
   },
 };
 
-export type LeadVerdict = { answer: string } | { forHuman: string; note?: string };
+export type LeadVerdict = { answer: string } | { forHuman: string; note?: string; options?: string[] };
+
+/** The choices offered with a question: trimmed, distinct, at most 8; undefined when fewer than two. */
+export function questionOptions(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  for (const v of value) {
+    const text = typeof v === 'string' ? v.trim() : '';
+    if (text && seen.size < 8) seen.add(text);
+  }
+  return seen.size >= 2 ? [...seen] : undefined;
+}
 
 /** Read the lead's report; anything unusable passes the question on to the human. */
 export function leadVerdict(value: unknown, question: string): LeadVerdict {
@@ -29,18 +45,19 @@ export function leadVerdict(value: unknown, question: string): LeadVerdict {
   const str = (k: string) => (typeof v[k] === 'string' && (v[k] as string).trim() ? (v[k] as string).trim() : undefined);
   const answer = str('answer');
   if (v.decision === 'answer' && answer) return { answer };
-  if (v.decision === 'ask_human') return { forHuman: str('question_for_human') ?? question, note: str('reason') };
+  if (v.decision === 'ask_human') return { forHuman: str('question_for_human') ?? question, note: str('reason'), options: questionOptions(v.options_for_human) };
   return { forHuman: question, note: 'the lead did not give a usable answer' };
 }
 
-export function leadPrompt(p: { goal: string; lead: string; from: string; step: string; question: string; context?: string }): string {
+export function leadPrompt(p: { goal: string; lead: string; from: string; step: string; question: string; context?: string; options?: string[] }): string {
   return [
     `# Goal\n${p.goal}`,
     `# Question from ${p.from}\n${p.question}`,
+    ...(p.options ? [`## Options ${p.from} sees\n${p.options.map((o) => `- ${o}`).join('\n')}`] : []),
     ...(p.context ? [`## Context from ${p.from}\n${p.context}`] : []),
     `You are ${p.lead}, the team lead. ${p.from} is waiting for your answer before it continues step "${p.step}".`,
     `Answer it yourself if the goal, the plan, the code or the project brain settle it, or if it is a call you can make as lead. Pass it to the human only when the decision is theirs: product or scope choices the goal leaves open, trade-offs with real cost, credentials or access, or anything you would be guessing. The whole run pauses while the human answers, so do not pass on what you can decide.`,
-    'You can read but not change anything. Return decision "answer" with your answer, or decision "ask_human" with question_for_human and reason.',
+    'You can read but not change anything. Return decision "answer" with your answer, or decision "ask_human" with question_for_human and reason, and options_for_human when it is a choice between a few answers.',
   ].join('\n\n');
 }
 

@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConfigError, loadTeam } from '../src/config/load.js';
 import { runTeam } from '../src/engine/engine.js';
-import { answerQuestion, Deadline, LEAD_SCHEMA, leadVerdict, RunPause } from '../src/engine/questions.js';
+import { answerQuestion, Deadline, LEAD_SCHEMA, leadVerdict, questionOptions, RunPause } from '../src/engine/questions.js';
 import { EventStore } from '../src/events/store.js';
 import type { RunEvent } from '../src/events/types.js';
 import { summarizeRun } from '../src/server/projections.js';
@@ -80,6 +80,13 @@ describe('leadVerdict', () => {
     expect(leadVerdict({ decision: 'ask_human' }, 'q')).toEqual({ forHuman: 'q', note: undefined });
     expect(leadVerdict({ decision: 'answer', answer: '' }, 'q')).toMatchObject({ forHuman: 'q' });
     expect(leadVerdict(undefined, 'q')).toMatchObject({ forHuman: 'q' });
+  });
+
+  it('keeps the options the lead offers the human', () => {
+    expect(leadVerdict({ decision: 'ask_human', question_for_human: 'Tone?', options_for_human: [' Formal ', 'Casual', 'Casual', ''] }, 'q')).toEqual({ forHuman: 'Tone?', note: undefined, options: ['Formal', 'Casual'] });
+    expect(questionOptions(['only one'])).toBeUndefined();
+    expect(questionOptions('a, b')).toBeUndefined();
+    expect(questionOptions(Array.from({ length: 12 }, (_, i) => `o${i}`))).toHaveLength(8);
   });
 });
 
@@ -202,6 +209,34 @@ describe('questions in a run', () => {
     expect(runner.toolResults).toContainEqual({ agent: 'frontend', tool: 'ask_question', result: 'Answer from the human:\nCasual: "hey there".' });
     expect(types(store.events(outcome.runId))).toEqual(['question.asked', 'question.escalated', 'run.paused', 'question.answered', 'run.resumed']);
     expect(store.questions(outcome.runId)).toMatchObject([{ status: 'answered', answeredBy: 'human', forHuman: 'Should the greeting be formal?' }]);
+  });
+
+  it('offers the options a member gives, through the lead, to the human', async () => {
+    const repo = tempRepo();
+    const store = new EventStore(':memory:');
+    const runner = new ScriptedRunner(
+      scripts(() => ({ structured: { decision: 'ask_human', reason: 'a product decision' } }), {
+        frontend: () => ({
+          call: [{ tool: 'ask_question', args: { question: 'Which tone?', options: ['Formal', 'Casual'] } }],
+          write: { 'web/index.html': '<h1>hello</h1>' },
+          structured: build(['web/index.html']),
+        }),
+      }),
+    );
+    store.subscribe((e) => {
+      if (e.type !== 'run.paused') return;
+      const run = store.getRun(e.runId)!;
+      const summary = summarizeRun(run, store.events(run.id), { id: 'p', name: 'p' }, true);
+      expect(summary.questions).toMatchObject([{ status: 'open', options: ['Formal', 'Casual'], lead: 'manager' }]);
+      setTimeout(() => answerQuestion(store, run.id, 1, 'Casual'), 0);
+    });
+    const outcome = await runTeam({ team: loadTeam(EXAMPLE), repo, goal: 'Add a greeting', store, runner });
+
+    expect(outcome.status).toBe('succeeded');
+    expect(runner.callsFor('manager').find((c) => isQuestion(c.prompt))!.prompt).toContain('- Formal\n- Casual');
+    expect(store.events(outcome.runId).find((e) => e.type === 'question.escalated')).toMatchObject({ data: { options: ['Formal', 'Casual'] } });
+    expect(store.questions(outcome.runId)).toMatchObject([{ options: ['Formal', 'Casual'], answer: 'Casual' }]);
+    expect(runner.toolResults).toContainEqual({ agent: 'frontend', tool: 'ask_question', result: 'Answer from the human:\nCasual' });
   });
 
   it("sends the lead's own questions straight to the human, and cancels open questions when the run stops", async () => {

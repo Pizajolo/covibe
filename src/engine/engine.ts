@@ -10,7 +10,7 @@ import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent, Custo
 import { brainPrompt, commitBrain, curate, ensureBrain, proposeTool } from './brain.js';
 import { evaluate, evaluateGate } from './expr.js';
 import { systemPrompt, turnPrompt } from './prompts.js';
-import { ASK_TOOL, Deadline, LEAD_SCHEMA, leadPrompt, leadVerdict, QUESTION_STEP, RunPause, waitForAnswer, type LeadVerdict } from './questions.js';
+import { ASK_TOOL, Deadline, LEAD_SCHEMA, leadPrompt, leadVerdict, QUESTION_STEP, questionOptions, RunPause, waitForAnswer, type LeadVerdict } from './questions.js';
 import { makeToolChecker, readOnly } from './scope.js';
 import { Workspace } from './workspace.js';
 
@@ -334,31 +334,34 @@ class Engine {
       params: {
         question: { type: 'string', description: 'What you need decided, with the options you see, so it can be answered without seeing your work.' },
         context: { type: 'string', optional: true, description: 'What you found or tried, the files involved, and what you would do by default.' },
+        options: { type: 'list', optional: true, description: 'When it is a choice: the answers to pick from (2 to 8, short). Any other answer is still possible.' },
       },
       run: (args) => {
         const context = typeof args.context === 'string' && args.context.trim() ? args.context.trim() : undefined;
-        return this.ask(from, step, String(args.question ?? '').trim(), context, deadline);
+        return this.ask(from, step, String(args.question ?? '').trim(), context, questionOptions(args.options), deadline);
       },
     };
   }
 
   /** A member's question: the lead first, then the human (pausing the run). Returns the text the member sees. */
-  private async ask(from: string, step: string, text: string, context: string | undefined, deadline: Deadline): Promise<string> {
+  private async ask(from: string, step: string, text: string, context: string | undefined, options: string[] | undefined, deadline: Deadline): Promise<string> {
     if (!text) throw new Error('the question is empty');
     const lead = this.team.lead && this.team.lead !== from ? this.team.lead : undefined;
     const release = deadline.hold();
     try {
-      const { id } = this.store.addQuestion({ runId: this.runId, from, text, context, status: lead ? 'lead' : 'open' });
-      this.emit({ step, agent: from, type: 'question.asked', data: { id, question: text, context: context ?? null, to: lead ?? 'human' } });
+      const { id } = this.store.addQuestion({ runId: this.runId, from, text, context, options, status: lead ? 'lead' : 'open' });
+      this.emit({ step, agent: from, type: 'question.asked', data: { id, question: text, context: context ?? null, options: options ?? null, to: lead ?? 'human' } });
       if (lead) {
-        const verdict = await this.consultLead(lead, from, step, text, context);
+        const verdict = await this.consultLead(lead, from, step, text, context, options);
         if ('answer' in verdict) {
           this.store.answerQuestion(id, verdict.answer, lead);
           this.emit({ step, agent: from, type: 'question.answered', data: { id, by: lead, answer: verdict.answer } });
           return `Answer from ${lead}:\n${verdict.answer}`;
         }
-        this.store.escalateQuestion(id, verdict.forHuman, verdict.note);
-        this.emit({ step, agent: lead, type: 'question.escalated', data: { id, from, question: verdict.forHuman, reason: verdict.note ?? null } });
+        // A rephrased question comes with the lead's own options; otherwise the member's still fit.
+        const choices = verdict.options ?? (verdict.forHuman === text ? options : undefined);
+        this.store.escalateQuestion(id, verdict.forHuman, verdict.note, choices);
+        this.emit({ step, agent: lead, type: 'question.escalated', data: { id, from, question: verdict.forHuman, reason: verdict.note ?? null, options: choices ?? null } });
       }
       this.pause.add(id);
       try {
@@ -377,10 +380,10 @@ class Engine {
    * knows the plan without its own session being touched. If anything goes
    * wrong, the question goes on to the human.
    */
-  private async consultLead(leadName: string, from: string, step: string, question: string, context: string | undefined): Promise<LeadVerdict> {
+  private async consultLead(leadName: string, from: string, step: string, question: string, context: string | undefined, options: string[] | undefined): Promise<LeadVerdict> {
     const lead = readOnly(this.team.agents[leadName]!);
     const base = { step: QUESTION_STEP, agent: leadName };
-    const passOn = (why: string): LeadVerdict => ({ forHuman: question, note: `${leadName} could not answer: ${why}` });
+    const passOn = (why: string): LeadVerdict => ({ forHuman: question, note: `${leadName} could not answer: ${why}`, options });
     try {
       const { env } = backendEnv(lead.backend, this.opts.env ?? process.env);
       const session = this.store.getSession(this.runId, leadName);
@@ -390,7 +393,7 @@ class Engine {
       const inv = buildInvocation(this.team, this.store, this.runId, lead, {
         cwd,
         root: this.team.isolation === 'none' ? this.workspace.repo : cwd,
-        prompt: leadPrompt({ goal: this.opts.goal, lead: leadName, from, step, question, context }),
+        prompt: leadPrompt({ goal: this.opts.goal, lead: leadName, from, step, question, context, options }),
         resume: session?.sessionId,
         fork: true,
         env,

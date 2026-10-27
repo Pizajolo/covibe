@@ -8,4 +8,5 @@ contextBridge.exposeInMainWorld('covibe', {
   reveal: (path) => ipcRenderer.invoke('covibe:reveal', path),
   openPath: (path) => ipcRenderer.invoke('covibe:open-path', path),
   openExternal: (url) => ipcRenderer.invoke('covibe:open-external', url),
+  focus: () => ipcRenderer.invoke('covibe:focus'),
 });

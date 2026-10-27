@@ -8,6 +8,8 @@ export interface DesktopBridge {
   openPath(path: string): Promise<void>;
   reveal(path: string): Promise<void>;
   openExternal(url: string): Promise<void>;
+  /** Bring the window to the front. */
+  focus(): Promise<void>;
   platform: string;
 }
 

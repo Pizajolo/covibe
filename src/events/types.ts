@@ -118,6 +118,8 @@ export interface Question {
   /** What the member asked. */
   text: string;
   context?: string;
+  /** Answers to pick from, when it is a choice; any other answer is fine too. */
+  options?: string[];
   status: QuestionStatus;
   /** The question as put to the human (the lead may rephrase it), and why the lead passed it on. */
   forHuman?: string;

@@ -254,13 +254,15 @@ function customServer(tools: CustomTool[]) {
         let schema: z.ZodTypeAny =
           p.type === 'files'
             ? z.array(z.object({ path: z.string(), content: z.string() }))
-            : p.type === 'number'
-              ? z.number()
-              : p.type === 'boolean'
-                ? z.boolean()
-                : p.enum
-                  ? z.enum(p.enum as [string, ...string[]])
-                  : z.string();
+            : p.type === 'list'
+              ? z.array(z.string())
+              : p.type === 'number'
+                ? z.number()
+                : p.type === 'boolean'
+                  ? z.boolean()
+                  : p.enum
+                    ? z.enum(p.enum as [string, ...string[]])
+                    : z.string();
         schema = schema.describe(p.description);
         return [k, p.optional ? schema.optional() : schema];
       }),

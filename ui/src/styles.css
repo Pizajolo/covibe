@@ -286,11 +286,60 @@ label.field .seg, .field .seg, .form-section > .seg { align-self: flex-start; }
 .dot.error { background: var(--bad); }
 .dot.waiting { background: var(--warn); }
 .dot.asking { background: var(--warn); }
-.question { flex-direction: column; gap: 8px; }
-.question .row { gap: 8px; align-items: flex-start; }
-.question .why { font-size: 12px; color: var(--text-2); }
-.question .answer { display: flex; gap: 8px; align-items: flex-end; }
-.question .answer textarea { flex: 1; min-height: 34px; }
+
+/* questions for you: the popup (components/Notifications.tsx) */
+.ask { display: flex; flex-direction: column; gap: 6px; }
+.ask p { margin: 0; }
+.ask-q { font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+.ask-why { font-size: 12px; color: var(--text-2); }
+.ask-options { display: flex; flex-direction: column; gap: 6px; }
+.ask-option {
+  display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  font-size: 13px; background: var(--surface); cursor: pointer;
+}
+.ask-option:hover { background: var(--surface-hover); }
+.ask-option.on { border-color: var(--accent); background: var(--accent-soft); }
+.ask-option input[type='radio'] { margin: 2px 0 0; accent-color: var(--accent); flex: none; }
+.ask-option > span { flex: 1; min-width: 0; }
+.answer-box { width: 100%; min-height: 64px; display: block; }
+.ask-btn { color: var(--warn); border-color: var(--warn); }
+.ask-btn svg { color: var(--warn); }
+.ellipsis-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* the bell in the toolbar */
+.bell-wrap { position: relative; }
+.bell { position: relative; width: 30px; padding: 0; }
+.bell svg { width: 16px; height: 16px; }
+.bell.asks svg { color: var(--warn); }
+.bell-count {
+  position: absolute; top: 1px; right: 0; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px;
+  background: var(--bad); color: #fff; font-size: 10px; font-weight: 600; line-height: 15px; text-align: center;
+}
+.bell-pop {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 40; width: min(380px, calc(100vw - 32px)); max-height: min(520px, 75vh);
+  display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-pop);
+}
+.bell-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.bell-list { overflow-y: auto; padding: 4px; display: flex; flex-direction: column; }
+.bell-section { padding: 8px 10px 4px; font-size: 11px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.04em; }
+.bell-item {
+  display: flex; gap: 10px; align-items: flex-start; text-align: left; width: 100%; padding: 8px 10px; border: 0; border-radius: 8px;
+  background: none; color: var(--text); font: 13px var(--font); cursor: pointer;
+}
+.bell-item:hover { background: var(--surface-hover); }
+.bell-item.open { background: var(--warn-soft); }
+.bell-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.bell-text > span:not(.tiny) { font-size: 12px; color: var(--text-2); }
+.bell-icon { flex: none; width: 24px; height: 24px; border-radius: 12px; display: grid; place-items: center; background: var(--surface-2); color: var(--text-2); }
+.bell-icon svg { width: 13px; height: 13px; }
+.bell-icon.question, .bell-icon.limit { background: var(--warn-soft); color: var(--warn); }
+.bell-icon.error { background: var(--bad-soft); color: var(--bad); }
+.bell-icon.done { background: var(--good-soft); color: var(--good); }
+.bell-icon.stopped { background: var(--info-soft); color: var(--accent); }
+.bell-empty { padding: 16px 12px; margin: 0; }
+.notify-grid { display: grid; grid-template-columns: 1fr auto auto; gap: 8px 18px; align-items: center; font-size: 13px; }
+.notify-grid .head { font-size: 11px; font-weight: 600; color: var(--text-3); }
+.notify-grid input { accent-color: var(--accent); }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(10,108,255,.5); } 70% { box-shadow: 0 0 0 6px rgba(10,108,255,0); } 100% { box-shadow: 0 0 0 0 rgba(10,108,255,0); } }
 @media (prefers-reduced-motion: reduce) { .dot.working { animation: none; } .spin { animation: none !important; } }
 .spin { animation: spin 1s linear infinite; }
@@ -578,6 +627,16 @@ table.table td.r, table.table th.r { text-align: right; }
 }
 .office-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; display: block; }
 .office-spot { position: absolute; border: 0; padding: 0; background: none; border-radius: 4px; cursor: pointer; }
+/* The question for you on a desk (the lead's, usually): a pixel "?" over the thought bubble. */
+.office-ask {
+  position: absolute; z-index: 2; transform: translate(-50%, -50%); width: clamp(20px, 4.4cqw, 34px); aspect-ratio: 1;
+  display: grid; place-items: center; padding: 0; border: 2px solid var(--plate-line); border-radius: 4px; box-shadow: 0 0.15em 0 var(--plate-line);
+  background: #ffb020; color: #3a2200; font: 600 clamp(12px, 2.6cqw, 22px) / 1 var(--pixel); cursor: pointer;
+  animation: office-bob 1.2s steps(2, jump-none) infinite;
+}
+.office-ask:hover { background: #ffc54d; }
+.office-ask:focus-visible { outline: 2px dashed var(--accent); outline-offset: 2px; }
+@keyframes office-bob { 0% { margin-top: 0; } 100% { margin-top: -3px; } }
 .office-spot:focus-visible { outline: 2px dashed var(--accent); outline-offset: 0; }
 .office-plate {
   position: absolute; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 1px;
@@ -638,4 +697,4 @@ table.table td.r, table.table th.r { text-align: right; }
   .office { flex-direction: column; }
   .office-panel { width: auto; height: 55%; border-left: 0; border-top: 1px solid var(--border); }
 }
-@media (prefers-reduced-motion: reduce) { .office-spot .note i { animation: none !important; } }
+@media (prefers-reduced-motion: reduce) { .office-spot .note i, .office-ask { animation: none !important; } }

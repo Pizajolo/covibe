@@ -1,8 +1,10 @@
-import { desktop, get, put, type AppSettings } from '../api';
+import { useState } from 'react';
+import { desktop, get, put, type AppSettings, type NotificationKind, type NotifyChoice } from '../api';
 import { IconInfo } from '../components/icons';
 import { Toolbar } from '../components/Toolbar';
 import { useAction, useToast } from '../components/ui';
 import { useData, useLive } from '../data';
+import { askPushPermission, pushState } from '../notify';
 
 function ClaudeAccount() {
   const toast = useToast();
@@ -78,6 +80,75 @@ function DiskSpace() {
   );
 }
 
+const NOTIFY_KINDS: { kind: NotificationKind; label: string; help: string }[] = [
+  { kind: 'question', label: 'Questions', help: 'A member asks you something; the team waits for your answer.' },
+  { kind: 'limit', label: 'Reaching a limit', help: "Your plan's 5-hour or weekly usage is close to or at its limit." },
+  { kind: 'stopped', label: 'Stopping', help: 'A run was stopped, or ran out of fix rounds and needs you.' },
+  { kind: 'error', label: 'Errors', help: 'A run failed.' },
+  { kind: 'done', label: 'Job done', help: 'A run finished with every gate passed.' },
+];
+
+function Notifications() {
+  const toast = useToast();
+  const { value, setValue } = useLive(() => get<AppSettings>('/api/settings'), []);
+  const [push, setPush] = useState(pushState);
+  const [save] = useAction(async (kind: NotificationKind, choice: Partial<NotifyChoice>) => {
+    setValue(await put<AppSettings>('/api/settings', { notifications: { [kind]: choice } }));
+    toast('Saved');
+  });
+  const [allow] = useAction(async () => setPush(await askPushPermission()));
+  if (!value) return null;
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Notifications</h2>
+      </div>
+      <div className="card-pad col" style={{ gap: 12 }}>
+        <p className="small">
+          The bell at the top right lists the latest of these, and the questions waiting for you. Questions also open in a popup wherever you are; close it and answer later
+          from the bell or the <strong>?</strong> on the lead's desk in the Office. System notifications go out while covibe is in the background.
+        </p>
+        <div className="notify-grid">
+          <span className="head">Kind</span>
+          <span className="head">Bell</span>
+          <span className="head">System</span>
+          {NOTIFY_KINDS.map(({ kind, label, help }) => (
+            <div key={kind} style={{ display: 'contents' }}>
+              <span className="col" style={{ gap: 0 }}>
+                {label}
+                <span className="tiny faint">{help}</span>
+              </span>
+              <input type="checkbox" aria-label={`${label} under the bell`} checked={value.notifications[kind].bell} onChange={(e) => void save(kind, { bell: e.target.checked })} />
+              <input type="checkbox" aria-label={`${label} as system notifications`} checked={value.notifications[kind].push} onChange={(e) => void save(kind, { push: e.target.checked })} />
+            </div>
+          ))}
+        </div>
+        {push === 'default' && (
+          <div className="banner info small">
+            <IconInfo />
+            <span className="grow">System notifications need your permission.</span>
+            <button className="btn sm" onClick={() => void allow()}>
+              Allow notifications
+            </button>
+          </div>
+        )}
+        {push === 'denied' && (
+          <div className="banner warn small">
+            <IconInfo />
+            <span>System notifications are blocked. Allow them for covibe in your {desktop ? 'system' : 'browser'} settings; the bell works either way.</span>
+          </div>
+        )}
+        {push === 'unsupported' && (
+          <div className="banner info small">
+            <IconInfo />
+            <span>This browser cannot show system notifications; the bell and the question popup still work.</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function Settings() {
   const { overview } = useData();
   return (
@@ -136,6 +207,8 @@ export function Settings() {
               </div>
             </div>
           </div>
+
+          <Notifications />
 
           <ClaudeAccount />
 

@@ -345,12 +345,25 @@ Every member in a workflow step has an `ask_question` tool, and its turn waits u
    working. The lead's own questions, and every question in a team without a lead, go straight to you.
 2. **If the lead cannot answer, the run pauses.** The question comes to you, and until you answer: no new step or
    member starts, members that are working stop at their next tool call, and their time limits stop counting. The
-   app shows the run as **Paused · needs you** with the question and an answer box; `covibe run` asks you in the
-   terminal; `covibe answer <run> <question> "<answer>"` works from anywhere. Once every question waiting for you
-   is answered, the run continues.
+   app opens the question in a popup wherever you are (and sends a system notification while it is in the
+   background) and shows the run as **Paused · needs you**. Close the popup to answer later: the question stays
+   under the bell in the toolbar, and a **?** on the lead's desk in the Office opens it again. `covibe run` asks you
+   in the terminal; `covibe answer <run> <question> "<answer>"` works from anywhere. Once every question waiting for
+   you is answered, the run continues.
+
+When a question is a choice, the member passes the `options` (and the lead may offer its own when it rephrases the
+question for you). The app shows them to pick from, with **Other** to write your own answer; in the terminal you
+can type an option's number.
 
 A member waits up to 7 days for an answer. Stopping the run cancels open questions; so does quitting the app or
 the terminal that runs it, since runs do not survive their process yet.
+
+## Notifications
+
+The bell at the top right of the app lists the questions waiting for you and the latest notifications from the past
+week: questions, plan usage close to or at its limit, runs that were stopped or ran out of fix rounds, runs that
+failed, and runs that finished with every gate passed. Choose in Settings → Notifications which of these show under
+the bell and which also go out as system notifications (sent while the app is in the background).
 
 ## Events
 

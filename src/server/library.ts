@@ -8,7 +8,7 @@ import { isMap, isSeq, parseDocument } from 'yaml';
 import { ConfigError, loadTeam } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
 import { covibeHome } from '../home.js';
-import type { AppSettings, EditOp, Project, TeamFileInfo, TeamListing } from './api-types.js';
+import type { AppSettings, EditOp, NotificationKind, NotifyChoice, Project, TeamFileInfo, TeamListing } from './api-types.js';
 
 /**
  * The desktop app's library: the projects (git repositories) you work on and
@@ -24,6 +24,16 @@ interface LibraryConfig {
 }
 
 export type { EditOp, Project, TeamFileInfo, TeamListing };
+
+export const NOTIFICATION_KINDS: NotificationKind[] = ['question', 'limit', 'stopped', 'error', 'done'];
+/** By default everything shows under the bell and goes out as a system notification. */
+const DEFAULT_NOTIFY: Record<NotificationKind, NotifyChoice> = {
+  question: { bell: true, push: true },
+  limit: { bell: true, push: true },
+  stopped: { bell: true, push: true },
+  error: { bell: true, push: true },
+  done: { bell: true, push: true },
+};
 
 const execAsync = promisify(execFile);
 const TEMPLATES_DIR = new URL('../../examples/', import.meta.url).pathname;
@@ -55,14 +65,30 @@ export class Library {
   // ---- settings
 
   settings(): AppSettings {
-    return { autoCleanDays: null, ...this.read().settings };
+    const saved = this.read().settings ?? {};
+    const notifications = { ...DEFAULT_NOTIFY };
+    for (const k of NOTIFICATION_KINDS) notifications[k] = { ...DEFAULT_NOTIFY[k], ...saved.notifications?.[k] };
+    return { autoCleanDays: null, ...saved, notifications };
   }
 
-  updateSettings(patch: Partial<AppSettings>): AppSettings {
+  /** Change some settings; notifications merge per kind, so one kind's choice can be sent alone. */
+  updateSettings(patch: Partial<Omit<AppSettings, 'notifications'>> & { notifications?: Partial<Record<NotificationKind, Partial<NotifyChoice>>> }): AppSettings {
     const config = this.read();
     const days = patch.autoCleanDays;
     if (days !== undefined && days !== null && (!Number.isFinite(days) || days < 0 || days > 3650)) throw new BadRequest('autoCleanDays must be between 0 and 3650, or null');
-    config.settings = { ...config.settings, ...patch };
+    const { notifications: notify, ...rest } = patch;
+    const next: Partial<AppSettings> = { ...config.settings, ...rest };
+    if (notify !== undefined) {
+      const merged = { ...this.settings().notifications };
+      for (const [k, v] of Object.entries(notify ?? {})) {
+        if (!NOTIFICATION_KINDS.includes(k as NotificationKind)) throw new BadRequest(`unknown notification kind "${k}"`);
+        const choice = { ...merged[k as NotificationKind], ...v };
+        if (typeof choice.bell !== 'boolean' || typeof choice.push !== 'boolean') throw new BadRequest(`notifications.${k} takes bell and push as true or false`);
+        merged[k as NotificationKind] = { bell: choice.bell, push: choice.push };
+      }
+      next.notifications = merged;
+    }
+    config.settings = next;
     this.write(config);
     return this.settings();
   }
