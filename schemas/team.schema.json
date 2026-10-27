@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://covibe.dev/schemas/team.schema.json",
+  "title": "covibe team",
+  "description": "A team of role agents and the workflow that drives them. Authored as YAML, validated as JSON.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "name", "agents", "workflow"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 1 },
+    "name": { "$ref": "#/$defs/identifier" },
+    "description": { "type": "string" },
+    "defaults": { "$ref": "#/$defs/defaults" },
+    "agents": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/identifier" },
+      "additionalProperties": { "$ref": "#/$defs/agent" }
+    },
+    "workflow": { "$ref": "#/$defs/workflow" }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "expression": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A JSONata expression evaluated by the engine against the run context (step outputs keyed by step id, plus goal, loop and feedback)."
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["subscription", "api_key", "gateway", "bedrock", "vertex"] },
+        "base_url": { "type": "string", "pattern": "^https?://" },
+        "model": { "type": "string", "minLength": 1 },
+        "api_key_env": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
+        "auth_token_env": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
+        "region": { "type": "string" },
+        "project": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "type": "object", "properties": { "type": { "const": "gateway" } } },
+          "then": { "type": "object", "required": ["base_url"] }
+        }
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_turns": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "timeout_min": { "type": "number", "exclusiveMinimum": 0, "maximum": 1440 },
+        "max_budget_usd": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "$ref": "#/$defs/backend" },
+        "model": { "type": "string", "minLength": 1 },
+        "isolation": { "enum": ["worktree", "none"] },
+        "limits": { "$ref": "#/$defs/limits" },
+        "max_parallel": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "setting_sources": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["user", "project", "local"] }
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt", "tools"],
+      "properties": {
+        "description": { "type": "string" },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path to a Markdown file (relative to the team file) or, if it contains a newline, the prompt text itself."
+        },
+        "model": { "type": "string", "minLength": 1 },
+        "tools": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" }
+        },
+        "can_message": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identifier" }
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "write": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "description": "Globs (relative to the repository root) this agent may write. Omit to allow the whole worktree; [] allows nothing."
+            }
+          }
+        },
+        "output_schema": { "type": "string", "minLength": 1 },
+        "backend": { "$ref": "#/$defs/backend" },
+        "limits": { "$ref": "#/$defs/limits" }
+      }
+    },
+    "gateFailPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goto", "max_loops"],
+      "properties": {
+        "goto": { "$ref": "#/$defs/identifier" },
+        "max_loops": { "type": "integer", "minimum": 0, "maximum": 20 },
+        "feed": { "type": "array", "items": { "$ref": "#/$defs/expression" } },
+        "then": { "enum": ["escalate_to_human", "fail"] }
+      }
+    },
+    "branch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent"],
+      "properties": {
+        "agent": { "$ref": "#/$defs/identifier" },
+        "task": { "$ref": "#/$defs/expression" },
+        "output_schema": { "type": "string", "minLength": 1 }
+      }
+    },
+    "agentStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "agent"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "agent": { "$ref": "#/$defs/identifier" },
+        "task": { "$ref": "#/$defs/expression" },
+        "instructions": { "type": "string" },
+        "output_schema": { "type": "string", "minLength": 1 },
+        "gate": { "$ref": "#/$defs/expression" },
+        "on_gate_fail": { "$ref": "#/$defs/gateFailPolicy" }
+      }
+    },
+    "parallelStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "parallel"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "parallel": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/branch" } },
+        "instructions": { "type": "string" },
+        "gate": { "$ref": "#/$defs/expression" },
+        "on_gate_fail": { "$ref": "#/$defs/gateFailPolicy" }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steps"],
+      "properties": {
+        "on_gate_fail": { "$ref": "#/$defs/gateFailPolicy" },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "if": { "type": "object", "required": ["parallel"] },
+            "then": { "$ref": "#/$defs/parallelStep" },
+            "else": { "$ref": "#/$defs/agentStep" }
+          }
+        }
+      }
+    }
+  }
+}

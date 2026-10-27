@@ -1,0 +1,90 @@
+# yaml-language-server: $schema=../../schemas/team.schema.json
+#
+# A feature team: the manager plans, frontend and backend build in parallel,
+# QA reviews, the tester writes and runs tests. Failed gates send findings
+# back to the builders, at most 3 times, then the run escalates to you.
+version: 1
+name: feature-team
+description: Manager-led web feature team with an enforced review and test loop.
+
+defaults:
+  backend: { type: subscription }   # subscription | api_key | gateway | bedrock | vertex
+  isolation: worktree               # one git worktree per writing agent
+  max_parallel: 2                   # keeps parallel runs from draining plan limits
+  limits: { max_turns: 40, timeout_min: 30 }
+
+agents:
+  manager:
+    description: Plans the work and splits it into owned tasks.
+    prompt: prompts/manager.md      # long text lives in Markdown files
+    model: opus
+    tools: [Read, Grep, Glob]       # plans and decides, cannot edit code
+
+  frontend:
+    description: Builds the web UI under web/.
+    prompt: prompts/frontend.md
+    model: sonnet
+    tools: &builder [Read, Edit, Write, Bash, Grep, Glob]
+    scope: { write: ["web/**"] }
+    can_message: [backend]
+    output_schema: schemas/build.json
+
+  backend:
+    description: Builds the API and database code under api/ and db/.
+    prompt: prompts/backend.md
+    model: sonnet
+    tools: *builder
+    scope: { write: ["api/**", "db/**"] }
+    can_message: [frontend]
+    output_schema: schemas/build.json
+
+  qa:
+    description: Reviews the merged change; never edits code.
+    prompt: prompts/qa.md
+    model: sonnet
+    tools: [Read, Grep, Glob]       # reviews only
+    output_schema: schemas/review.json
+
+  tester:
+    description: Adds and runs tests; may only write test files.
+    prompt: prompts/tester.md
+    model: sonnet
+    tools: [Read, Write, Edit, Bash, Grep, Glob]
+    scope: { write: ["**/tests/**", "**/*.test.*", "**/*.spec.*"] }
+    output_schema: schemas/test.json
+    # To route the tester through a cheaper model behind LiteLLM, replace the
+    # model line with:
+    # backend: { type: gateway, base_url: "http://localhost:4000", model: cheap-coder }
+
+workflow:
+  # Applies to every gated step unless the step sets its own.
+  on_gate_fail:
+    goto: build
+    max_loops: 3
+    feed: [review.findings, test.failures]
+    then: escalate_to_human
+
+  steps:
+    - id: plan
+      agent: manager
+      output_schema: schemas/plan.json   # tasks[] with an owner each
+
+    - id: build
+      parallel:
+        - { agent: frontend, task: "plan.tasks[owner = 'frontend']" }
+        - { agent: backend,  task: "plan.tasks[owner = 'backend']" }
+
+    - id: review
+      agent: qa
+      gate: "review.blocking_count = 0"
+
+    - id: test
+      agent: tester
+      task: "plan.tasks.acceptance"
+      gate: "test.failed = 0 and test.passed > 0"
+
+    - id: report
+      agent: manager
+      instructions: |
+        Review and tests have passed. Summarise for the human what was built,
+        which files changed and anything left for later.
