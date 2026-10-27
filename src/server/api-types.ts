@@ -65,7 +65,8 @@ export interface DiffResult {
   note?: string;
 }
 
-export type AgentActivity = 'idle' | 'working' | 'done' | 'error' | 'waiting';
+/** waiting: has messages for its next turn. asking: waits for the answer to its question. */
+export type AgentActivity = 'idle' | 'working' | 'done' | 'error' | 'waiting' | 'asking';
 
 export interface AgentState {
   name: string;
@@ -81,7 +82,26 @@ export interface AgentState {
   tokens: number;
   /** Messages waiting for its next turn. */
   inbox: number;
+  /** Who it waits on for an answer to its question (the lead's name, or "human"). */
+  waitingOn?: string;
   updatedAt?: string;
+}
+
+/** A member's question as the run shows it (see the question.* events). */
+export interface QuestionView {
+  id: number;
+  from: string;
+  /** "lead": the lead is answering; "open": waits for you. */
+  status: 'lead' | 'open' | 'answered' | 'cancelled';
+  question: string;
+  context?: string;
+  /** Set when the lead passed it on: the question as put to you, and why. */
+  forHuman?: string;
+  leadNote?: string;
+  lead?: string;
+  answer?: string;
+  answeredBy?: string;
+  askedAt: string;
 }
 
 export type StepStatus = 'pending' | 'running' | 'done' | 'passed' | 'failed' | 'skipped';
@@ -125,6 +145,9 @@ export interface RunSummary {
   filesChanged: string[];
   /** The run's worktrees were removed to free disk space (chat recreates them on demand). */
   worktreesRemoved: boolean;
+  /** A question waits for you and the team is on hold until you answer it. */
+  paused: boolean;
+  questions: QuestionView[];
 }
 
 export interface ChatItem {

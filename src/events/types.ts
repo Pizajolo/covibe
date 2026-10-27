@@ -33,7 +33,12 @@ export type EventType =
   | 'brain.proposed'
   | 'brain.decided'
   | 'brain.updated'
-  | 'team.saved';
+  | 'team.saved'
+  | 'question.asked'
+  | 'question.escalated'
+  | 'question.answered'
+  | 'run.paused'
+  | 'run.resumed';
 
 export interface RunEvent {
   id: number;
@@ -97,4 +102,29 @@ export interface InboxMessage {
   text: string;
   ts: string;
   mode: DeliveryMode;
+}
+
+/**
+ * A member's question. It goes to the team lead first (status "lead"); if the
+ * lead cannot answer, to the human ("open"), and the run pauses until they do.
+ */
+export type QuestionStatus = 'lead' | 'open' | 'answered' | 'cancelled';
+
+export interface Question {
+  id: number;
+  runId: string;
+  /** The member who asked. */
+  from: string;
+  /** What the member asked. */
+  text: string;
+  context?: string;
+  status: QuestionStatus;
+  /** The question as put to the human (the lead may rephrase it), and why the lead passed it on. */
+  forHuman?: string;
+  leadNote?: string;
+  answer?: string;
+  /** The lead's name, or "human". */
+  answeredBy?: string;
+  createdAt: string;
+  answeredAt?: string;
 }

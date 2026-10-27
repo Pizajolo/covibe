@@ -1,7 +1,8 @@
 // Pure functions from the event stream to what the UI shows. Nothing here
 // talks to SDKs or git; everything is derived from stored events.
 import type { RunEvent, RunRecord } from '../events/types.js';
-import type { AgentState, BoardCard, ChatItem, RunSummary, Stats, StepState, UsageWindow } from './api-types.js';
+import { QUESTION_STEP } from '../engine/questions.js';
+import type { AgentState, BoardCard, ChatItem, QuestionView, RunSummary, Stats, StepState, UsageWindow } from './api-types.js';
 
 type D = Record<string, any>;
 
@@ -68,6 +69,8 @@ export function summarizeRun(
   const files = new Set<string>();
   let worktreesRemoved = false;
   const openCards = new Map<string, BoardCard>();
+  const questions = new Map<number, QuestionView>();
+  let paused = false;
 
   for (const e of events) {
     const d = e.data as D;
@@ -111,7 +114,7 @@ export function summarizeRun(
         a.activity = d.resumed ? 'resuming…' : 'starting…';
         a.invocations += 1;
         a.updatedAt = e.ts;
-        if (e.step && e.step !== 'chat') {
+        if (e.step && e.step !== 'chat' && e.step !== QUESTION_STEP) {
           const card: BoardCard = { agent: e.agent!, round: loops, status: 'working', costUsd: 0 };
           step(e.step).cards.push(card);
           openCards.set(e.agent!, card);
@@ -166,14 +169,56 @@ export function summarizeRun(
       case 'workspace.cleaned':
         worktreesRemoved = true;
         break;
+      case 'question.asked': {
+        const toLead = d.to !== 'human';
+        questions.set(d.id, { id: d.id, from: e.agent!, status: toLead ? 'lead' : 'open', question: d.question, context: d.context ?? undefined, lead: toLead ? d.to : undefined, askedAt: e.ts });
+        const a = agent(e.agent!);
+        a.waitingOn = d.to;
+        a.activity = `asked ${toLead ? d.to : 'you'}: ${String(d.question).slice(0, 80)}`;
+        a.updatedAt = e.ts;
+        break;
+      }
+      case 'question.escalated': {
+        const q = questions.get(d.id);
+        if (q) Object.assign(q, { status: 'open', forHuman: d.question, leadNote: d.reason ?? undefined });
+        if (d.from) agent(d.from).waitingOn = 'human';
+        break;
+      }
+      case 'question.answered': {
+        const q = questions.get(d.id);
+        if (q) Object.assign(q, { status: 'answered', answer: d.answer, answeredBy: d.by });
+        const a = agent(e.agent!);
+        a.waitingOn = undefined;
+        a.activity = `got an answer from ${d.by === 'human' ? 'you' : d.by}`;
+        a.updatedAt = e.ts;
+        break;
+      }
+      case 'run.paused':
+        paused = true;
+        break;
+      case 'run.resumed':
+        paused = false;
+        break;
     }
     // A chat after cleanup restores the member's worktree.
     if (e.type === 'agent.started' && e.step === 'chat') worktreesRemoved = false;
   }
 
-  // A run that is no longer live cannot have working agents.
-  if (!live) for (const a of agents.values()) if (a.status === 'working' && !busy.has(a.name)) a.status = 'error';
-  if (live) for (const a of agents.values()) if (a.status !== 'working' && a.inbox > 0) a.status = 'waiting';
+  // A run that is no longer live cannot have working agents or open questions.
+  if (!live) {
+    paused = false;
+    for (const q of questions.values()) if (q.status === 'lead' || q.status === 'open') q.status = 'cancelled';
+    for (const a of agents.values()) {
+      a.waitingOn = undefined;
+      if (a.status === 'working' && !busy.has(a.name)) a.status = 'error';
+    }
+  }
+  if (live) {
+    for (const a of agents.values()) {
+      if (a.waitingOn) a.status = 'asking';
+      else if (a.status !== 'working' && a.inbox > 0) a.status = 'waiting';
+    }
+  }
 
   const status = run.status === 'running' && !live ? 'failed' : run.status;
   return {
@@ -198,6 +243,8 @@ export function summarizeRun(
     steps: stepOrder.map((id) => steps.get(id)!),
     filesChanged: [...files].sort(),
     worktreesRemoved,
+    paused,
+    questions: [...questions.values()],
   };
 }
 

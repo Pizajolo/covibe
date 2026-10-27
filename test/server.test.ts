@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Library } from '../src/server/library.js';
 import { startServer, type CovibeServer } from '../src/server/app.js';
 import type { RunDetail, Stats, TeamDetail } from '../src/server/api-types.js';
-import { ScriptedRunner, tempDir, tempRepo, writeFiles } from './helpers.js';
+import { ScriptedRunner, tempDir, tempRepo, writeFiles, type Script } from './helpers.js';
 
 let server: CovibeServer | undefined;
 afterEach(async () => {
@@ -15,11 +15,12 @@ afterEach(async () => {
 
 const review = (n: number) => ({ blocking_count: n === 0 ? 1 : 0, findings: n === 0 ? [{ severity: 'blocking', file: 'src/a.js', message: 'off by one' }] : [] });
 
-async function setup() {
+async function setup(scripts: Record<string, Script> = {}) {
   const library = new Library(tempDir('covibe-home-'));
   const runner = new ScriptedRunner({
     builder: (_inv, n) => ({ write: { 'src/a.js': `export const a = ${n};` }, text: `Built round ${n}.` }),
     reviewer: (inv, n) => (inv.outputSchema ? { structured: review(n) } : { text: 'The repo has one module, src/a.js.' }),
+    ...scripts,
   });
   server = await startServer({ library, runner, token: 'test-token' });
   const base = `http://127.0.0.1:${server.port}`;
@@ -144,6 +145,40 @@ describe('server', () => {
     expect(stats.byAgent.map((a) => a.agent).sort()).toEqual(['builder', 'reviewer']);
     expect(stats.gatePassRate).toBe(0.5);
     expect(stats.daily).toHaveLength(14);
+  });
+
+  it('pauses a run on a question for you and resumes it when you answer', async () => {
+    const { api, runner } = await setup({
+      // build-and-review has no manager, so the question comes straight to you.
+      builder: (_inv, n) => ({
+        call: n === 0 ? [{ tool: 'ask_question', args: { question: 'CommonJS or ES modules?' } }] : [],
+        write: { 'src/a.js': 'export const a = 1;' },
+        text: 'Built.',
+      }),
+      reviewer: () => ({ structured: review(1) }),
+    });
+    const project = await api('POST', '/api/projects', { path: tempRepo() });
+    const team = await api('POST', '/api/teams', { name: 'duo', template: 'build-and-review' });
+    const { runId } = await api('POST', '/api/runs', { project: project.id, team: team.id, goal: 'Add module a' });
+
+    const paused = await until(
+      () => api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`),
+      (d) => d.summary.paused,
+    );
+    expect(paused.summary).toMatchObject({ status: 'running', questions: [{ id: 1, from: 'builder', status: 'open', question: 'CommonJS or ES modules?' }] });
+    const overview = await api('GET', '/api/overview');
+    expect(overview.runs.find((r: { id: string }) => r.id === runId)).toMatchObject({ paused: true });
+
+    await expect(api('POST', `/api/runs/${project.id}/${runId}/questions/1/answer`, { answer: ' ' })).rejects.toThrow('"answer" is required');
+    await api('POST', `/api/runs/${project.id}/${runId}/questions/1/answer`, { answer: 'ES modules.' });
+    await expect(api('POST', `/api/runs/${project.id}/${runId}/questions/1/answer`, { answer: 'again' })).rejects.toThrow(/already answered/);
+
+    const done = await until(
+      () => api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`),
+      (d) => d.summary.status !== 'running',
+    );
+    expect(done.summary).toMatchObject({ status: 'succeeded', paused: false, questions: [{ status: 'answered', answeredBy: 'human', answer: 'ES modules.' }] });
+    expect(runner.toolResults).toContainEqual({ agent: 'builder', tool: 'ask_question', result: 'Answer from the human:\nES modules.' });
   });
 
   it('reorders and inserts workflow steps without losing comments', async () => {

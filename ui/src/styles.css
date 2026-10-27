@@ -270,6 +270,12 @@ label.field .seg, .field .seg, .form-section > .seg { align-self: flex-start; }
 .dot.done { background: var(--good); }
 .dot.error { background: var(--bad); }
 .dot.waiting { background: var(--warn); }
+.dot.asking { background: var(--warn); }
+.question { flex-direction: column; gap: 8px; }
+.question .row { gap: 8px; align-items: flex-start; }
+.question .why { font-size: 12px; color: var(--text-2); }
+.question .answer { display: flex; gap: 8px; align-items: flex-end; }
+.question .answer textarea { flex: 1; min-height: 34px; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(10,108,255,.5); } 70% { box-shadow: 0 0 0 6px rgba(10,108,255,0); } 100% { box-shadow: 0 0 0 0 rgba(10,108,255,0); } }
 @media (prefers-reduced-motion: reduce) { .dot.working { animation: none; } .spin { animation: none !important; } }
 .spin { animation: spin 1s linear infinite; }

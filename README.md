@@ -126,6 +126,7 @@ Your checkout is never touched. The result lands on the branch `covibe/<run-id>`
 | `covibe runs` | List recent runs in this repository |
 | `covibe log <run> [--follow] [--json]` | Print a run's event log. `--json` prints the raw events, one per line |
 | `covibe chat <run> <agent> <message…> [--now \| --interrupt]` | Talk to an agent (see [Chat](#chat)) |
+| `covibe answer <run> [<question> <answer…>]` | Answer a member's question; without a question id, list the ones waiting for you (see [Questions](#questions)) |
 | `covibe clean [--older-than <days>] [--run <id>] [--dry-run]` | Remove worktrees of finished runs; branches and history stay |
 | `covibe app [--port <n>] [--no-open]` | Serve the app UI in your browser |
 
@@ -137,6 +138,7 @@ Run ids accept a unique prefix. The event store lives in `<repo>/.covibe/covibe.
 ```yaml
 version: 1
 name: feature-team
+lead: manager                       # answers members' questions first (default: a member named manager; null = nobody)
 
 defaults:
   backend: { type: subscription }   # subscription | api_key | gateway | bedrock | vertex
@@ -332,6 +334,24 @@ on an escalated run.
 Teammates' `send_message` messages use the same inbox, in steer mode: a working teammate reads them between tool
 calls.
 
+## Questions
+
+A member that needs a decision it cannot make from the goal, its task, the code or the brain does not guess.
+Every member in a workflow step has an `ask_question` tool, and its turn waits until the tool returns the answer.
+
+1. **The lead answers first.** The question goes to the team's `lead` (a member named `manager` unless the team file
+   says otherwise). The lead answers in a read-only copy of its session from this run, so it knows the plan, and
+   either answers or decides the question is for you. Only the member that asked waits; the rest of the team keeps
+   working. The lead's own questions, and every question in a team without a lead, go straight to you.
+2. **If the lead cannot answer, the run pauses.** The question comes to you, and until you answer: no new step or
+   member starts, members that are working stop at their next tool call, and their time limits stop counting. The
+   app shows the run as **Paused · needs you** with the question and an answer box; `covibe run` asks you in the
+   terminal; `covibe answer <run> <question> "<answer>"` works from anywhere. Once every question waiting for you
+   is answered, the run continues.
+
+A member waits up to 7 days for an answer. Stopping the run cancels open questions; so does quitting the app or
+the terminal that runs it, since runs do not survive their process yet.
+
 ## Events
 
 All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event types:
@@ -339,7 +359,8 @@ All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event t
 `run.started` `run.finished` `step.started` `step.finished` `step.skipped` `gate.passed` `gate.failed` `loop.goto`
 `agent.started` `agent.text` `agent.tool` `agent.finished` `agent.error` `scope.denied` `scope.violation`
 `git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit`
-`workspace.cleaned` `brain.proposed` `brain.decided` `brain.updated` `team.saved`
+`workspace.cleaned` `brain.proposed` `brain.decided` `brain.updated` `team.saved` `question.asked`
+`question.escalated` `question.answered` `run.paused` `run.resumed`
 
 `agent.finished` carries turns, estimated cost, duration, model and token counts; `usage.limit` carries the plan
 usage Claude Code reports (window, status, utilization, reset time). `message.queued` and `message.delivered` carry
@@ -354,7 +375,8 @@ src/engine/engine.ts       the workflow engine: steps, parallel branches, gates,
 src/engine/workspace.ts    git worktrees, commits, merges, out-of-scope discard
 src/engine/scope.ts        pre-tool-use write-scope checks
 src/engine/chat.ts         queue-or-resume chat
-src/events/store.ts        SQLite runs, events, sessions, inbox (node:sqlite, WAL)
+src/engine/questions.ts    members' questions: the lead first, then you; pausing the run
+src/events/store.ts        SQLite runs, events, sessions, inbox, questions (node:sqlite, WAL)
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
 src/runner/backend.ts      per-agent environment for each backend
 src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.0.0.1, token)

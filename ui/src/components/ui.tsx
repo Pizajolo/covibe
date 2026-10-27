@@ -11,8 +11,9 @@ const RUN_STATUS: Record<RunStatus, { label: string; cls: string; icon: ReactNod
   failed: { label: 'Failed', cls: 'bad', icon: <IconX /> },
 };
 
-export function RunStatusPill({ status, kind }: { status: RunStatus; kind?: string }) {
-  const s = RUN_STATUS[status];
+/** A live run with a question waiting for you shows as paused. */
+export function RunStatusPill({ status, kind, paused }: { status: RunStatus; kind?: string; paused?: boolean }) {
+  const s = paused && status === 'running' ? { label: 'Paused · needs you', cls: 'warn', icon: <IconAlert /> } : RUN_STATUS[status];
   const label = kind === 'ask' && status === 'succeeded' ? 'Answered' : kind === 'ask' && status === 'running' ? 'Thinking' : s.label;
   return (
     <span className={`pill ${s.cls}`}>
@@ -28,6 +29,7 @@ const AGENT_STATUS: Record<AgentActivity, string> = {
   done: 'Done',
   error: 'Stopped',
   waiting: 'Has messages',
+  asking: 'Waiting for an answer',
 };
 
 export function AgentStatus({ status }: { status: AgentActivity }) {

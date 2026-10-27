@@ -20,7 +20,7 @@ import type {
 const SCHEMA_URL = new URL('../../schemas/team.schema.json', import.meta.url);
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash']);
 // Keys the engine puts in the run context next to the step outputs.
-const RESERVED_STEP_IDS = new Set(['goal', 'loop', 'feedback']);
+const RESERVED_STEP_IDS = new Set(['goal', 'loop', 'feedback', 'question']);
 const DEFAULT_LIMITS: Limits = { max_turns: 40, timeout_min: 30 };
 
 // What shell commands typically need: package registries to install from and
@@ -170,6 +170,7 @@ interface RawTeam {
     skills?: string[];
   };
   brain?: { curator?: string; curate?: 'after_run' | 'manual' };
+  lead?: string | null;
   agents: Record<string, RawAgent>;
   workflow: { on_gate_fail?: RawPolicy; steps: RawStep[] };
 }
@@ -325,9 +326,14 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
     else if (!c.tools.some((t) => t === 'Write' || t === 'Edit')) problems.push(`/brain/curator: ${curator} needs the Write or Edit tool to maintain the notes`);
   }
 
+  // Questions go to the lead first; a member named "manager" leads unless the file says otherwise (null = nobody).
+  const lead = raw.lead === null ? undefined : raw.lead ?? ('manager' in agents ? 'manager' : undefined);
+  if (lead && !agents[lead]) problems.push(`/lead: unknown agent "${lead}"`);
+
   if (problems.length) throw new ConfigError(file, problems);
   return {
     brain: { curator, curate: raw.brain?.curate ?? 'after_run' },
+    lead,
     name: raw.name,
     description: raw.description,
     file,

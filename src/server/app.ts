@@ -10,6 +10,7 @@ import { acceptIntoNote, brainLog, BrainError, curate, deleteNote, ensureBrain, 
 import { ask, chat } from '../engine/chat.js';
 import { cleanupWorktrees, worktreeReport } from '../engine/cleanup.js';
 import { buildInvocation, newRunId, startRun } from '../engine/engine.js';
+import { answerQuestion } from '../engine/questions.js';
 import { brainRoot } from '../home.js';
 import {
   ANTHROPIC_SKILLS,
@@ -444,6 +445,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       if (!c) throw new BadRequest('this run is not running in the app (runs started from the terminal are stopped there)');
       c.abort();
       return { ok: true };
+    }],
+    ['POST', '/api/runs/:pid/:rid/questions/:qid/answer', (p, body) => {
+      const { store, run } = findRun(p.pid!, p.rid!);
+      if (!store.isLive(run)) throw new BadRequest('this run has ended, so nobody is waiting for the answer');
+      try {
+        return answerQuestion(store, run.id, Number(p.qid), str(body, 'answer'));
+      } catch (err) {
+        throw new BadRequest((err as Error).message);
+      }
     }],
     ['POST', '/api/runs/:pid/:rid/chat', async (p, body) => {
       const { store, run } = findRun(p.pid!, p.rid!);

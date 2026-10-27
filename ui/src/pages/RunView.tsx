@@ -112,7 +112,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
       <div className="content flush">
         <div style={{ padding: '14px 20px', display: 'flex', flexDirection: 'column', gap: 12, borderBottom: '1px solid var(--border)' }}>
           <div className="row wrap" style={{ gap: 14 }}>
-            <RunStatusPill status={run.status} kind={run.kind} />
+            <RunStatusPill status={run.status} kind={run.kind} paused={run.paused} />
             <LoopBadge loops={run.loops} max={run.maxLoops} />
             <Fact icon={<IconClock />} label={duration(run.startedAt, run.finishedAt)} />
             <Fact label={`${money(run.costUsd)} est.`} title="Estimated API-equivalent cost" />
@@ -127,6 +127,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
             )}
           </div>
           <Banner run={run} />
+          <Questions run={run} projectId={projectId} onAnswered={reload} />
           {!isAsk && (
             <div className="members">
               {run.agents.map((a, i) => (
@@ -137,7 +138,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
                       <span className="name grow">{a.name}</span>
                       <AgentStatus status={detail.answering.includes(a.name) ? 'working' : a.status} />
                     </div>
-                    <span className="act">{a.status === 'working' ? (a.activity ?? 'thinking…') : a.step ? `last in ${a.step}` : 'waiting for its step'}</span>
+                    <span className="act">{a.status === 'working' || a.status === 'asking' ? (a.activity ?? 'thinking…') : a.step ? `last in ${a.step}` : 'waiting for its step'}</span>
                     <span className="meta num">
                       {money(a.costUsd)} · {a.turns} turns{a.inbox ? ` · ${a.inbox} message${a.inbox > 1 ? 's' : ''} waiting` : ''}
                     </span>
@@ -191,6 +192,71 @@ function Fact({ icon, label, title }: { icon?: React.ReactNode; label: string; t
       {icon && <span style={{ display: 'inline-flex', width: 13, height: 13 }}>{icon}</span>}
       {label}
     </span>
+  );
+}
+
+/** Questions from members: the ones waiting for you, with a box to answer, and the ones the lead is answering. */
+function Questions({ run, projectId, onAnswered }: { run: RunSummary; projectId: string; onAnswered: () => Promise<unknown> }) {
+  const live = run.questions.filter((q) => q.status === 'open' || q.status === 'lead');
+  if (!live.length) return null;
+  return (
+    <>
+      {live.map((q) =>
+        q.status === 'lead' ? (
+          <div key={q.id} className="banner info">
+            <IconInfo />
+            <div>
+              <strong>{q.from} asked {q.lead}:</strong> {q.question} <span className="faint">{q.lead} is answering; it comes to you only if {q.lead} cannot.</span>
+            </div>
+          </div>
+        ) : (
+          <QuestionForYou key={q.id} q={q} runId={run.id} projectId={projectId} onAnswered={onAnswered} />
+        ),
+      )}
+    </>
+  );
+}
+
+function QuestionForYou({ q, runId, projectId, onAnswered }: { q: RunSummary['questions'][number]; runId: string; projectId: string; onAnswered: () => Promise<unknown> }) {
+  const [text, setText] = useState('');
+  const toast = useToast();
+  const [answer, answering] = useAction(async () => {
+    await post(`/api/runs/${projectId}/${runId}/questions/${q.id}/answer`, { answer: text });
+    setText('');
+    toast(`Answered. ${q.from} carries on.`);
+    await onAnswered();
+  });
+  return (
+    <div className="banner warn question">
+      <div className="row">
+        <IconAlert />
+        <div>
+          <strong>{q.from} asks you:</strong> {q.forHuman ?? q.question}
+          {q.context && <div className="why">{q.from}'s context: {q.context}</div>}
+          {q.leadNote && <div className="why">Why it comes to you: {q.leadNote}</div>}
+          <div className="why">The team is paused until you answer.</div>
+        </div>
+      </div>
+      <div className="answer">
+        <textarea
+          className="input"
+          rows={2}
+          value={text}
+          placeholder="Your answer"
+          aria-label={`Answer to ${q.from}`}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && text.trim()) {
+              e.preventDefault();
+              void answer();
+            }
+          }}
+        />
+        <button className="btn primary" disabled={!text.trim() || answering} onClick={() => void answer()}>
+          Answer
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -314,6 +380,11 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'brain.decided': return { cls: d.status === 'accepted' ? 'good' : '', text: `Brain proposal #${d.id} ${d.status}${d.note_path ? ` into ${d.note_path}` : ''}${d.note ? `: ${d.note}` : ''}` };
     case 'brain.updated': return { cls: 'good', text: `Updated the project brain (${String(d.commit).slice(0, 7)})` };
     case 'workspace.cleaned': return { cls: '', text: `Worktrees removed (${(Number(d.freed_kb) / 1024).toFixed(1)} MB freed)` };
+    case 'question.asked': return { cls: 'warn', text: `Asked ${d.to === 'human' ? 'you' : d.to} (#${d.id}): ${d.question}` };
+    case 'question.escalated': return { cls: 'warn', text: `Passed ${d.from}'s question #${d.id} to you: ${d.question}${d.reason ? ` (${d.reason})` : ''}` };
+    case 'question.answered': return { cls: 'good', text: `${d.by === 'human' ? 'You' : d.by} answered #${d.id}: ${d.answer}` };
+    case 'run.paused': return { cls: 'warn', text: 'Run paused until you answer' };
+    case 'run.resumed': return { cls: 'good', text: 'Run resumed' };
     default: return { cls: '', text: JSON.stringify(d) };
   }
 }

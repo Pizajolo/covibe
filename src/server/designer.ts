@@ -24,7 +24,8 @@ A team is one team.yaml (YAML 1.2) plus Markdown prompt files and optional JSON 
 - gate is a JSONata expression that must be literally true, e.g. "review.blocking_count = 0". When it fails, on_gate_fail { goto, max_loops, feed: [expressions], then: escalate_to_human | fail } loops back (workflow.on_gate_fail is the default for all gated steps). goto must be this or an earlier step.
 - defaults: backend ({ type: subscription } by default), model, isolation (worktree), max_parallel (2–3 to save plan limits), limits { max_turns, timeout_min }, sandbox { network: [domains], allow_write: [folders] }, skills (for every member).
 - brain: { curator: <member> } makes that member maintain the project brain (shared notes everyone reads; others propose additions). The curator needs Write or Edit.
-- Reserved step ids: goal, loop, feedback.
+- lead: <member> answers members' questions first (they ask with an ask_question tool); if the lead cannot answer, the question goes to the user and the run pauses. Defaults to a member named manager; null sends questions straight to the user. Make the planner the lead.
+- Reserved step ids: goal, loop, feedback, question.
 
 # Minimal example
 version: 1

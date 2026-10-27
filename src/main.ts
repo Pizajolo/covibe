@@ -1,12 +1,14 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { createInterface, type Interface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 import { ConfigError, loadTeam } from './config/load.js';
 import { chat } from './engine/chat.js';
 import { cleanupWorktrees } from './engine/cleanup.js';
-import type { DeliveryMode } from './events/types.js';
+import type { DeliveryMode, RunEvent } from './events/types.js';
 import { runTeam } from './engine/engine.js';
+import { answerQuestion } from './engine/questions.js';
 import { EventStore } from './events/store.js';
 import { bold, dim, formatEvent, formatRun, green, red, yellow } from './format.js';
 import { ClaudeSdkRunner } from './runner/claude-sdk.js';
@@ -20,6 +22,7 @@ Usage:
   covibe log <run> [--follow] [--json]         Show a run's event log
   covibe chat <run> <agent> <message...>       Talk to an agent of a run
         [--now | --interrupt]                 (live run: reach it while it works / stop it)
+  covibe answer <run> [<question> <answer...>] Answer a member's question (without one: list them)
   covibe clean [--older-than <days>] [--run <id>] [--dry-run]
                                                Remove worktrees of finished runs
   covibe app [--port <n>] [--no-open]          Open the covibe app in your browser
@@ -31,7 +34,11 @@ Options:
   -h, --help     Show this help
 
 A message to an agent of a live run is queued for its next turn; after the run
-has ended, the agent's session is resumed and it answers immediately.`;
+has ended, the agent's session is resumed and it answers immediately.
+
+Members ask the team lead when they need a decision. If the lead cannot answer,
+the question comes to you and the run pauses until you reply: in the terminal
+running it, in the app, or with \`covibe answer\`.`;
 
 export async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -71,6 +78,8 @@ export async function main(argv: string[]): Promise<number> {
         return await log(args[0], values);
       case 'chat':
         return await chatCommand(args, values.repo, values.interrupt ? 'interrupt' : values.now ? 'steer' : 'queue');
+      case 'answer':
+        return answerCommand(args, values.repo);
       case 'clean':
         return await clean(values);
       case 'app':
@@ -133,7 +142,11 @@ async function run(file: string | undefined, values: { repo?: string; goal?: str
     controller.abort();
   };
   process.on('SIGINT', onSigint);
-  const unsubscribe = store.subscribe((e) => console.log(formatEvent(e)));
+  const prompter = process.stdin.isTTY ? questionPrompter(store, onSigint) : undefined;
+  const unsubscribe = store.subscribe((e) => {
+    console.log(formatEvent(e));
+    prompter?.onEvent(e);
+  });
   try {
     const outcome = await runTeam({ team, repo: repoRoot(values.repo), goal, store, runner: new ClaudeSdkRunner(), signal: controller.signal });
     console.log('');
@@ -146,7 +159,92 @@ async function run(file: string | undefined, values: { repo?: string; goal?: str
     return outcome.status === 'succeeded' ? 0 : outcome.status === 'escalated' ? 2 : 1;
   } finally {
     unsubscribe();
+    prompter?.close();
     process.off('SIGINT', onSigint);
+    store.close();
+  }
+}
+
+/**
+ * In a terminal, put the questions that reach the human to them one at a
+ * time while the run waits. An answer given elsewhere (the app, `covibe
+ * answer`) takes the prompt away.
+ */
+function questionPrompter(store: EventStore, onSigint: () => void) {
+  const queue: number[] = [];
+  let current: { id: number; abort: AbortController } | undefined;
+  let rl: Interface | undefined;
+  const next = async (): Promise<void> => {
+    if (current) return;
+    const id = queue.shift();
+    if (id === undefined) return;
+    const q = store.getQuestion(id);
+    if (!q || q.status !== 'open') return next();
+    if (!rl) {
+      rl = createInterface({ input: process.stdin, output: process.stdout });
+      rl.on('SIGINT', onSigint);
+    }
+    current = { id, abort: new AbortController() };
+    console.log('');
+    console.log(bold(yellow(`? ${q.from} asks you (#${id}):`)) + ` ${q.forHuman ?? q.text}`);
+    if (q.context) console.log(dim(`  ${q.from}'s context: ${q.context}`));
+    if (q.leadNote) console.log(dim(`  why it comes to you: ${q.leadNote}`));
+    console.log(dim(`  Type your answer and press Enter, or answer in the app or with: covibe answer ${q.runId} ${id} "<answer>"`));
+    try {
+      for (;;) {
+        const text = (await rl.question(bold(`answer #${id}> `), { signal: current.abort.signal })).trim();
+        if (!text) continue;
+        answerQuestion(store, q.runId, id, text);
+        break;
+      }
+    } catch {
+      // answered elsewhere, or the run stopped
+    }
+    current = undefined;
+    return next();
+  };
+  return {
+    onEvent(e: RunEvent) {
+      if (e.type === 'question.escalated' || (e.type === 'question.asked' && e.data.to === 'human')) {
+        queue.push(Number(e.data.id));
+        void next();
+      }
+      // The engine resumes when an answer arrives from anywhere, this process or another.
+      if ((e.type === 'run.resumed' || e.type === 'question.answered' || e.type === 'run.finished') && current && store.getQuestion(current.id)?.status !== 'open') {
+        current.abort.abort();
+      }
+    },
+    close() {
+      current?.abort.abort();
+      rl?.close();
+    },
+  };
+}
+
+function answerCommand(args: string[], repo: string | undefined): number {
+  const [id, qid, ...words] = args;
+  if (!id) throw new Error('usage: covibe answer <run> [<question> <answer...>]');
+  const store = openStore(repo);
+  try {
+    const run = store.findRun(id);
+    if (!run) throw new Error(`run ${id} not found`);
+    if (!qid) {
+      const open = store.isLive(run) ? store.questions(run.id, 'open') : [];
+      if (!open.length) console.log(dim('no questions are waiting for you in this run'));
+      for (const q of open) {
+        console.log(`${bold(`#${q.id}`)} from ${q.from}: ${q.forHuman ?? q.text}`);
+        if (q.context) console.log(dim(`    context: ${q.context}`));
+        if (q.leadNote) console.log(dim(`    why it comes to you: ${q.leadNote}`));
+      }
+      return 0;
+    }
+    if (!words.length) throw new Error('usage: covibe answer <run> <question> <answer...>');
+    if (!store.isLive(run)) throw new Error(`run ${run.id} has ended, so nobody is waiting for the answer`);
+    const q = answerQuestion(store, run.id, Number(qid.replace(/^#/, '')), words.join(' '));
+    const others = store.questions(run.id, 'open').length;
+    console.log(`answered #${q.id}; ${q.from} carries on${others ? `, and the run resumes once you answer the ${others} other open question${others > 1 ? 's' : ''}` : ' and the run resumes'}.`);
+    return 0;
+  } finally {
     store.close();
   }
 }
@@ -156,7 +254,10 @@ function runs(repo: string | undefined): number {
   try {
     const list = store.listRuns();
     if (!list.length) console.log(dim('no runs yet'));
-    for (const r of list) console.log(formatRun(store.isLive(r) || r.status !== 'running' ? r : { ...r, status: 'failed' }));
+    for (const r of list) {
+      const live = store.isLive(r);
+      console.log(formatRun(live || r.status !== 'running' ? r : { ...r, status: 'failed' }, live && store.questions(r.id, 'open').length > 0));
+    }
     return 0;
   } finally {
     store.close();

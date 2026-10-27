@@ -76,6 +76,7 @@ export class ScriptedRunner implements AgentRunner {
     inv.onEvent({ kind: 'session', sessionId });
 
     for (const [rel, content] of Object.entries(turn.write ?? {})) {
+      await inv.beforeToolUse?.();
       const input = { file_path: join(inv.cwd, rel), content };
       const reason = inv.checkToolUse('Write', input);
       if (reason) {
@@ -87,6 +88,7 @@ export class ScriptedRunner implements AgentRunner {
       writeFiles(inv.cwd, { [rel]: content });
     }
     if (turn.bashWrite) {
+      await inv.beforeToolUse?.();
       inv.onEvent({ kind: 'tool', tool: 'Bash', input: { command: 'generate files' } });
       writeFiles(inv.cwd, turn.bashWrite);
     }
@@ -94,6 +96,7 @@ export class ScriptedRunner implements AgentRunner {
     for (const c of turn.call ?? []) {
       const tool = inv.customTools?.find((t) => t.name === c.tool);
       if (!tool) throw new Error(`${inv.agentName} has no tool ${c.tool} (has: ${(inv.customTools ?? []).map((t) => t.name).join(', ') || 'none'})`);
+      await inv.beforeToolUse?.();
       let result: string;
       try {
         result = await tool.run(c.args);

@@ -1,5 +1,13 @@
 import { isAbsolute, relative, resolve } from 'node:path';
 import picomatch from 'picomatch';
+import type { AgentConfig } from '../config/types.js';
+
+const READ_ONLY_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS', 'WebSearch', 'WebFetch', 'TodoWrite']);
+
+/** The agent as it may act in a question session: same role and model, no tools that change anything. */
+export function readOnly(agent: AgentConfig): AgentConfig {
+  return { ...agent, tools: agent.tools.filter((t) => READ_ONLY_TOOLS.has(t)), writes: false, writeScope: [], canMessage: [], sandbox: undefined };
+}
 
 /** Tools that write files, and where each keeps the path it writes. */
 const PATH_FIELDS: Record<string, string> = {
