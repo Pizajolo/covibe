@@ -40,10 +40,10 @@ To try the UI in a browser instead, run `covibe app`.
 |---|---|
 | **Home** | Today's and this week's estimated spend, tokens, members working now, run outcomes, gate pass rate; your plan's 5-hour and weekly usage as reported by Claude Code; spend per day and per team member; live runs and recent ones. Give a new goal or ask a question right there (⌘N anywhere). |
 | **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Board** (a column per workflow step, a card per member and fix round, gate results), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch). Stop a run, or start a **new goal on this result**. |
-| **Chat** | While a run is live, your message is queued for the member's next turn and nothing is interrupted. After the run, the member resumes its session and answers now; anything it changes is scope-checked and merged into the run's branch. |
+| **Chat** | While a member is working, choose **Now** (it reads your message between tool calls and adjusts), **Stop and redirect** (it ends its current turn and answers you first) or **Next turn**. After the run, the member resumes its session and answers right away; anything it changes is scope-checked and merged into the run's branch. |
 | **Ask a question** | A read-only session with one member in your project: it can read the code but not change it. Follow-up questions continue the same session. |
-| **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, report format, connection, limits), **Workflow** (steps, parallel groups, gates, fix loop), **Team settings**, **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
-| **Projects** | The git repositories your teams work on, added with the folder picker. |
+| **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, report format, connection, limits), **Workflow** (a drag-and-drop graph: drag steps to reorder, drag members onto a step or between steps, drag a gate's ↺ handle onto an earlier step to set where failed work goes back; plus forms for gates and the fix loop), **Team settings** (connection, sandbox, limits), **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
+| **Projects** | The git repositories your teams work on, added with the folder picker, with the disk space their run worktrees use and a **Clean up** dialog. A finished run also has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
 
 ![A live run: members, board and gates](docs/screenshots/run-board.png)
 
@@ -54,7 +54,10 @@ To try the UI in a browser instead, run `covibe app`.
 
 The app follows the system's light or dark appearance.
 
-![Dark mode](docs/screenshots/run-board-dark.png)
+| | |
+|---|---|
+| ![Steering a working member from chat](docs/screenshots/chat-live.png) | ![Cleaning up worktrees](docs/screenshots/cleanup.png) |
+| ![Sandbox settings for shell commands](docs/screenshots/sandbox.png) | ![Dark mode](docs/screenshots/run-board-dark.png) |
 
 **About the numbers.** Dollar amounts are Claude Code's estimate of what the usage would cost on the API. On a
 subscription you are not billed per token; usage counts against your plan's 5-hour and weekly limits, which the
@@ -105,7 +108,8 @@ Your checkout is never touched. The result lands on the branch `covibe/<run-id>`
 | `covibe run [team.yaml] --goal "…"` | Run the workflow. Exit code 0 = succeeded, 2 = escalated to you, 1 = failed |
 | `covibe runs` | List recent runs in this repository |
 | `covibe log <run> [--follow] [--json]` | Print a run's event log. `--json` prints the raw events, one per line |
-| `covibe chat <run> <agent> <message…>` | Talk to an agent (see [Chat](#chat)) |
+| `covibe chat <run> <agent> <message…> [--now \| --interrupt]` | Talk to an agent (see [Chat](#chat)) |
+| `covibe clean [--older-than <days>] [--run <id>] [--dry-run]` | Remove worktrees of finished runs; branches and history stay |
 | `covibe app [--port <n>] [--no-open]` | Serve the app UI in your browser |
 
 Run ids accept a unique prefix. The event store lives in `<repo>/.covibe/covibe.db`; covibe writes its own
@@ -198,6 +202,7 @@ The rules in the team file are enforced in code, not left to prompts:
 | Only listed tools | `tools` restricts Claude Code's built-in tool set; `permissionMode: dontAsk` denies anything not pre-approved |
 | Write scope | A `PreToolUse` hook blocks `Write`/`Edit`/`MultiEdit`/`NotebookEdit` outside `scope.write`, outside the agent's worktree, or in `.git` |
 | Write scope, Bash | A hook cannot see what a shell command writes. After every turn, the engine diffs the agent's worktree and **discards out-of-scope changes** before merging (`scope.violation` event) |
+| Shell sandbox | Bash runs in Claude Code's OS sandbox (Seatbelt on macOS, bubblewrap on Linux): writes only inside the agent's own worktree, temp folders and `allow_write`; network only to the `network` domains; the sandbox cannot be bypassed and the run fails if it is unavailable |
 | Gates | JSONata, evaluated by the engine against schema-validated reports |
 | Bounded loops | `max_loops`, `max_turns`, `timeout_min`, optional `max_budget_usd`, `max_parallel` |
 | Messaging | `send_message` only accepts the agent's `can_message` targets |
@@ -208,14 +213,32 @@ turn. After a turn, the engine commits the agent's changes and merges them into 
 Read-only agents (manager, QA) work in the integration worktree, so they always see the merged state. Parallel
 builders cannot overwrite each other. If a merge conflicts, the step fails and the run stops. Worktrees live in
 `~/.covibe/worktrees/<repo>-<hash>/<run-id>/`, outside the repository, so an agent cannot reach another agent's
-worktree by walking the tree. Remove old ones with `git worktree remove` or by deleting that folder and running
-`git worktree prune`.
+worktree by walking the tree.
 
-`isolation: none` runs every agent in your checkout. That is simpler, but scope enforcement then covers only the
-file tools, not Bash. Use it for read-only teams.
+**Cleaning up.** `covibe clean`, the Projects screen, or the auto-clean setting remove the worktrees of finished
+runs. Branches stay: the result branch is the run's output, and the agent branches let covibe restore a worktree
+at its old path when you chat with that member later, so its session resumes as if nothing happened. Live runs
+are never touched.
 
-What is **not** enforced yet: Bash commands that write outside the worktree, and network access. Run untrusted
-goals in a container or VM, and keep secrets out of the agent environment.
+`isolation: none` runs every agent in your checkout. Scope checks then cover only the file tools, but the shell
+sandbox still keeps writes inside the checkout. Use it for read-only teams.
+
+**Sandbox.** On by default for every member with Bash:
+
+```yaml
+defaults:
+  sandbox:
+    network: [registry.npmjs.org, pypi.org, github.com]   # default: common package registries and GitHub
+    allow_write: ["~/.npm", "~/.cache"]                    # default: common package-manager caches
+agents:
+  tester:
+    sandbox: { network: [registry.npmjs.org, api.staging.example.com] }   # overrides the team's lists
+  ops:
+    sandbox: { enabled: false }                            # only for members you fully trust with the goal
+```
+
+On Linux the sandbox needs `bubblewrap` and `socat` installed. Members are told about the sandbox and not to run
+`git commit` themselves (covibe commits for them). Keep secrets out of the agent environment all the same.
 
 ## Backends
 
@@ -247,14 +270,25 @@ attach every agent to the parent's session.
 
 ## Chat
 
-`covibe chat <run> <agent> "<message>"` behaves in one of two ways, depending on the run:
+While a run is live, you choose when a member reads your message:
 
-- **The run is live:** the message is **queued**. It is delivered at the start of the agent's next turn, and
-  nothing is interrupted.
-- **The run has ended:** the agent's SDK session is **resumed** and it answers now. Any files it changes are
-  scope-checked, committed and merged into the run branch, so `chat` is also how you act on an escalated run.
+| Mode | App | CLI | What happens |
+|---|---|---|---|
+| Next turn | **Next turn** | (default) | Delivered at the start of the member's next turn. Nothing is interrupted. |
+| Steer | **Now** | `--now` | If the member is working, it reads the message between tool calls and adjusts without stopping. |
+| Interrupt | **Stop and redirect** | `--interrupt` | The member finishes the tool call in progress, ends its turn, and answers your message first. |
 
-Messages agents send each other with `send_message` use the same inbox.
+Steer and interrupt fall back to "next turn" when the member is not working. They work for runs started from the
+CLI too: the engine picks messages up from the shared store while the member works. Under the hood, members run
+with streaming input, and a message is a new user message with priority `next` or `now`; the run continues until
+every message sent to the member has been read.
+
+Once the run has ended, `covibe chat <run> <agent> "<message>"` **resumes** the member's session and it answers
+now. Any files it changes are scope-checked, committed and merged into the run branch, so chat is also how you act
+on an escalated run.
+
+Teammates' `send_message` messages use the same inbox, in steer mode: a working teammate reads them between tool
+calls.
 
 ## Events
 
@@ -263,9 +297,11 @@ All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event t
 `run.started` `run.finished` `step.started` `step.finished` `step.skipped` `gate.passed` `gate.failed` `loop.goto`
 `agent.started` `agent.text` `agent.tool` `agent.finished` `agent.error` `scope.denied` `scope.violation`
 `git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit`
+`workspace.cleaned`
 
 `agent.finished` carries turns, estimated cost, duration, model and token counts; `usage.limit` carries the plan
-usage Claude Code reports (window, status, utilization, reset time).
+usage Claude Code reports (window, status, utilization, reset time). `message.queued` and `message.delivered` carry
+the delivery mode, and `live: true` when a message reached a member mid-turn.
 
 ## Code layout
 
@@ -306,6 +342,6 @@ npm run dev:ui      # then open http://localhost:5173/?token=<token printed by d
 1. **Engine (done):** YAML team, gates, bounded loops, worktrees, event log, CLI.
 2. **Server, live feed and Mac app (done):** dashboard with spend and plan usage, team editor, live board,
    activity, changes, chat and questions.
-3. **Next:** sandboxed Bash, chat that can interrupt a member's current turn (not only queue for the next),
-   resuming an escalated run from a step, an editable workflow graph, code signing and notarization for the app,
-   cleanup of old worktrees from the app.
+3. **Safety and control (done):** OS sandbox for shell commands, chat that steers or interrupts a working member,
+   worktree cleanup (manual, per run and automatic), drag-and-drop workflow graph.
+4. **Next:** resuming an escalated run from a step, code signing and notarization for the app.

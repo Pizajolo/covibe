@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { InboxMessage, NewEvent, RunEvent, RunRecord, RunStatus } from './types.js';
+import type { DeliveryMode, InboxMessage, NewEvent, RunEvent, RunRecord, RunStatus } from './types.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -62,6 +62,8 @@ export class EventStore {
     const cols = new Set((this.db.prepare('PRAGMA table_info(runs)').all() as Row[]).map((r) => String(r.name)));
     if (!cols.has('kind')) this.db.exec("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'workflow'");
     if (!cols.has('base')) this.db.exec('ALTER TABLE runs ADD COLUMN base TEXT');
+    const inboxCols = new Set((this.db.prepare('PRAGMA table_info(inbox)').all() as Row[]).map((r) => String(r.name)));
+    if (!inboxCols.has('mode')) this.db.exec("ALTER TABLE inbox ADD COLUMN mode TEXT NOT NULL DEFAULT 'queue'");
   }
 
   close() {
@@ -172,10 +174,23 @@ export class EventStore {
     return row ? { sessionId: String(row.session_id), cwd: String(row.cwd) } : undefined;
   }
 
-  enqueue(runId: string, to: string, from: string, text: string): InboxMessage {
+  enqueue(runId: string, to: string, from: string, text: string, mode: DeliveryMode = 'queue'): InboxMessage {
     const ts = now();
-    const r = this.db.prepare('INSERT INTO inbox (run_id, to_agent, from_agent, text, ts) VALUES (?, ?, ?, ?, ?)').run(runId, to, from, text, ts);
-    return { id: Number(r.lastInsertRowid), runId, to, from, text, ts };
+    const r = this.db.prepare('INSERT INTO inbox (run_id, to_agent, from_agent, text, ts, mode) VALUES (?, ?, ?, ?, ?, ?)').run(runId, to, from, text, ts, mode);
+    return { id: Number(r.lastInsertRowid), runId, to, from, text, ts, mode };
+  }
+
+  /** Undelivered steer/interrupt messages for an agent that is working (not marked delivered). */
+  liveMessages(runId: string, to: string): InboxMessage[] {
+    const rows = this.db
+      .prepare("SELECT * FROM inbox WHERE run_id = ? AND to_agent = ? AND delivered_at IS NULL AND mode IN ('steer', 'interrupt') ORDER BY id")
+      .all(runId, to) as Row[];
+    return rows.map((r) => toInbox(r, runId, to));
+  }
+
+  markDelivered(ids: number[]) {
+    if (!ids.length) return;
+    this.db.prepare(`UPDATE inbox SET delivered_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`).run(now(), ...ids);
   }
 
   /** Take every undelivered message for an agent and mark it delivered. */
@@ -188,15 +203,12 @@ export class EventStore {
         .prepare(`UPDATE inbox SET delivered_at = ? WHERE id IN (${rows.map(() => '?').join(',')})`)
         .run(now(), ...rows.map((r) => Number(r.id)));
     }
-    return rows.map((r) => ({
-      id: Number(r.id),
-      runId,
-      to,
-      from: String(r.from_agent),
-      text: String(r.text),
-      ts: String(r.ts),
-    }));
+    return rows.map((r) => toInbox(r, runId, to));
   }
+}
+
+function toInbox(r: Row, runId: string, to: string): InboxMessage {
+  return { id: Number(r.id), runId, to, from: String(r.from_agent), text: String(r.text), ts: String(r.ts), mode: (r.mode ?? 'queue') as DeliveryMode };
 }
 
 function now() {

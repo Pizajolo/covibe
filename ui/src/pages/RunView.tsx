@@ -15,6 +15,7 @@ import {
   IconSend,
   IconSpinner,
   IconStop,
+  IconTrash,
   IconX,
 } from '../components/icons';
 import { Toolbar } from '../components/Toolbar';
@@ -23,6 +24,28 @@ import { go, useData, useLive } from '../data';
 import { clock, duration, money, tokens, toolText } from '../format';
 
 type Tab = 'board' | 'activity' | 'chat' | 'changes';
+type Delivery = 'queue' | 'steer' | 'interrupt';
+
+const DELIVERY: Record<Delivery, { label: string; pending: string; help: (a: string) => string; toast: (a: string) => string }> = {
+  queue: {
+    label: 'Next turn',
+    pending: 'Waiting for its next turn',
+    help: (a) => `${a} reads this at the start of its next turn. Nothing is interrupted.`,
+    toast: (a) => `Queued. ${a} reads it at the start of its next turn.`,
+  },
+  steer: {
+    label: 'Now',
+    pending: 'Sending while it works…',
+    help: (a) => `${a} reads this between its tool calls and adjusts, without stopping what it is doing.`,
+    toast: (a) => `Sent. ${a} reads it between its tool calls.`,
+  },
+  interrupt: {
+    label: 'Stop and redirect',
+    pending: 'Stopping its current turn…',
+    help: (a) => `${a} stops its current turn after the tool call in progress and answers this first.`,
+    toast: (a) => `Sent. ${a} stops its current turn and reads it.`,
+  },
+};
 
 export function RunView({ projectId, runId, tab: tabParam }: { projectId: string; runId: string; tab?: string }) {
   const { value: detail, error, reload } = useLive(
@@ -41,6 +64,12 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
     const t = window.setInterval(() => tick((n) => n + 1), 1000);
     return () => window.clearInterval(t);
   }, []);
+
+  const [freeSpace, freeing] = useAction(async () => {
+    const res = await post<{ freedKb: number }>(`/api/projects/${projectId}/cleanup`, { runIds: [runId] });
+    toast(`Removed this run's worktrees (${(res.freedKb / 1024).toFixed(1)} MB). The result branch stays, and chat restores a member's worktree when needed.`);
+    await reload();
+  });
 
   const [stop, stopping] = useAction(async () => {
     await post(`/api/runs/${projectId}/${runId}/stop`);
@@ -68,6 +97,11 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
             <IconStop /> Stop
           </button>
         )}
+        {!isAsk && run.status !== 'running' && run.branch && !run.worktreesRemoved && (
+          <button className="btn ghost" disabled={freeing} onClick={() => void freeSpace()} title="Remove this run's worktrees from disk. The result branch is kept.">
+            <IconTrash /> Free disk space
+          </button>
+        )}
         {!isAsk && run.status !== 'running' && run.branch && (
           <button className="btn" onClick={() => setContinueOpen(true)} title="Start a new goal from this run's result">
             <IconBranch /> New goal on this result
@@ -84,6 +118,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
             <Fact label={`${money(run.costUsd)} est.`} title="Estimated API-equivalent cost" />
             <Fact label={`${tokens(run.tokens)} tokens`} />
             {!isAsk && <Fact label={`${run.filesChanged.length} files changed`} />}
+            {run.worktreesRemoved && <Fact label="worktrees removed" title="Removed to free disk space; chat restores them when needed" />}
             {run.branch && (
               <span className="row tiny faint" style={{ gap: 2 }}>
                 <IconBranch width={13} height={13} />
@@ -355,18 +390,21 @@ function Chat({ detail, projectId, selected, onSelect, onSent }: { detail: RunDe
   const answering = !!agent && detail.answering.includes(agent);
   const working = state?.status === 'working' || answering;
   const [text, setText] = useState('');
+  const [choice, setChoice] = useState<Delivery | null>(null);
   const toast = useToast();
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // scrollIntoView returns a Promise in newer Chromium; never hand it to React as a cleanup.
     void end.current?.scrollIntoView({ block: 'end' });
   }, [items.length, agent, working]);
+  // Reaching a member mid-turn only makes sense while it works; default to "now" then.
+  const delivery: Delivery = working ? (choice ?? 'steer') : 'queue';
 
   const [send, sending] = useAction(async () => {
     if (!agent || !text.trim()) return;
-    const res = await post<{ mode: string }>(`/api/runs/${projectId}/${run.id}/chat`, { agent, message: text.trim() });
+    const res = await post<{ mode: string; delivery?: Delivery }>(`/api/runs/${projectId}/${run.id}/chat`, { agent, message: text.trim(), delivery });
     setText('');
-    if (res.mode === 'queued') toast(`Queued. ${agent} reads it at the start of its next turn.`);
+    if (res.mode === 'queued') toast(DELIVERY[res.delivery ?? 'queue'].toast(agent));
     onSent();
   });
 
@@ -420,17 +458,36 @@ function Chat({ detail, projectId, selected, onSelect, onSent }: { detail: RunDe
                 }
               }}
             />
-            <button className="btn primary icon-btn" disabled={!text.trim() || sending || answering} onClick={() => void send()} aria-label="Send" style={{ borderRadius: 14 }}>
+            <button className="btn primary icon-btn" disabled={!text.trim() || sending} onClick={() => void send()} aria-label="Send" style={{ borderRadius: 14 }}>
               <IconSend />
             </button>
           </div>
+          {(queueMode || answering) && (
+            <div className="row wrap" style={{ gap: 8 }}>
+              <div className="seg" role="radiogroup" aria-label="When it should read this">
+                {(['queue', 'steer', 'interrupt'] as Delivery[]).map((d) => (
+                  <button
+                    key={d}
+                    className={delivery === d ? 'on' : ''}
+                    disabled={d !== 'queue' && !working}
+                    title={d !== 'queue' && !working ? `Only while ${agent} is working` : DELIVERY[d].help(agent)}
+                    onClick={() => setChoice(d)}
+                    role="radio"
+                    aria-checked={delivery === d}
+                  >
+                    {DELIVERY[d].label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <span className="mode">
             <IconInfo />
-            {queueMode
-              ? `The run is live: your message is queued and ${agent} reads it at the start of its next turn. Nothing is interrupted.`
+            {queueMode || answering
+              ? DELIVERY[delivery].help(agent)
               : run.kind === 'ask'
                 ? `${agent} answers now, read-only, and remembers this conversation.`
-                : `${agent} answers now. It resumes its session with full memory; file changes it makes are merged into ${run.branch ?? 'the run'}.`}
+                : `${agent} answers now. It resumes its session with full memory; file changes it makes are merged into ${run.branch ?? 'the run'}.${run.worktreesRemoved ? ' Its worktree was cleaned up and is restored first.' : ''}`}
           </span>
         </div>
       </div>
@@ -459,7 +516,7 @@ function ThreadItems({ items }: { items: ChatItem[] }) {
         ) : g.kind === 'human' ? (
           <div key={g.id} className="col" style={{ gap: 2, alignItems: 'flex-end' }}>
             <div className={`msg human ${g.pending ? 'pending' : ''}`}>{g.text}</div>
-            <span className="msg-meta right">{g.pending ? 'Queued for next turn' : clock(g.ts)}</span>
+            <span className="msg-meta right">{g.pending ? DELIVERY[g.delivery ?? 'queue'].pending : clock(g.ts)}</span>
           </div>
         ) : g.kind === 'agent' ? (
           <div key={g.id} className="msg agent">

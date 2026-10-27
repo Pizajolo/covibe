@@ -4,6 +4,8 @@ import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { ConfigError, loadTeam } from './config/load.js';
 import { chat } from './engine/chat.js';
+import { cleanupWorktrees } from './engine/cleanup.js';
+import type { DeliveryMode } from './events/types.js';
 import { runTeam } from './engine/engine.js';
 import { EventStore } from './events/store.js';
 import { bold, dim, formatEvent, formatRun, green, red, yellow } from './format.js';
@@ -17,6 +19,9 @@ Usage:
   covibe runs                                  List recent runs
   covibe log <run> [--follow] [--json]         Show a run's event log
   covibe chat <run> <agent> <message...>       Talk to an agent of a run
+        [--now | --interrupt]                 (live run: reach it while it works / stop it)
+  covibe clean [--older-than <days>] [--run <id>] [--dry-run]
+                                               Remove worktrees of finished runs
   covibe app [--port <n>] [--no-open]          Open the covibe app in your browser
 
 Options:
@@ -41,6 +46,11 @@ export async function main(argv: string[]): Promise<number> {
       help: { type: 'boolean', short: 'h' },
       port: { type: 'string' },
       'no-open': { type: 'boolean' },
+      now: { type: 'boolean' },
+      interrupt: { type: 'boolean' },
+      'older-than': { type: 'string' },
+      run: { type: 'string' },
+      'dry-run': { type: 'boolean' },
     },
   });
   const [command, ...args] = positionals;
@@ -60,7 +70,9 @@ export async function main(argv: string[]): Promise<number> {
       case 'log':
         return await log(args[0], values);
       case 'chat':
-        return await chatCommand(args, values.repo);
+        return await chatCommand(args, values.repo, values.interrupt ? 'interrupt' : values.now ? 'steer' : 'queue');
+      case 'clean':
+        return await clean(values);
       case 'app':
         return await app(values.port ? Number(values.port) : undefined, !values['no-open']);
       default:
@@ -192,7 +204,23 @@ async function app(port: number | undefined, open: boolean): Promise<number> {
   return 0;
 }
 
-async function chatCommand(args: string[], repo: string | undefined): Promise<number> {
+async function clean(values: { repo?: string; 'older-than'?: string; run?: string; 'dry-run'?: boolean }): Promise<number> {
+  const store = openStore(values.repo);
+  try {
+    const days = values['older-than'] === undefined ? undefined : Number(values['older-than'].replace(/d$/, ''));
+    if (days !== undefined && !Number.isFinite(days)) throw new Error('--older-than takes a number of days, e.g. 7');
+    const run = values.run ? store.findRun(values.run)?.id ?? values.run : undefined;
+    const res = await cleanupWorktrees(repoRoot(values.repo), store, { olderThanDays: days, runIds: run ? [run] : undefined, dryRun: values['dry-run'] });
+    for (const c of res.cleaned) console.log(`${values['dry-run'] ? 'would remove' : 'removed'} ${c.runId}  ${dim(`${(c.freedKb / 1024).toFixed(1)} MB`)}`);
+    for (const s of res.skipped) console.log(dim(`kept ${s.runId}: ${s.reason}`));
+    console.log(`${values['dry-run'] ? 'Would free' : 'Freed'} ${bold(`${(res.freedKb / 1024).toFixed(1)} MB`)}. Branches are kept; chatting with a member restores its worktree.`);
+    return 0;
+  } finally {
+    store.close();
+  }
+}
+
+async function chatCommand(args: string[], repo: string | undefined, delivery: DeliveryMode): Promise<number> {
   const [id, agent, ...words] = args;
   if (!id || !agent || !words.length) throw new Error('usage: covibe chat <run> <agent> <message...>');
   const store = openStore(repo);
@@ -203,9 +231,15 @@ async function chatCommand(args: string[], repo: string | undefined): Promise<nu
     const live = store.isLive(run);
     const unsubscribe = live ? () => {} : store.subscribe((e) => e.type !== 'agent.text' && console.log(formatEvent(e)));
     try {
-      const outcome = await chat({ store, runner: new ClaudeSdkRunner(), team, runId: run.id, agent, message: words.join(' ') });
+      const outcome = await chat({ store, runner: new ClaudeSdkRunner(), team, runId: run.id, agent, message: words.join(' '), delivery });
       if (outcome.mode === 'queued') {
-        console.log(`queued message #${outcome.messageId} for ${agent}; it is delivered at the start of ${agent}'s next turn.`);
+        const when =
+          outcome.delivery === 'interrupt'
+            ? `${agent} stops its current turn and reads it (or reads it at its next turn if it is not working)`
+            : outcome.delivery === 'steer'
+              ? `${agent} reads it between tool calls if it is working, otherwise at its next turn`
+              : `it is delivered at the start of ${agent}'s next turn`;
+        console.log(`sent message #${outcome.messageId}; ${when}.`);
         return 0;
       }
       if (!outcome.ok) {

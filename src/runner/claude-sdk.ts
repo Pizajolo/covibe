@@ -1,5 +1,6 @@
 // The only module that imports the Claude Agent SDK. SDK upgrades and API
 // changes should touch this file and nothing else.
+import { randomUUID } from 'node:crypto';
 import {
   createSdkMcpServer,
   query,
@@ -7,12 +8,48 @@ import {
   type HookCallback,
   type Options,
   type SDKMessage,
+  type SDKResultMessage,
+  type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type { AgentInvocation, AgentResult, AgentRunner } from './types.js';
+import type { AgentInvocation, AgentResult, AgentRunner, LivePriority, TokenUsage } from './types.js';
 
 const TEAM_SERVER = 'team';
 const SEND_MESSAGE_TOOL = `mcp__${TEAM_SERVER}__send_message`;
+/** After a turn ends with messages still unread, how long to wait for the turn that reads them. */
+const FOLLOW_UP_WAIT_MS = 30_000;
+
+/** The prompt stream: the agent's first message, then anything sent while it works. */
+class Input implements AsyncIterable<SDKUserMessage> {
+  private queue: SDKUserMessage[] = [];
+  private wake: (() => void) | null = null;
+  private closed = false;
+
+  push(text: string, priority?: LivePriority): string {
+    const uuid = randomUUID();
+    this.queue.push({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null, uuid, ...(priority ? { priority } : {}) } as SDKUserMessage);
+    this.wake?.();
+    return uuid;
+  }
+
+  close() {
+    this.closed = true;
+    this.wake?.();
+  }
+
+  get isClosed() {
+    return this.closed;
+  }
+
+  async *[Symbol.asyncIterator]() {
+    for (;;) {
+      while (this.queue.length) yield this.queue.shift()!;
+      if (this.closed) return;
+      await new Promise<void>((r) => (this.wake = r));
+      this.wake = null;
+    }
+  }
+}
 
 export class ClaudeSdkRunner implements AgentRunner {
   async run(inv: AgentInvocation): Promise<AgentResult> {
@@ -49,12 +86,46 @@ export class ClaudeSdkRunner implements AgentRunner {
       hooks: { PreToolUse: [{ hooks: [preToolUse] }] },
       outputFormat: inv.outputSchema ? { type: 'json_schema', schema: inv.outputSchema } : undefined,
       mcpServers: inv.canMessage.length ? { [TEAM_SERVER]: teamServer(inv) } : undefined,
+      // Shell commands run in the OS sandbox: writes stay in the working folder,
+      // temp and the allowed caches; network only to listed domains; no escape hatch.
+      sandbox: inv.sandbox
+        ? {
+            enabled: true,
+            failIfUnavailable: true,
+            autoAllowBashIfSandboxed: true,
+            allowUnsandboxedCommands: false,
+            network: { allowedDomains: inv.sandbox.network },
+            filesystem: { allowWrite: inv.sandbox.allowWrite },
+          }
+        : undefined,
+    };
+
+    // Streaming input, so messages can reach the agent while it works. Each
+    // message is tagged; the run ends once a turn's result shows every tagged
+    // message was read (a "now" message ends one turn and starts another).
+    const input = new Input();
+    const unread = new Set<string>([input.push(inv.prompt)]);
+    inv.onControl?.({
+      send: (text, priority) => {
+        if (input.isClosed) return false;
+        unread.add(input.push(text, priority));
+        return true;
+      },
+    });
+    let followUp: NodeJS.Timeout | undefined;
+    const stop = () => {
+      clearTimeout(followUp);
+      inv.onControl?.(null);
+      input.close();
     };
 
     let sessionId = inv.resumeSessionId;
     let lastText = '';
+    let last: SDKResultMessage | undefined;
+    let turns = 0;
     try {
-      for await (const msg of query({ prompt: inv.prompt, options }) as AsyncIterable<SDKMessage>) {
+      for await (const msg of query({ prompt: input, options }) as AsyncIterable<SDKMessage>) {
+        clearTimeout(followUp);
         if (msg.type === 'system' && msg.subtype === 'init') {
           sessionId = msg.session_id;
           inv.onEvent({ kind: 'session', sessionId });
@@ -71,29 +142,43 @@ export class ClaudeSdkRunner implements AgentRunner {
           const info = msg.rate_limit_info;
           inv.onEvent({ kind: 'rate_limit', info: { status: info.status, window: info.rateLimitType, utilization: info.utilization, resetsAt: info.resetsAt } });
         } else if (msg.type === 'result') {
-          const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-          for (const u of Object.values(msg.modelUsage ?? {})) {
-            tokens.input += u.inputTokens;
-            tokens.output += u.outputTokens;
-            tokens.cacheRead += u.cacheReadInputTokens;
-            tokens.cacheWrite += u.cacheCreationInputTokens;
-          }
-          const base = { sessionId: msg.session_id, turns: msg.num_turns, costUsd: msg.total_cost_usd, durationMs: Date.now() - started, tokens };
-          if (msg.subtype === 'success' && !msg.is_error) {
-            return { ...base, ok: true, text: msg.result, structured: msg.structured_output };
-          }
-          const error = msg.subtype === 'success' ? msg.result : [msg.subtype, ...msg.errors].join(': ');
-          return { ...base, ok: false, text: lastText, error };
+          last = msg;
+          turns += msg.num_turns;
+          const consumed = msg.user_message_uuids ?? (msg.user_message_uuid ? [msg.user_message_uuid] : null);
+          // Older CLIs do not report what a turn read; then the first result ends the run.
+          if (consumed) for (const u of consumed) unread.delete(u);
+          else unread.clear();
+          if (!unread.size) stop();
+          else followUp = setTimeout(stop, FOLLOW_UP_WAIT_MS);
         }
       }
-      return { ok: false, sessionId, text: lastText, error: 'session ended without a result', turns: 0, costUsd: 0, durationMs: Date.now() - started };
     } catch (err) {
+      stop();
       const error = inv.signal.aborted ? 'aborted (timeout or cancel)' : (err as Error).message;
-      return { ok: false, sessionId, text: lastText, error, turns: 0, costUsd: 0, durationMs: Date.now() - started };
+      return { ok: false, sessionId, text: lastText, error, turns, costUsd: last?.total_cost_usd ?? 0, durationMs: Date.now() - started };
     } finally {
+      stop();
       inv.signal.removeEventListener('abort', onAbort);
     }
+
+    if (!last) return { ok: false, sessionId, text: lastText, error: 'session ended without a result', turns, costUsd: 0, durationMs: Date.now() - started };
+    // Cost and usage are running totals across the turns of one query().
+    const base = { sessionId: last.session_id, turns, costUsd: last.total_cost_usd, durationMs: Date.now() - started, tokens: tokensOf(last) };
+    if (last.subtype === 'success' && !last.is_error) return { ...base, ok: true, text: last.result || lastText, structured: last.structured_output };
+    const error = last.subtype === 'success' ? last.result : [last.subtype, ...last.errors].join(': ');
+    return { ...base, ok: false, text: lastText, error };
   }
+}
+
+function tokensOf(msg: SDKResultMessage): TokenUsage {
+  const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const u of Object.values(msg.modelUsage ?? {})) {
+    tokens.input += u.inputTokens;
+    tokens.output += u.outputTokens;
+    tokens.cacheRead += u.cacheReadInputTokens;
+    tokens.cacheWrite += u.cacheCreationInputTokens;
+  }
+  return tokens;
 }
 
 /** In-process MCP server giving an agent a send_message tool limited to its can_message list. */
@@ -105,7 +190,7 @@ function teamServer(inv: AgentInvocation) {
     tools: [
       tool(
         'send_message',
-        'Send a message to a teammate. It is delivered at the start of their next turn; it does not interrupt them.',
+        'Send a message to a teammate. If they are working it reaches them between their tool calls; otherwise at the start of their next turn. It never stops their work.',
         { to: z.enum([first, ...rest]), text: z.string().min(1) },
         async ({ to, text }) => ({ content: [{ type: 'text', text: inv.sendMessage(to, text) }] }),
       ),

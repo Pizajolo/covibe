@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { del, get, post, put, type EditOp, type TeamDetail, type TeamListing } from '../api';
 import { CodeEditor } from '../components/CodeEditor';
 import { Composer } from '../components/Composer';
@@ -99,6 +99,7 @@ export function TeamEditor({ teamId, tab: tabParam }: { teamId: string; tab?: st
           </button>
         ))}
       </nav>
+      <SandboxDefaultsCtx.Provider value={team.sandboxDefaults}>
       <div className="content flush">
         {team.problems.length > 0 && tab !== 'yaml' && (
           <div style={{ padding: '12px 20px 0' }}>
@@ -121,6 +122,7 @@ export function TeamEditor({ teamId, tab: tabParam }: { teamId: string; tab?: st
         {tab === 'yaml' && <YamlTab teamId={teamId} team={team} onSaved={reload} />}
         {tab === 'files' && <Files teamId={teamId} team={team} onChange={reload} />}
       </div>
+      </SandboxDefaultsCtx.Provider>
 
       {goal && (
         <Modal title={`Give ${name} a goal`} onClose={() => setGoal(false)} wide>
@@ -202,6 +204,47 @@ function ChipsInput({ values, onChange, placeholder }: { values: string[]; onCha
 }
 
 const num = (s: string) => (s.trim() === '' ? null : Number(s));
+
+type SandboxDefaults = TeamDetail['sandboxDefaults'];
+// The engine's defaults, sent by the server, so the form shows what applies.
+const SandboxDefaultsCtx = createContext<SandboxDefaults>({ network: [], allowWrite: [] });
+
+function SandboxFields({ sandbox, onChange, hideToggle }: { sandbox: Doc | undefined; onChange: (v: Doc | null) => void; hideToggle?: boolean }) {
+  const defaults = useContext(SandboxDefaultsCtx);
+  const on = sandbox?.enabled !== false;
+  const network: string[] = Array.isArray(sandbox?.network) ? sandbox!.network : defaults.network;
+  // Show the home-relative form the user would type.
+  const write: string[] = Array.isArray(sandbox?.allow_write) ? sandbox!.allow_write : defaults.allowWrite;
+  const set = (patch: Doc) => onChange({ ...(sandbox ?? {}), ...patch });
+  return (
+    <div className="col" style={{ gap: 10 }}>
+      {!hideToggle && (
+        <label className="check">
+          <input type="checkbox" checked={on} onChange={(e) => set({ enabled: e.target.checked })} />
+          Run members' shell commands in the macOS sandbox (recommended)
+        </label>
+      )}
+      {on ? (
+        <>
+          <label className="field">
+            Websites shell commands may reach
+            <ChipsInput values={network} placeholder="Add a domain, e.g. api.example.com or *.example.com" onChange={(v) => set({ network: v })} />
+            <span className="help">Package registries are allowed by default so installs work. Everything else is blocked.</span>
+          </label>
+          <label className="field">
+            Extra folders shell commands may write
+            <ChipsInput values={write} placeholder="Add a folder, e.g. ~/.gradle" onChange={(v) => set({ allow_write: v })} />
+            <span className="help">Besides the member's own working copy and temp folders. Package caches are included by default.</span>
+          </label>
+        </>
+      ) : (
+        <span className="tiny" style={{ color: 'var(--warn)' }}>
+          Off: shell commands can write anywhere your user can and reach any site. covibe still discards file changes outside each member's allowed paths before merging.
+        </span>
+      )}
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------- members
 
@@ -355,6 +398,29 @@ function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, o
           </>
         )}
       </section>
+
+      {tools.includes('Bash') && (
+        <section className="form-section">
+          <h3>Sandbox for its shell commands</h3>
+          <div className="seg">
+            <button className={!agent.sandbox ? 'on' : ''} onClick={() => void edit([{ op: 'delete', path: p('sandbox') }])}>
+              Team default
+            </button>
+            <button className={agent.sandbox && agent.sandbox.enabled !== false ? 'on' : ''} onClick={() => !(agent.sandbox && agent.sandbox.enabled !== false) && void edit([{ op: 'set', path: p('sandbox'), value: { enabled: true } }])}>
+              Custom
+            </button>
+            <button className={agent.sandbox?.enabled === false ? 'on' : ''} onClick={() => void edit([{ op: 'set', path: p('sandbox'), value: { enabled: false } }])}>
+              Off
+            </button>
+          </div>
+          {agent.sandbox && agent.sandbox.enabled !== false && <SandboxFields sandbox={agent.sandbox} hideToggle onChange={(v) => void edit([{ op: 'set', path: p('sandbox'), value: v }])} />}
+          {agent.sandbox?.enabled === false && (
+            <span className="tiny" style={{ color: 'var(--warn)' }}>
+              Its shell commands can write anywhere your user can and reach any site. Only for members you fully trust with the goal.
+            </span>
+          )}
+        </section>
+      )}
 
       {names.length > 1 && (
         <section className="form-section">
@@ -634,7 +700,6 @@ function Workflow({ doc, edit }: { doc: Doc; edit: Edit }) {
   const i = Math.min(sel, Math.max(0, steps.length - 1));
   const step = steps[i];
   const policy: Doc | undefined = doc.workflow?.on_gate_fail;
-  const setSteps = (next: Doc[]) => void edit([{ op: 'set', path: ['workflow', 'steps'], value: next }]);
   const freeId = (base: string) => {
     let id = base;
     for (let n = 2; steps.some((s) => s.id === id); n++) id = `${base}-${n}`;
@@ -642,55 +707,23 @@ function Workflow({ doc, edit }: { doc: Doc; edit: Edit }) {
   };
   const index = (n: string) => agents.indexOf(n);
 
+  const setStep = (k: number, value: Doc) => void edit([{ op: 'set', path: ['workflow', 'steps', k], value }]);
+
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '8px 20px 24px' }}>
-      <div className="pipeline">
-        {steps.map((s, k) => {
-          const parallel = Array.isArray(s.parallel);
-          const who: string[] = parallel ? s.parallel.map((b: Doc) => b.agent) : [s.agent];
-          const fail = s.on_gate_fail ?? (s.gate ? policy : undefined);
-          return (
-            <div className="pipe-step" key={k}>
-              {k > 0 && <div className="pipe-arrow" />}
-              <div className={`pipe-card ${k === i ? 'on' : ''}`} onClick={() => setSel(k)}>
-                <span className="kind">{parallel ? 'In parallel' : 'Step'}</span>
-                <strong>{s.id}</strong>
-                <div className="agents">
-                  {who.map((a) => (
-                    <span key={a} className="agent-line">
-                      <Avatar name={a ?? '?'} index={index(a)} size="sm" /> {a ?? 'no member'}
-                    </span>
-                  ))}
-                </div>
-                {s.gate && <span className="gate">✓ {s.gate}</span>}
-                {s.gate && fail && (
-                  <span className="loop-note">
-                    <IconLoop /> on fail: back to {fail.goto}, up to {fail.max_loops}×
-                  </span>
-                )}
-              </div>
-            </div>
-          );
-        })}
-        <div className="pipe-step">
-          {steps.length > 0 && <div className="pipe-arrow" />}
-          <button className="btn" onClick={() => (setSteps([...steps, { id: freeId('step'), agent: agents[0] }]), setSel(steps.length))}>
-            <IconPlus /> Add step
-          </button>
-        </div>
-      </div>
+      <WorkflowGraph steps={steps} agents={agents} policy={policy} selected={i} onSelect={setSel} edit={edit} freeId={freeId} />
 
       {step && (
         <div className="card card-pad form" style={{ maxWidth: 'none', marginTop: 8 }}>
           <div className="row">
             <h2 className="grow">Step “{step.id}”</h2>
-            <button className="btn sm ghost icon-btn" title="Move earlier" disabled={i === 0} onClick={() => { const n = [...steps]; [n[i - 1], n[i]] = [n[i]!, n[i - 1]!]; setSteps(n); setSel(i - 1); }}>
+            <button className="btn sm ghost icon-btn" title="Move earlier" disabled={i === 0} onClick={() => (void edit([{ op: 'move', path: ['workflow', 'steps'], from: i, to: i - 1 }]), setSel(i - 1))}>
               <IconArrowLeft />
             </button>
-            <button className="btn sm ghost icon-btn" title="Move later" disabled={i === steps.length - 1} onClick={() => { const n = [...steps]; [n[i + 1], n[i]] = [n[i]!, n[i + 1]!]; setSteps(n); setSel(i + 1); }}>
+            <button className="btn sm ghost icon-btn" title="Move later" disabled={i === steps.length - 1} onClick={() => (void edit([{ op: 'move', path: ['workflow', 'steps'], from: i, to: i + 1 }]), setSel(i + 1))}>
               <IconArrowRight />
             </button>
-            <button className="btn sm ghost danger" onClick={() => (setSteps(steps.filter((_, k) => k !== i)), setSel(Math.max(0, i - 1)))}>
+            <button className="btn sm ghost danger" onClick={() => (void edit([{ op: 'delete', path: ['workflow', 'steps', i] }]), setSel(Math.max(0, i - 1)))}>
               <IconTrash /> Delete step
             </button>
           </div>
@@ -702,10 +735,10 @@ function Workflow({ doc, edit }: { doc: Doc; edit: Edit }) {
             <label className="field">
               Who works on it
               <div className="seg">
-                <button className={!Array.isArray(step.parallel) ? 'on' : ''} onClick={() => Array.isArray(step.parallel) && setSteps(steps.map((s, k) => (k === i ? { ...withoutKeys(s, ['parallel']), agent: s.parallel[0]?.agent ?? agents[0] } : s)))}>
+                <button className={!Array.isArray(step.parallel) ? 'on' : ''} onClick={() => Array.isArray(step.parallel) && setStep(i, { ...withoutKeys(step, ['parallel']), agent: step.parallel[0]?.agent ?? agents[0] })}>
                   One member
                 </button>
-                <button className={Array.isArray(step.parallel) ? 'on' : ''} onClick={() => !Array.isArray(step.parallel) && setSteps(steps.map((s, k) => (k === i ? { ...withoutKeys(s, ['agent', 'task', 'output_schema']), parallel: [{ agent: s.agent ?? agents[0] }] } : s)))}>
+                <button className={Array.isArray(step.parallel) ? 'on' : ''} onClick={() => !Array.isArray(step.parallel) && setStep(i, { ...withoutKeys(step, ['agent', 'task', 'output_schema']), parallel: [{ agent: step.agent ?? agents[0], ...(step.task ? { task: step.task } : {}) }] })}>
                   Several in parallel
                 </button>
               </div>
@@ -814,6 +847,253 @@ function Workflow({ doc, edit }: { doc: Doc; edit: Edit }) {
   );
 }
 
+type DragItem = { kind: 'step'; index: number } | { kind: 'member'; name: string } | { kind: 'loop'; index: number };
+const DRAG_TYPE = 'application/x-covibe';
+
+/**
+ * The workflow as an editable graph. Drag a step to reorder it; drag a member
+ * onto a step to add it in parallel, or into a gap to make a new step; drag a
+ * gated step's loop handle onto an earlier step to choose where failed work
+ * goes back to. Every change is a comment-preserving edit of team.yaml.
+ */
+function WorkflowGraph({
+  steps,
+  agents,
+  policy,
+  selected,
+  onSelect,
+  edit,
+  freeId,
+}: {
+  steps: Doc[];
+  agents: string[];
+  policy: Doc | undefined;
+  selected: number;
+  onSelect: (i: number) => void;
+  edit: Edit;
+  freeId: (base: string) => string;
+}) {
+  const [drag, setDrag] = useState<DragItem | null>(null);
+  const [over, setOver] = useState<string | null>(null);
+  const wrap = useRef<HTMLDivElement>(null);
+  const cards = useRef<(HTMLDivElement | null)[]>([]);
+  const [boxes, setBoxes] = useState<{ x: number; y: number; w: number; h: number }[]>([]);
+  const index = (n: string) => agents.indexOf(n);
+  const membersOf = (s: Doc): string[] => (Array.isArray(s.parallel) ? s.parallel.map((b: Doc) => b.agent) : s.agent ? [s.agent] : []);
+  const failOf = (s: Doc): Doc | undefined => s.on_gate_fail ?? (s.gate ? policy : undefined);
+
+  // Measure cards to draw loop-back arrows under them.
+  useLayoutEffect(() => {
+    const measure = () => {
+      const base = wrap.current?.getBoundingClientRect();
+      if (!base) return;
+      setBoxes(
+        cards.current.slice(0, steps.length).map((el) => {
+          const r = el?.getBoundingClientRect();
+          return r ? { x: r.left - base.left + (wrap.current?.scrollLeft ?? 0), y: r.top - base.top, w: r.width, h: r.height } : { x: 0, y: 0, w: 0, h: 0 };
+        }),
+      );
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    if (wrap.current) ro.observe(wrap.current);
+    for (const el of cards.current) if (el) ro.observe(el);
+    return () => ro.disconnect();
+  }, [steps]);
+
+  const start = (item: DragItem) => (e: React.DragEvent) => {
+    e.stopPropagation();
+    e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(item));
+    e.dataTransfer.effectAllowed = 'move';
+    setDrag(item);
+  };
+  const end = () => {
+    setDrag(null);
+    setOver(null);
+  };
+  const read = (e: React.DragEvent): DragItem | null => {
+    try {
+      return drag ?? (JSON.parse(e.dataTransfer.getData(DRAG_TYPE)) as DragItem);
+    } catch {
+      return null;
+    }
+  };
+
+  // What a drop on a gap or a card would do (null = not allowed), shared by dragover and drop.
+  const gapAction = (item: DragItem | null, k: number): EditOp[] | null => {
+    if (!item) return null;
+    if (item.kind === 'step') {
+      const to = k > item.index ? k - 1 : k;
+      return to === item.index ? null : [{ op: 'move', path: ['workflow', 'steps'], from: item.index, to }];
+    }
+    if (item.kind === 'member') return [{ op: 'insert', path: ['workflow', 'steps'], index: k, value: { id: freeId(item.name), agent: item.name } }];
+    return null;
+  };
+  const cardAction = (item: DragItem | null, k: number): EditOp[] | null => {
+    if (!item) return null;
+    const s = steps[k]!;
+    if (item.kind === 'member') {
+      if (membersOf(s).includes(item.name)) return null;
+      if (Array.isArray(s.parallel)) return [{ op: 'insert', path: ['workflow', 'steps', k, 'parallel'], value: { agent: item.name } }];
+      const first = { agent: s.agent, ...(s.task ? { task: s.task } : {}) };
+      return [{ op: 'set', path: ['workflow', 'steps', k], value: { ...withoutKeys(s, ['agent', 'task', 'output_schema']), parallel: [first, { agent: item.name }] } }];
+    }
+    if (item.kind === 'loop') {
+      if (k > item.index) return null; // loops only go back
+      const from = steps[item.index]!;
+      const current = failOf(from) ?? {};
+      return [{ op: 'set', path: ['workflow', 'steps', item.index, 'on_gate_fail'], value: { goto: s.id, max_loops: current.max_loops ?? 2, ...(current.feed ? { feed: current.feed } : {}), then: current.then ?? 'escalate_to_human' } }];
+    }
+    return null;
+  };
+  const target = (key: string, action: (item: DragItem | null) => EditOp[] | null) => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (!action(drag)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (over !== key) setOver(key);
+    },
+    onDragLeave: () => over === key && setOver(null),
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      const ops = action(read(e));
+      end();
+      if (ops) void edit(ops);
+    },
+  });
+  const removeMember = (k: number, name: string) => {
+    const s = steps[k]!;
+    const left = (s.parallel as Doc[]).filter((b) => b.agent !== name);
+    if (left.length === 1) void edit([{ op: 'set', path: ['workflow', 'steps', k], value: { ...withoutKeys(s, ['parallel']), agent: left[0]!.agent, ...(left[0]!.task ? { task: left[0]!.task } : {}) } }]);
+    else void edit([{ op: 'delete', path: ['workflow', 'steps', k, 'parallel', (s.parallel as Doc[]).findIndex((b) => b.agent === name)] }]);
+  };
+
+  // Loop-back arcs: from a gated step under the cards back to its target.
+  const arcs = steps
+    .map((s, k) => {
+      const f = failOf(s);
+      const t = f ? steps.findIndex((x) => x.id === f.goto) : -1;
+      return f && s.gate && t >= 0 && t <= k && boxes[k] && boxes[t] ? { k, t, f } : null;
+    })
+    .filter((a): a is { k: number; t: number; f: Doc } => !!a);
+  const bottom = Math.max(0, ...boxes.map((b) => b.y + b.h));
+  const height = bottom + 34 + arcs.length * 32;
+
+  const gap = (k: number) => (
+    <div key={`gap${k}`} className={`flow-gap ${drag && gapAction(drag, k) ? 'can' : ''} ${over === `gap${k}` ? 'over' : ''}`} {...target(`gap${k}`, (it) => gapAction(it, k))} aria-label={`Drop here to place at position ${k + 1}`}>
+      <div className="flow-arrow" />
+    </div>
+  );
+
+  return (
+    <div className="col" style={{ gap: 10 }}>
+      <div className="row wrap" style={{ gap: 6 }}>
+        <span className="tiny faint">Drag a member onto a step to work in parallel, or between steps to add a step:</span>
+        {agents.map((a) => (
+          <span key={a} className="chip" draggable onDragStart={start({ kind: 'member', name: a })} onDragEnd={end} title={`Drag ${a}`} style={{ cursor: 'grab' }}>
+            <Avatar name={a} index={index(a)} size="sm" /> {a}
+          </span>
+        ))}
+      </div>
+      <div
+        className="flow"
+        ref={wrap}
+        style={{ minHeight: height + 8 }}
+        onDragOver={(e) => {
+          // Scroll the graph while dragging near its edges, so far-apart steps can be connected.
+          const el = wrap.current;
+          if (!el || !drag) return;
+          const r = el.getBoundingClientRect();
+          if (e.clientX < r.left + 60) el.scrollLeft -= 18;
+          else if (e.clientX > r.right - 60) el.scrollLeft += 18;
+        }}
+      >
+        {gap(0)}
+        {steps.map((s, k) => {
+          const parallel = Array.isArray(s.parallel);
+          const who = membersOf(s);
+          const loopTarget = drag?.kind === 'loop' && k <= drag.index;
+          return [
+            <div
+              key={`card${k}`}
+              ref={(el) => {
+                cards.current[k] = el;
+              }}
+              className={`pipe-card ${k === selected ? 'on' : ''} ${over === `card${k}` ? 'drop-over' : ''} ${loopTarget ? 'loop-target' : ''} ${drag?.kind === 'step' && drag.index === k ? 'dragging' : ''}`}
+              draggable
+              onDragStart={start({ kind: 'step', index: k })}
+              onDragEnd={end}
+              onClick={() => onSelect(k)}
+              {...target(`card${k}`, (it) => cardAction(it, k))}
+              data-step={s.id}
+            >
+              <span className="kind">{parallel ? 'In parallel' : 'Step'}</span>
+              <strong>{s.id}</strong>
+              <div className="agents">
+                {who.length ? (
+                  who.map((a) => (
+                    <span key={a} className="agent-line">
+                      <Avatar name={a} index={index(a)} size="sm" /> <span className="grow">{a}</span>
+                      {parallel && (
+                        <button className="x" title={`Remove ${a} from this step`} onClick={(e) => (e.stopPropagation(), removeMember(k, a))}>
+                          ×
+                        </button>
+                      )}
+                    </span>
+                  ))
+                ) : (
+                  <span className="tiny faint">Drop a member here</span>
+                )}
+              </div>
+              {s.gate && <span className="gate" title={s.gate}>✓ {s.gate}</span>}
+              {s.gate && (
+                <span
+                  className="loop-handle"
+                  draggable
+                  onDragStart={start({ kind: 'loop', index: k })}
+                  onDragEnd={end}
+                  title="Drag onto an earlier step: where work goes back to when this gate fails"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <IconLoop />
+                </span>
+              )}
+            </div>,
+            gap(k + 1),
+          ];
+        })}
+        <button className="btn flow-add" onClick={() => (void edit([{ op: 'insert', path: ['workflow', 'steps'], value: { id: freeId('step'), agent: agents[0] } }]), onSelect(steps.length))}>
+          <IconPlus /> Add step
+        </button>
+        <svg className="flow-arcs" width="100%" height={height} aria-hidden>
+          <defs>
+            <marker id="loop-arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--warn)" />
+            </marker>
+          </defs>
+          {arcs.map(({ k, t, f }, n) => {
+            const a = boxes[k]!;
+            const b = boxes[t]!;
+            const x1 = a.x + a.w / 2 + (k === t ? 18 : 0);
+            const x2 = b.x + b.w / 2 - (k === t ? 18 : 0);
+            const y0 = Math.max(a.y + a.h, b.y + b.h);
+            const depth = y0 + 22 + n * 32;
+            return (
+              <g key={`${k}-${t}`}>
+                <path d={`M${x1},${a.y + a.h} C${x1},${depth} ${x2},${depth} ${x2},${b.y + b.h + 4}`} fill="none" stroke="var(--warn)" strokeWidth={2} strokeDasharray="5 4" markerEnd="url(#loop-arrow)" />
+                {/* Label beside where the arc leaves its own step, so labels of arcs to the same target never collide. */}
+                <text x={x1 + 6} y={a.y + a.h + 14} className="arc-label">
+                  ↺ back to {steps[t]!.id}, up to {f.max_loops}×
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 function withoutKeys(o: Doc, keys: string[]): Doc {
   return Object.fromEntries(Object.entries(o).filter(([k]) => !keys.includes(k)));
 }
@@ -896,6 +1176,10 @@ function TeamSettings({ doc, edit }: { doc: Doc; edit: Edit }) {
               ? 'Members change your working copy directly. Only use this for read-only teams: shell commands are not limited to allowed paths in this mode.'
               : 'Each member that writes code gets its own git worktree; covibe merges their work into a branch per run. Your checkout is never touched.'}
           </span>
+        </section>
+        <section className="form-section">
+          <h3>Sandbox for shell commands</h3>
+          <SandboxFields sandbox={d.sandbox} onChange={(v) => void edit([{ op: 'set', path: ['defaults', 'sandbox'], value: v }])} />
         </section>
         <section className="form-section">
           <h3>Limits</h3>

@@ -23,6 +23,14 @@ export interface Limits {
 export type Isolation = 'worktree' | 'none';
 export type SettingSource = 'user' | 'project' | 'local';
 
+/** OS-level confinement for a member's shell commands. Absent = not sandboxed. */
+export interface SandboxConfig {
+  /** Domains shell commands may reach. */
+  network: string[];
+  /** Extra absolute folders shell commands may write (besides the working folder and temp). */
+  allowWrite: string[];
+}
+
 export interface AgentConfig {
   name: string;
   description?: string;
@@ -40,6 +48,8 @@ export interface AgentConfig {
   limits: Limits;
   /** True when the agent can change files (an edit tool or Bash). */
   writes: boolean;
+  /** Set when the agent has Bash and sandboxing is on. */
+  sandbox?: SandboxConfig;
 }
 
 export interface GateFailPolicy {

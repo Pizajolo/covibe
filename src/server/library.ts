@@ -7,7 +7,7 @@ import { isMap, isSeq, parseDocument } from 'yaml';
 import { ConfigError, loadTeam } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
 import { covibeHome } from '../home.js';
-import type { EditOp, Project, TeamFileInfo, TeamListing } from './api-types.js';
+import type { AppSettings, EditOp, Project, TeamFileInfo, TeamListing } from './api-types.js';
 
 /**
  * The desktop app's library: the projects (git repositories) you work on and
@@ -19,6 +19,7 @@ import type { EditOp, Project, TeamFileInfo, TeamListing } from './api-types.js'
  */
 interface LibraryConfig {
   projects: Project[];
+  settings?: Partial<AppSettings>;
 }
 
 export type { EditOp, Project, TeamFileInfo, TeamListing };
@@ -47,6 +48,21 @@ export class Library {
 
   private write(config: LibraryConfig) {
     writeFileSync(this.configFile, JSON.stringify(config, null, 2) + '\n');
+  }
+
+  // ---- settings
+
+  settings(): AppSettings {
+    return { autoCleanDays: null, ...this.read().settings };
+  }
+
+  updateSettings(patch: Partial<AppSettings>): AppSettings {
+    const config = this.read();
+    const days = patch.autoCleanDays;
+    if (days !== undefined && days !== null && (!Number.isFinite(days) || days < 0 || days > 3650)) throw new BadRequest('autoCleanDays must be between 0 and 3650, or null');
+    config.settings = { ...config.settings, ...patch };
+    this.write(config);
+    return this.settings();
   }
 
   // ---- projects
@@ -254,6 +270,20 @@ export class Library {
       else if (op.op === 'set') {
         if (op.value === undefined || op.value === null) doc.deleteIn(op.path);
         else setIn(doc, op.path, op.value);
+      } else if (op.op === 'move' || op.op === 'insert') {
+        const seq = doc.getIn(op.path, true);
+        if (!isSeq(seq)) throw new BadRequest(`${op.path.join('.')} is not a list`);
+        if (op.op === 'move') {
+          const { from, to } = op;
+          if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < 0 || from >= seq.items.length || to >= seq.items.length) throw new BadRequest('move out of range');
+          const [item] = seq.items.splice(from, 1);
+          seq.items.splice(to, 0, item!);
+        } else {
+          const index = op.index === undefined ? seq.items.length : Math.max(0, Math.min(seq.items.length, op.index));
+          const node = doc.createNode(op.value);
+          flowScalars(node);
+          seq.items.splice(index, 0, node);
+        }
       } else throw new BadRequest(`unknown edit op`);
     }
     const text = doc.toString();
@@ -263,14 +293,15 @@ export class Library {
 }
 
 /** setIn that keeps short lists of scalars in flow style ([a, b]) to match hand-written files. */
+function flowScalars(n: unknown) {
+  if (isSeq(n) && n.items.every((i) => !isMap(i) && !isSeq(i))) n.flow = true;
+  if (isMap(n)) for (const pair of n.items) flowScalars(pair.value);
+  if (isSeq(n)) for (const item of n.items) flowScalars(item);
+}
+
 function setIn(doc: ReturnType<typeof parseDocument>, path: (string | number)[], value: unknown) {
   const node = doc.createNode(value);
-  const flow = (n: unknown) => {
-    if (isSeq(n) && n.items.every((i) => !isMap(i) && !isSeq(i))) n.flow = true;
-    if (isMap(n)) for (const pair of n.items) flow(pair.value);
-    if (isSeq(n)) for (const item of n.items) flow(item);
-  };
-  flow(node);
+  flowScalars(node);
   if (isMap(node) && Object.keys(value as object).length <= 3 && Object.values(value as object).every((v) => typeof v !== 'object' || v === null || Array.isArray(v))) {
     // small maps like { type: subscription } read best inline
     if (path.length > 2) node.flow = true;

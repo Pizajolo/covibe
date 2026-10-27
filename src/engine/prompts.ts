@@ -25,7 +25,16 @@ export function systemPrompt(team: TeamConfig, agent: AgentConfig): string {
   ];
   if (agent.canMessage.length) {
     lines.push(
-      `You can message ${agent.canMessage.join(', ')} with the send_message tool. Messages are delivered at the start of the recipient's next turn.`,
+      `You can message ${agent.canMessage.join(', ')} with the send_message tool. A teammate who is working reads it between its tool calls; otherwise at the start of its next turn.`,
+    );
+  }
+  lines.push(
+    'Messages from the human or a teammate can arrive while you work, marked as such. Take them into account; a message from the human may change your task.',
+  );
+  if (agent.writes) lines.push('covibe commits and merges your changes after your turn; do not run git commit, branch, merge or stash yourself.');
+  if (agent.sandbox) {
+    lines.push(
+      `Shell commands run in a sandbox: they can write only in your working folder, temp folders and package caches, and reach only these domains: ${agent.sandbox.network.join(', ') || 'none'}. If a command fails because of the sandbox, report what you needed instead of working around it.`,
     );
   }
   lines.push('', '# Your role', agent.prompt.trim());

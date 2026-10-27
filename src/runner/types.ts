@@ -1,4 +1,4 @@
-import type { JsonSchema, SettingSource } from '../config/types.js';
+import type { JsonSchema, SandboxConfig, SettingSource } from '../config/types.js';
 import type { Env } from './backend.js';
 
 /** What the engine asks a runner to do: one turn of one agent. */
@@ -26,6 +26,25 @@ export interface AgentInvocation {
   /** Deliver a message to a teammate's inbox; returns the text shown to the agent. */
   sendMessage(to: string, text: string): string;
   onEvent(event: AgentStreamEvent): void;
+  /** OS sandbox for shell commands; absent = unsandboxed. */
+  sandbox?: SandboxConfig;
+  /**
+   * Called with a control handle once the agent is working, and with null when
+   * it can no longer take messages (its turn is over).
+   */
+  onControl?(control: AgentControl | null): void;
+}
+
+/**
+ * How a message reaches an agent that is working right now: "next" joins the
+ * running turn between tool calls; "now" stops the current turn and starts a
+ * new one with the message.
+ */
+export type LivePriority = 'next' | 'now';
+
+export interface AgentControl {
+  /** Returns false when the agent can no longer take messages; deliver at its next turn instead. */
+  send(text: string, priority: LivePriority): boolean;
 }
 
 export type AgentStreamEvent =

@@ -88,7 +88,10 @@ export function formatEvent(e: RunEvent): string {
       text = `✉ ${d.from ?? e.agent} → ${d.to}: ${one(String(d.text), 120)}`;
       break;
     case 'message.delivered':
-      text = dim(`✉ delivered message #${d.id} from ${d.from}`);
+      text = dim(`✉ delivered message #${d.id} from ${d.from}${d.live ? (d.mode === 'interrupt' ? ' (interrupted its turn)' : ' (while working)') : ''}`);
+      break;
+    case 'workspace.cleaned':
+      text = dim(`worktrees removed (${(Number(d.freed_kb) / 1024).toFixed(1)} MB freed)`);
       break;
     case 'backend.warning':
       text = yellow(`warning: ${d.message}`);

@@ -1,20 +1,20 @@
 import type { AgentConfig, TeamConfig } from '../config/types.js';
 import type { EventStore } from '../events/store.js';
-import type { RunRecord } from '../events/types.js';
+import type { DeliveryMode, RunRecord } from '../events/types.js';
 import { backendEnv, type Env } from '../runner/backend.js';
 import type { AgentRunner } from '../runner/types.js';
 import { buildInvocation, finishedData, newRunId } from './engine.js';
 import { Workspace } from './workspace.js';
 
 export type ChatOutcome =
-  | { mode: 'queued'; messageId: number }
+  | { mode: 'queued'; messageId: number; delivery: DeliveryMode }
   | { mode: 'replied'; text: string; ok: boolean; error?: string };
 
 const READ_ONLY_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS', 'WebSearch', 'WebFetch', 'TodoWrite']);
 
 /** The agent as it may act in a question session: same role and model, no tools that change anything. */
 export function readOnly(agent: AgentConfig): AgentConfig {
-  return { ...agent, tools: agent.tools.filter((t) => READ_ONLY_TOOLS.has(t)), writes: false, writeScope: [], canMessage: [] };
+  return { ...agent, tools: agent.tools.filter((t) => READ_ONLY_TOOLS.has(t)), writes: false, writeScope: [], canMessage: [], sandbox: undefined };
 }
 
 /**
@@ -33,6 +33,8 @@ export async function chat(opts: {
   agent: string;
   message: string;
   env?: Env;
+  /** For a live run: wait for its next turn (default), steer it while it works, or interrupt it. */
+  delivery?: DeliveryMode;
 }): Promise<ChatOutcome> {
   const { store, team, runId } = opts;
   const run = store.getRun(runId);
@@ -42,9 +44,10 @@ export async function chat(opts: {
   const agent = run.kind === 'ask' ? readOnly(configured) : configured;
 
   if (store.isLive(run)) {
-    const m = store.enqueue(runId, agent.name, 'human', opts.message);
-    store.append(runId, { type: 'message.queued', agent: agent.name, step: 'chat', data: { id: m.id, to: agent.name, from: 'human', text: opts.message } });
-    return { mode: 'queued', messageId: m.id };
+    const delivery = opts.delivery ?? 'queue';
+    const m = store.enqueue(runId, agent.name, 'human', opts.message, delivery);
+    store.append(runId, { type: 'message.queued', agent: agent.name, step: 'chat', data: { id: m.id, to: agent.name, from: 'human', text: opts.message, mode: delivery } });
+    return { mode: 'queued', messageId: m.id, delivery };
   }
 
   const session = store.getSession(runId, agent.name);
@@ -58,7 +61,8 @@ export async function chat(opts: {
   store.append(runId, { type: 'chat.message', agent: agent.name, step: 'chat', data: { from: 'human', to: agent.name, text: opts.message } });
 
   const isolation = run.branch ? 'worktree' : 'none';
-  const workspace = Workspace.attach(run.repo, runId, isolation, run.branch);
+  const workspace = await Workspace.attach(run.repo, runId, isolation, run.branch);
+  await workspace.restore(session.cwd);
   return converse({ store, runner: opts.runner, team, run, agent, prompt, cwd: session.cwd, resume: session.sessionId, env: opts.env, workspace });
 }
 
@@ -108,17 +112,16 @@ async function converse(p: {
   const base = { step: 'chat', agent: agent.name };
   store.append(run.id, { ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, cwd: p.cwd, resumed: !!p.resume, chat: true } });
 
-  const result = await p.runner.run(
-    buildInvocation(p.team, store, run.id, agent, {
-      cwd: p.cwd,
-      root: run.branch ? p.cwd : run.repo,
-      prompt: p.prompt,
-      resume: p.resume,
-      env,
-      step: 'chat',
-      signal: AbortSignal.timeout(agent.limits.timeout_min * 60_000),
-    }),
-  );
+  const inv = buildInvocation(p.team, store, run.id, agent, {
+    cwd: p.cwd,
+    root: run.branch ? p.cwd : run.repo,
+    prompt: p.prompt,
+    resume: p.resume,
+    env,
+    step: 'chat',
+    signal: AbortSignal.timeout(agent.limits.timeout_min * 60_000),
+  });
+  const result = await p.runner.run(inv).finally(() => inv.onControl?.(null));
   if (result.sessionId) store.saveSession(run.id, agent.name, result.sessionId, p.cwd);
   store.append(run.id, { ...base, type: result.ok ? 'agent.finished' : 'agent.error', data: finishedData(agent, result) });
 

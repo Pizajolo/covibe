@@ -5,15 +5,16 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-import { ConfigError } from '../config/load.js';
+import { ConfigError, DEFAULT_SANDBOX_NETWORK, DEFAULT_SANDBOX_WRITE } from '../config/load.js';
 import { ask, chat } from '../engine/chat.js';
+import { cleanupWorktrees, worktreeReport } from '../engine/cleanup.js';
 import { startRun } from '../engine/engine.js';
 import { GitError } from '../engine/workspace.js';
 import { EventStore } from '../events/store.js';
-import type { RunEvent, RunRecord } from '../events/types.js';
+import type { DeliveryMode, RunEvent, RunRecord } from '../events/types.js';
 import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
-import type { RunDetail, RunSummary, TeamDetail } from './api-types.js';
+import type { AppSettings, RunDetail, RunSummary, TeamDetail } from './api-types.js';
 import { BadRequest, Library, NotFound, rawDoc, type EditOp, type Project } from './library.js';
 import { chatThreads, computeStats, summarizeRun } from './projections.js';
 
@@ -156,9 +157,36 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     for (const res of sse) res.write(': ping\n\n');
   }, 15_000);
 
+  // Optional automatic cleanup of old worktrees (Settings → Disk space).
+  const autoClean = async () => {
+    const days = library.settings().autoCleanDays;
+    if (days === null) return;
+    for (const p of library.projects()) {
+      if (!existsSync(p.path)) continue;
+      await cleanupWorktrees(p.path, storeFor(p), { olderThanDays: days }).catch((err) => console.error(`auto-clean ${p.name}:`, err));
+    }
+  };
+  const autoCleanFirst = setTimeout(() => void autoClean(), 10_000);
+  const autoCleanTimer = setInterval(() => void autoClean(), 3_600_000);
+  autoCleanFirst.unref();
+  autoCleanTimer.unref();
+
   const routes: Route[] = [
     ['GET', '/api/overview', () => ({ projects: library.projects(), teams: library.teams(), runs: allRuns(30), stats: stats(), home: library.home })],
     ['GET', '/api/stats', () => stats()],
+    ['GET', '/api/settings', () => library.settings()],
+    ['PUT', '/api/settings', (_p, body) => library.updateSettings(body as Partial<AppSettings>)],
+    ['GET', '/api/projects/:pid/worktrees', async (p) => {
+      const project = library.project(p.pid!);
+      return worktreeReport(project.path, storeFor(project));
+    }],
+    ['POST', '/api/projects/:pid/cleanup', async (p, body) => {
+      const project = library.project(p.pid!);
+      const b = body as { runIds?: unknown; olderThanDays?: unknown };
+      const runIds = Array.isArray(b.runIds) ? b.runIds.filter((x): x is string => typeof x === 'string') : undefined;
+      const olderThanDays = typeof b.olderThanDays === 'number' ? b.olderThanDays : undefined;
+      return cleanupWorktrees(project.path, storeFor(project), { runIds, olderThanDays });
+    }],
     ['GET', '/api/projects', () => library.projects()],
     ['POST', '/api/projects', (_p, body) => library.addProject(str(body, 'path'))],
     ['DELETE', '/api/projects/:pid', (p) => (library.removeProject(p.pid!), { ok: true })],
@@ -168,7 +196,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     ['POST', '/api/teams', (_p, body) => library.createTeam(str(body, 'name'), str(body, 'template'))],
     ['GET', '/api/teams/:tid', (p): TeamDetail => {
       const yaml = library.readFile(p.tid!, 'team.yaml');
-      return { id: p.tid!, dir: library.teamDir(p.tid!), yaml, doc: rawDoc(yaml), problems: library.check(p.tid!).problems, files: library.files(p.tid!) };
+      return {
+        id: p.tid!,
+        dir: library.teamDir(p.tid!),
+        yaml,
+        doc: rawDoc(yaml),
+        problems: library.check(p.tid!).problems,
+        files: library.files(p.tid!),
+        sandboxDefaults: { network: DEFAULT_SANDBOX_NETWORK, allowWrite: DEFAULT_SANDBOX_WRITE },
+      };
     }],
     ['DELETE', '/api/teams/:tid', (p) => (library.deleteTeam(p.tid!), { ok: true })],
     ['POST', '/api/teams/:tid/duplicate', (p, body) => library.duplicateTeam(p.tid!, str(body, 'name'))],
@@ -220,10 +256,18 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const team = teamForRun(run).load();
       const agent = str(body, 'agent');
       const message = str(body, 'message');
-      if (store.isLive(run)) return chat({ store, runner, team, runId: run.id, agent, message });
+      const requested = (body as { delivery?: unknown }).delivery;
+      const delivery: DeliveryMode = requested === 'steer' || requested === 'interrupt' ? requested : 'queue';
+      if (store.isLive(run)) return chat({ store, runner, team, runId: run.id, agent, message, delivery });
       if (!store.getSession(run.id, agent)) throw new BadRequest(`${agent} has not worked on this run yet, so there is no conversation to continue. Ask it a question instead.`);
       const key = `${run.id}/${agent}`;
-      if (answering.has(key)) throw new BadRequest(`${agent} is still answering your last message.`);
+      if (answering.has(key)) {
+        // It is answering an earlier message: hand this one to it while it works.
+        const mode: DeliveryMode = delivery === 'interrupt' ? 'interrupt' : 'steer';
+        const m = store.enqueue(run.id, agent, 'human', message, mode);
+        store.append(run.id, { type: 'message.queued', agent, step: 'chat', data: { id: m.id, to: agent, from: 'human', text: message, mode } });
+        return { mode: 'queued', messageId: m.id, delivery: mode };
+      }
       answering.add(key);
       // The answer streams in as events; don't hold the request open for it.
       void chat({ store, runner, team, runId: run.id, agent, message })
@@ -302,6 +346,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     close: async () => {
       clearInterval(poll);
       clearInterval(keepAlive);
+      clearTimeout(autoCleanFirst);
+      clearInterval(autoCleanTimer);
       for (const c of active.values()) c.abort();
       for (const res of sse) res.end();
       await new Promise<void>((r) => server.close(() => r()));

@@ -40,6 +40,8 @@ export interface ScriptedTurn {
   /** Messages to teammates via send_message. */
   send?: { to: string; text: string }[];
   fail?: string;
+  /** Keep working until this many live messages arrived (or 5 s passed). */
+  awaitLive?: number;
 }
 
 export type Script = (inv: AgentInvocation, call: number) => ScriptedTurn;
@@ -48,6 +50,13 @@ export type Script = (inv: AgentInvocation, call: number) => ScriptedTurn;
 export class ScriptedRunner implements AgentRunner {
   calls: AgentInvocation[] = [];
   denied: { agent: string; tool: string; reason: string }[] = [];
+  /** Messages delivered to agents while they were working. */
+  live: { agent: string; text: string; priority: string }[] = [];
+  /** Resolves when an agent starts working (to time live messages in tests). */
+  working = new Map<string, () => void>();
+  whenWorking(agent: string) {
+    return new Promise<void>((r) => this.working.set(agent, r));
+  }
   private counts = new Map<string, number>();
 
   constructor(private scripts: Record<string, Script>) {}
@@ -78,6 +87,25 @@ export class ScriptedRunner implements AgentRunner {
       writeFiles(inv.cwd, turn.bashWrite);
     }
     for (const m of turn.send ?? []) inv.sendMessage(m.to, m.text);
+    if (turn.awaitLive) {
+      const got: string[] = [];
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 5000);
+        inv.onControl?.({
+          send: (text, priority) => {
+            this.live.push({ agent: inv.agentName, text, priority });
+            got.push(text);
+            if (got.length >= turn.awaitLive!) {
+              clearTimeout(timer);
+              resolve();
+            }
+            return true;
+          },
+        });
+        this.working.get(inv.agentName)?.();
+      });
+      inv.onControl?.(null);
+    } else this.working.get(inv.agentName)?.();
     if (turn.text) inv.onEvent({ kind: 'text', text: turn.text });
 
     const base = { sessionId, turns: 1, costUsd: 0.01, durationMs: 5 };

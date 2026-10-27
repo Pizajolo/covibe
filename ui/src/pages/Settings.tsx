@@ -1,7 +1,43 @@
-import { desktop } from '../api';
+import { desktop, get, put, type AppSettings } from '../api';
 import { IconInfo } from '../components/icons';
 import { Toolbar } from '../components/Toolbar';
-import { useData } from '../data';
+import { useAction, useToast } from '../components/ui';
+import { useData, useLive } from '../data';
+
+function DiskSpace() {
+  const toast = useToast();
+  const { value, setValue } = useLive(() => get<AppSettings>('/api/settings'), []);
+  const [save] = useAction(async (days: number | null) => {
+    setValue(await put<AppSettings>('/api/settings', { autoCleanDays: days }));
+    toast(days === null ? 'Worktrees are kept until you clean them up' : `Worktrees are removed ${days === 0 ? 'right after' : `${days} day${days > 1 ? 's' : ''} after`} a run finishes`);
+  });
+  if (!value) return null;
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Disk space</h2>
+      </div>
+      <div className="card-pad col" style={{ gap: 10 }}>
+        <p className="small">
+          Each member that writes code gets a full working copy of the repository for the run. Removing them frees disk space; the run's result branch, history and chat stay
+          (a member's working copy is restored if you chat with it later).
+        </p>
+        <label className="field" style={{ maxWidth: 320 }}>
+          Remove worktrees of finished runs
+          <select className="input" value={value.autoCleanDays === null ? '' : String(value.autoCleanDays)} onChange={(e) => void save(e.target.value === '' ? null : Number(e.target.value))}>
+            <option value="">Only when I clean up</option>
+            <option value="0">Right after the run</option>
+            <option value="1">After 1 day</option>
+            <option value="3">After 3 days</option>
+            <option value="7">After a week</option>
+            <option value="30">After 30 days</option>
+          </select>
+          <span className="help">Checked hourly while covibe is open. Clean up by hand in Projects.</span>
+        </label>
+      </div>
+    </div>
+  );
+}
 
 export function Settings() {
   const { overview } = useData();
@@ -62,6 +98,8 @@ export function Settings() {
             </div>
           </div>
 
+          <DiskSpace />
+
           <div className="card">
             <div className="card-head">
               <h2>Safety</h2>
@@ -71,7 +109,11 @@ export function Settings() {
                 <li>Every member that changes code works in its own git worktree; your checkout is never modified.</li>
                 <li>File writes outside a member's allowed paths are blocked, and anything a shell command changes outside them is discarded before merging.</li>
                 <li>Gates, fix rounds, turn limits and timeouts are enforced by covibe, not left to the models.</li>
-                <li>Shell commands are not sandboxed yet. Do not run untrusted goals, and keep secrets out of the environment.</li>
+                <li>
+                  Shell commands run in the macOS sandbox: they can write only in the member's own working copy, temp folders and package caches, and reach only the
+                  domains the team allows. Change this per team (Team settings → Sandbox) or per member.
+                </li>
+                <li>Messages to a working member can steer it between tool calls or stop its current turn; nothing else can take over a running member.</li>
               </ul>
             </div>
           </div>

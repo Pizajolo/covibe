@@ -66,6 +66,7 @@ export function summarizeRun(
   let errors = 0;
   let reason: string | undefined;
   const files = new Set<string>();
+  let worktreesRemoved = false;
   const openCards = new Map<string, BoardCard>();
 
   for (const e of events) {
@@ -162,7 +163,12 @@ export function summarizeRun(
       case 'git.commit':
         for (const f of (d.files as string[]) ?? []) files.add(f);
         break;
+      case 'workspace.cleaned':
+        worktreesRemoved = true;
+        break;
     }
+    // A chat after cleanup restores the member's worktree.
+    if (e.type === 'agent.started' && e.step === 'chat') worktreesRemoved = false;
   }
 
   // A run that is no longer live cannot have working agents.
@@ -191,6 +197,7 @@ export function summarizeRun(
     agents: [...agents.values()],
     steps: stepOrder.map((id) => steps.get(id)!),
     filesChanged: [...files].sort(),
+    worktreesRemoved,
   };
 }
 
@@ -207,12 +214,19 @@ export function chatThreads(events: RunEvent[], roots: string[] = []): Record<st
     if (e.type === 'chat.message' && d.from === 'human') push(d.to, { ...base, kind: 'human', text: d.text });
     else if (e.type === 'message.queued') {
       const from = d.from ?? e.agent;
-      const item: ChatItem = { ...base, kind: from === 'human' ? 'human' : 'note', text: from === 'human' ? d.text : `Message from ${from}: ${d.text}`, pending: true };
+      const item: ChatItem = {
+        ...base,
+        kind: from === 'human' ? 'human' : 'note',
+        text: from === 'human' ? d.text : `Message from ${from}: ${d.text}`,
+        pending: true,
+        delivery: d.mode ?? 'queue',
+      };
       push(d.to, item);
       pending.set(d.id, item);
     } else if (e.type === 'message.delivered') {
       const item = pending.get(d.id);
       if (item) item.pending = false;
+      if (item?.kind === 'human' && d.live) push(e.agent!, { ...base, kind: 'note', text: d.mode === 'interrupt' ? 'Stopped what it was doing to read your message' : 'Read your message while working' });
     } else if (e.type === 'agent.started' && e.agent) {
       if (e.step !== 'chat' && lastStep[e.agent] !== `${e.step}`) push(e.agent, { ...base, kind: 'note', text: `Started step "${e.step}"` });
       lastStep[e.agent] = e.step;

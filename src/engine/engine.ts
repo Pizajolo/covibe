@@ -273,13 +273,13 @@ class Engine {
   ): Promise<AgentResult> {
     const timeout = AbortSignal.timeout(agent.limits.timeout_min * 60_000);
     const signal = this.opts.signal ? AbortSignal.any([this.opts.signal, timeout]) : timeout;
-    return this.opts.runner.run(
-      buildInvocation(this.team, this.store, this.runId, agent, {
-        ...p,
-        root: this.team.isolation === 'none' ? this.workspace.repo : p.cwd,
-        signal,
-      }),
-    );
+    const inv = buildInvocation(this.team, this.store, this.runId, agent, {
+      ...p,
+      root: this.team.isolation === 'none' ? this.workspace.repo : p.cwd,
+      signal,
+    });
+    // Stop live delivery even if a runner forgets to signal the end of its turn.
+    return this.opts.runner.run(inv).finally(() => inv.onControl?.(null));
   }
 
   private output(agent: AgentConfig, stepId: string, result: AgentResult, schema: JsonSchema | undefined): unknown {
@@ -311,6 +311,7 @@ export function buildInvocation(
 ): AgentInvocation {
   const base = { step: p.step, agent: agent.name };
   const emit = (e: NewEvent) => store.append(runId, e);
+  let stopLive: (() => void) | undefined;
   return {
     agentName: agent.name,
     prompt: p.prompt,
@@ -329,9 +330,30 @@ export function buildInvocation(
     checkToolUse: makeToolChecker({ root: p.root, cwd: p.cwd, writeScope: agent.writes ? agent.writeScope : [] }),
     sendMessage: (to, text) => {
       if (!agent.canMessage.includes(to)) return `You cannot message ${to}.`;
-      const m = store.enqueue(runId, to, agent.name, text);
-      emit({ ...base, type: 'message.queued', data: { id: m.id, to, text } });
-      return `Queued for ${to}; delivered at the start of their next turn.`;
+      const m = store.enqueue(runId, to, agent.name, text, 'steer');
+      emit({ ...base, type: 'message.queued', data: { id: m.id, to, text, mode: 'steer' } });
+      return `Sent to ${to}. If ${to} is working it reads it between its tool calls; otherwise at the start of its next turn.`;
+    },
+    sandbox: agent.sandbox,
+    // While the agent works, hand it steer/interrupt messages from its inbox.
+    // Polling the store (not an in-memory hook) also reaches runs started by
+    // another process, such as the CLI.
+    onControl: (control) => {
+      stopLive?.();
+      stopLive = undefined;
+      if (!control) return;
+      const deliver = () => {
+        for (const m of store.liveMessages(runId, agent.name)) {
+          const text =
+            m.from === 'human' ? `[Message from the human, sent while you were working]\n${m.text}` : `[Message from your teammate ${m.from}]\n${m.text}`;
+          if (!control.send(text, m.mode === 'interrupt' ? 'now' : 'next')) return; // stays queued for its next turn
+          store.markDelivered([m.id]);
+          emit({ ...base, type: 'message.delivered', data: { id: m.id, from: m.from, live: true, mode: m.mode } });
+        }
+      };
+      deliver();
+      const timer = setInterval(deliver, 500);
+      stopLive = () => clearInterval(timer);
     },
     onEvent: (e: AgentStreamEvent) => {
       if (e.kind === 'text') emit({ ...base, type: 'agent.text', data: { text: clip(e.text, 4000) } });

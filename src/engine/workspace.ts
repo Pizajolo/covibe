@@ -65,16 +65,34 @@ export class Workspace {
   }
 
   /** Reopen the workspace of an earlier run (to chat with its agents after it finished). */
-  static attach(repo: string, runId: string, isolation: Isolation, branch: string | undefined): Workspace {
+  static async attach(repo: string, runId: string, isolation: Isolation, branch: string | undefined): Promise<Workspace> {
     if (isolation === 'none' || !branch) return new Workspace(repo, runId, 'none', repo, undefined);
-    // Runs from before worktrees moved out of the repository kept them in .covibe/worktrees.
-    const legacy = join(repo, '.covibe', 'worktrees', runId);
-    const base = existsSync(legacy) ? legacy : join(worktreesRoot(repo), runId);
+    const base = runDir(repo, runId);
     const ws = new Workspace(repo, runId, isolation, join(base, '_integration'), branch);
-    if (existsSync(base)) {
-      for (const name of readdirSync(base)) if (name !== '_integration') ws.agentDirs.set(name, join(base, name));
-    }
+    // Agents are known from their branches, so a cleaned-up worktree can be restored.
+    const prefix = `covibe-agents/${runId}/`;
+    const branches = await git(repo, ['branch', '--list', '--format=%(refname:short)', `${prefix}*`]).catch(() => '');
+    for (const b of branches.split('\n').filter(Boolean)) ws.agentDirs.set(b.slice(prefix.length), join(base, b.slice(prefix.length)));
     return ws;
+  }
+
+  /**
+   * Recreate a removed worktree at its old path from its branch (after
+   * cleanup), so the agent's session, which is tied to that folder, resumes.
+   */
+  async restore(dir: string): Promise<void> {
+    if (existsSync(dir) || this.isolation === 'none') return;
+    const agent = [...this.agentDirs].find(([, d]) => d === dir)?.[0];
+    const branch = dir === this.integrationDir ? this.branch : agent ? this.agentBranch(agent) : undefined;
+    if (!branch) throw new GitError(`${dir} is not a worktree of run ${this.runId}`);
+    await this.exclusive(() => this.addExisting(dir, branch));
+  }
+
+  /** Check out an existing branch as a worktree at `dir` (caller holds the lock). */
+  private async addExisting(dir: string, branch: string) {
+    await git(this.repo, ['worktree', 'prune']);
+    mkdirSync(dirname(dir), { recursive: true });
+    await git(this.repo, ['worktree', 'add', '-q', dir, branch]);
   }
 
   /** Serialize git operations that touch shared refs. */
@@ -128,6 +146,8 @@ export class Workspace {
       if (!kept.length) return { files: [], reverted, merged: false };
       await git(dir, ['commit', '-q', '-m', message], commitEnv(agent));
       const commit = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      // The integration worktree may have been cleaned up since the run ended.
+      if (!existsSync(this.integrationDir)) await this.addExisting(this.integrationDir, this.branch!);
       try {
         await git(this.integrationDir, ['merge', '-q', '--no-ff', '--no-edit', '-m', `merge ${agent}: ${message}`, this.agentBranch(agent)], commitEnv('covibe'));
       } catch (err) {
@@ -137,6 +157,62 @@ export class Workspace {
       return { commit, files: kept, reverted, merged: true };
     });
   }
+}
+
+/** Folder holding a run's worktrees (older runs kept them inside the repository). */
+export function runDir(repo: string, runId: string): string {
+  const legacy = join(repo, '.covibe', 'worktrees', runId);
+  return existsSync(legacy) ? legacy : join(worktreesRoot(repo), runId);
+}
+
+export interface RunWorktrees {
+  runId: string;
+  dir: string;
+  worktrees: string[];
+  sizeKb: number;
+}
+
+/** Runs of a repository that still have worktrees on disk, with their size. */
+export async function listRunWorktrees(repo: string): Promise<RunWorktrees[]> {
+  const out: RunWorktrees[] = [];
+  for (const root of [worktreesRoot(repo), join(repo, '.covibe', 'worktrees')]) {
+    if (!existsSync(root)) continue;
+    for (const runId of readdirSync(root)) {
+      const dir = join(root, runId);
+      const worktrees = existsSync(dir) ? readdirSync(dir) : [];
+      if (!worktrees.length) continue;
+      out.push({ runId, dir, worktrees, sizeKb: await diskUsageKb(dir) });
+    }
+  }
+  return out;
+}
+
+async function diskUsageKb(dir: string): Promise<number> {
+  try {
+    const { stdout } = await exec('du', ['-sk', dir], { maxBuffer: 1 << 20 });
+    return Number(stdout.split(/\s/)[0]) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Remove a run's worktrees from disk. Branches stay: the result branch is the
+ * run's output, and agent branches let a later chat restore a worktree.
+ */
+export async function removeRunWorktrees(repo: string, runId: string): Promise<{ removed: string[]; freedKb: number }> {
+  const dir = runDir(repo, runId);
+  if (!existsSync(dir)) return { removed: [], freedKb: 0 };
+  const freedKb = await diskUsageKb(dir);
+  const removed: string[] = [];
+  for (const name of readdirSync(dir)) {
+    await git(repo, ['worktree', 'remove', '--force', join(dir, name)]).catch(() => undefined);
+    rmSync(join(dir, name), { recursive: true, force: true });
+    removed.push(name);
+  }
+  rmSync(dir, { recursive: true, force: true });
+  await git(repo, ['worktree', 'prune']).catch(() => undefined);
+  return { removed, freedKb };
 }
 
 function commitEnv(name: string): NodeJS.ProcessEnv {

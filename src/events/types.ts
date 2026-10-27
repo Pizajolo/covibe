@@ -28,7 +28,8 @@ export type EventType =
   | 'message.delivered'
   | 'backend.warning'
   | 'chat.message'
-  | 'usage.limit';
+  | 'usage.limit'
+  | 'workspace.cleaned';
 
 export interface RunEvent {
   id: number;
@@ -59,6 +60,14 @@ export interface RunRecord {
   base?: string;
 }
 
+/**
+ * How a message to an agent is delivered. queue: at the start of its next
+ * turn. steer: while it works, between tool calls, without stopping it.
+ * interrupt: stop its current turn and answer this first. steer and interrupt
+ * fall back to queue when the agent is not working.
+ */
+export type DeliveryMode = 'queue' | 'steer' | 'interrupt';
+
 export interface InboxMessage {
   id: number;
   runId: string;
@@ -66,4 +75,5 @@ export interface InboxMessage {
   from: string;
   text: string;
   ts: string;
+  mode: DeliveryMode;
 }

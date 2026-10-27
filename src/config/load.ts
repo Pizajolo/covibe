@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { Ajv2020, type ErrorObject } from 'ajv/dist/2020.js';
 import jsonata from 'jsonata';
 import { parseDocument } from 'yaml';
@@ -10,6 +11,7 @@ import type {
   GateFailPolicy,
   JsonSchema,
   Limits,
+  SandboxConfig,
   SettingSource,
   Step,
   TeamConfig,
@@ -20,6 +22,38 @@ const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash
 // Keys the engine puts in the run context next to the step outputs.
 const RESERVED_STEP_IDS = new Set(['goal', 'loop', 'feedback']);
 const DEFAULT_LIMITS: Limits = { max_turns: 40, timeout_min: 30 };
+
+// What shell commands typically need: package registries to install from and
+// package-manager caches to write. Teams override either list.
+export const DEFAULT_SANDBOX_NETWORK = [
+  'registry.npmjs.org',
+  'registry.yarnpkg.com',
+  'pypi.org',
+  'files.pythonhosted.org',
+  'github.com',
+  'codeload.github.com',
+  'objects.githubusercontent.com',
+  'crates.io',
+  'static.crates.io',
+  'index.crates.io',
+  'proxy.golang.org',
+];
+export const DEFAULT_SANDBOX_WRITE = ['~/.npm', '~/.cache', '~/.yarn', '~/.pnpm-store', '~/Library/Caches', '~/.cargo/registry', '~/go/pkg/mod'];
+
+interface RawSandbox {
+  enabled?: boolean;
+  network?: string[];
+  allow_write?: string[];
+}
+
+/** Agent fields override team defaults, which override the built-in defaults. */
+function resolveSandbox(tools: string[], team: RawSandbox | undefined, agent: RawSandbox | undefined): SandboxConfig | undefined {
+  if (!tools.includes('Bash')) return undefined;
+  const merged = { ...team, ...agent };
+  if (merged.enabled === false) return undefined;
+  const expand = (p: string) => (p === '~' ? homedir() : p.startsWith('~/') ? join(homedir(), p.slice(2)) : p);
+  return { network: merged.network ?? DEFAULT_SANDBOX_NETWORK, allowWrite: (merged.allow_write ?? DEFAULT_SANDBOX_WRITE).map(expand) };
+}
 
 export class ConfigError extends Error {
   constructor(
@@ -104,6 +138,7 @@ interface RawAgent {
   output_schema?: string;
   backend?: RawBackend;
   limits?: Partial<Limits>;
+  sandbox?: RawSandbox;
 }
 interface RawBranch {
   agent: string;
@@ -130,6 +165,7 @@ interface RawTeam {
     limits?: Partial<Limits>;
     max_parallel?: number;
     setting_sources?: SettingSource[];
+    sandbox?: RawSandbox;
   };
   agents: Record<string, RawAgent>;
   workflow: { on_gate_fail?: RawPolicy; steps: RawStep[] };
@@ -211,6 +247,7 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
       backend,
       limits: { ...defaultLimits, ...a.limits },
       writes: a.tools.some((t) => WRITE_TOOLS.has(t)),
+      sandbox: resolveSandbox(a.tools, defaults.sandbox, a.sandbox),
     };
     if (a.scope?.write && !agents[name].writes) {
       problems.push(`${where}/scope: has a write scope but no tool that can write`);

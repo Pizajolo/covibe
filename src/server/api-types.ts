@@ -26,7 +26,18 @@ export interface TeamListing {
   steps: string[];
 }
 
-export type EditOp = { op: 'set'; path: (string | number)[]; value: unknown } | { op: 'delete'; path: (string | number)[] };
+export type EditOp =
+  | { op: 'set'; path: (string | number)[]; value: unknown }
+  | { op: 'delete'; path: (string | number)[] }
+  /** Move an item of the list at `path` from one index to another (comments travel with it). */
+  | { op: 'move'; path: (string | number)[]; from: number; to: number }
+  /** Insert a new item into the list at `path` before `index` (or at the end). */
+  | { op: 'insert'; path: (string | number)[]; index?: number; value: unknown };
+
+export interface AppSettings {
+  /** Remove worktrees of runs finished this many days ago; null = never automatically. */
+  autoCleanDays: number | null;
+}
 
 export interface Overview {
   projects: Project[];
@@ -108,6 +119,8 @@ export interface RunSummary {
   agents: AgentState[];
   steps: StepState[];
   filesChanged: string[];
+  /** The run's worktrees were removed to free disk space (chat recreates them on demand). */
+  worktreesRemoved: boolean;
 }
 
 export interface ChatItem {
@@ -116,8 +129,10 @@ export interface ChatItem {
   kind: 'human' | 'agent' | 'tool' | 'note' | 'error';
   text: string;
   step?: string;
-  /** Human message still waiting for the agent's next turn. */
+  /** Human message still waiting to be read. */
   pending?: boolean;
+  /** How a human message is delivered: next turn, while working, or by interrupting. */
+  delivery?: 'queue' | 'steer' | 'interrupt';
 }
 
 export interface RunDetail {
@@ -178,4 +193,6 @@ export interface TeamDetail {
   doc: Record<string, unknown>;
   problems: string[];
   files: { path: string; size: number }[];
+  /** What applies when the team file leaves the sandbox lists out. */
+  sandboxDefaults: { network: string[]; allowWrite: string[] };
 }

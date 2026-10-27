@@ -144,6 +144,44 @@ describe('server', () => {
     expect(stats.daily).toHaveLength(14);
   });
 
+  it('reorders and inserts workflow steps without losing comments', async () => {
+    const { api } = await setup();
+    const team = await api('POST', '/api/teams', { name: 'flow', template: 'feature-team' });
+    const before = await api<TeamDetail>('GET', `/api/teams/${team.id}`);
+    expect(before.yaml).toContain('# tasks[] with an owner each');
+    const moved = await api('POST', `/api/teams/${team.id}/edit`, {
+      ops: [
+        { op: 'move', path: ['workflow', 'steps'], from: 4, to: 0 },
+        { op: 'insert', path: ['workflow', 'steps'], index: 2, value: { id: 'lint', agent: 'tester' } },
+        { op: 'insert', path: ['workflow', 'steps', 3, 'parallel'], value: { agent: 'qa' } },
+      ],
+    });
+    const ids = (moved.doc.workflow.steps as { id: string }[]).map((s) => s.id);
+    expect(ids).toEqual(['report', 'plan', 'lint', 'build', 'review', 'test']);
+    expect(moved.doc.workflow.steps[3].parallel.map((b: { agent: string }) => b.agent)).toEqual(['frontend', 'backend', 'qa']);
+    expect(moved.yaml).toContain('# tasks[] with an owner each');
+    await expect(api('POST', `/api/teams/${team.id}/edit`, { ops: [{ op: 'move', path: ['workflow', 'steps'], from: 0, to: 99 }] })).rejects.toThrow(/out of range/);
+  });
+
+  it('lists and cleans up worktrees, and stores settings', async () => {
+    const { api } = await setup();
+    expect(await api('GET', '/api/settings')).toEqual({ autoCleanDays: null });
+    expect(await api('PUT', '/api/settings', { autoCleanDays: 7 })).toEqual({ autoCleanDays: 7 });
+    await expect(api('PUT', '/api/settings', { autoCleanDays: -1 })).rejects.toThrow(/between/);
+
+    const project = await api('POST', '/api/projects', { path: tempRepo() });
+    const team = await api('POST', '/api/teams', { name: 'duo', template: 'build-and-review' });
+    const { runId } = await api('POST', '/api/runs', { project: project.id, team: team.id, goal: 'g' });
+    await until(() => api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`), (d) => d.summary.status !== 'running');
+    const listed = await api('GET', `/api/projects/${project.id}/worktrees`);
+    expect(listed).toEqual([expect.objectContaining({ runId, status: 'succeeded', live: false })]);
+    const res = await api('POST', `/api/projects/${project.id}/cleanup`, { runIds: [runId] });
+    expect(res.cleaned.map((c: { runId: string }) => c.runId)).toEqual([runId]);
+    expect(await api('GET', `/api/projects/${project.id}/worktrees`)).toEqual([]);
+    const detail = await api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`);
+    expect(detail.summary.worktreesRemoved).toBe(true);
+  });
+
   it('streams events over SSE', async () => {
     const { api, base } = await setup();
     const project = await api('POST', '/api/projects', { path: tempRepo() });
