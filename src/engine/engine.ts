@@ -1,0 +1,456 @@
+import { randomBytes } from 'node:crypto';
+import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
+import type { AgentConfig, Branch, JsonSchema, Step, TeamConfig } from '../config/types.js';
+import type { EventStore } from '../events/store.js';
+import type { NewEvent, RunStatus } from '../events/types.js';
+import { backendEnv, BackendError, type Env } from '../runner/backend.js';
+import { brainRoot } from '../home.js';
+import { resolveSkills } from '../skills.js';
+import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent, CustomTool } from '../runner/types.js';
+import { brainPrompt, commitBrain, curate, ensureBrain, proposeTool } from './brain.js';
+import { evaluate, evaluateGate } from './expr.js';
+import { systemPrompt, turnPrompt } from './prompts.js';
+import { makeToolChecker } from './scope.js';
+import { Workspace } from './workspace.js';
+
+export interface RunOptions {
+  team: TeamConfig;
+  repo: string;
+  goal: string;
+  store: EventStore;
+  runner: AgentRunner;
+  /** Parent environment for agent processes (defaults to process.env). */
+  env?: Env;
+  signal?: AbortSignal;
+  /** Git ref to start from, e.g. an earlier run's branch to build on its result. Defaults to HEAD. */
+  base?: string;
+}
+
+export interface RunOutcome {
+  runId: string;
+  status: Exclude<RunStatus, 'running'>;
+  reason?: string;
+  /** Branch with the merged result (worktree isolation). */
+  branch?: string;
+  context: RunContext;
+  costUsd: number;
+}
+
+/** What gates, task selectors and feed expressions see: step outputs keyed by step id. */
+export interface RunContext {
+  goal: string;
+  loop: number;
+  feedback: Record<string, unknown>;
+  [stepId: string]: unknown;
+}
+
+class StepError extends Error {}
+
+export function newRunId(date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  const stamp = `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`;
+  return `${stamp}-${randomBytes(2).toString('hex')}`;
+}
+
+/** Run a team's workflow to completion: succeeded, failed, or escalated to a human. */
+export async function runTeam(opts: RunOptions): Promise<RunOutcome> {
+  return (await startRun(opts)).done;
+}
+
+/**
+ * Create the run (workspace and record) and start it in the background.
+ * Resolves as soon as the run id exists, so a UI can follow it from the first event.
+ */
+export async function startRun(opts: RunOptions): Promise<{ runId: string; done: Promise<RunOutcome> }> {
+  const runId = newRunId();
+  const workspace = await Workspace.create(opts.repo, runId, opts.team.isolation, opts.base);
+  opts.store.createRun({
+    id: runId,
+    team: opts.team.name,
+    teamFile: opts.team.file,
+    repo: workspace.repo,
+    goal: opts.goal,
+    branch: workspace.branch,
+    base: opts.base,
+  });
+  return { runId, done: new Engine(opts, runId, workspace).run() };
+}
+
+/** The agent.finished / agent.error payload, shared by workflow steps, chat and ask. */
+export function finishedData(agent: AgentConfig, result: AgentResult): Record<string, unknown> {
+  return {
+    ok: result.ok,
+    model: agent.model ?? null,
+    turns: result.turns,
+    cost_usd: result.costUsd,
+    duration_ms: result.durationMs,
+    tokens: result.tokens ?? null,
+    ...(result.ok ? {} : { error: result.error ?? 'unknown error' }),
+  };
+}
+
+class Engine {
+  private readonly team: TeamConfig;
+  private readonly store: EventStore;
+  private readonly context: RunContext;
+  private readonly slots: Semaphore;
+  private readonly ajv = new Ajv2020({ strict: false, allErrors: true });
+  private readonly validators = new WeakMap<JsonSchema, ValidateFunction>();
+  private readonly warned = new Set<string>();
+  private costUsd = 0;
+  private maxLoops: number | undefined;
+
+  constructor(
+    private readonly opts: RunOptions,
+    private readonly runId: string,
+    private readonly workspace: Workspace,
+  ) {
+    this.team = opts.team;
+    this.store = opts.store;
+    this.context = { goal: opts.goal, loop: 0, feedback: {} };
+    this.slots = new Semaphore(this.team.maxParallel);
+  }
+
+  private emit(event: NewEvent) {
+    this.store.append(this.runId, event);
+  }
+
+  async run(): Promise<RunOutcome> {
+    const { steps } = this.team;
+    // The brain must exist before members are pointed at it.
+    await ensureBrain(this.workspace.repo).catch(() => undefined);
+    this.emit({
+      type: 'run.started',
+      data: {
+        team: this.team.name,
+        goal: this.opts.goal,
+        isolation: this.team.isolation,
+        branch: this.workspace.branch,
+        steps: steps.map((s) => s.id),
+      },
+    });
+
+    let status: RunOutcome['status'] = 'succeeded';
+    let reason: string | undefined;
+    try {
+      let i = 0;
+      while (i < steps.length) {
+        this.opts.signal?.throwIfAborted();
+        const step = steps[i]!;
+        this.emit({ type: 'step.started', step: step.id, data: { loop: this.context.loop } });
+        this.context[step.id] = await this.runStep(step);
+        this.emit({ type: 'step.finished', step: step.id, data: { loop: this.context.loop } });
+
+        if (step.gate) {
+          const { passed, value } = await evaluateGate(step.gate, this.context);
+          if (passed) {
+            this.emit({ type: 'gate.passed', step: step.id, data: { gate: step.gate } });
+          } else {
+            this.emit({ type: 'gate.failed', step: step.id, data: { gate: step.gate, value: value ?? null } });
+            const policy = step.onGateFail;
+            if (!policy) {
+              status = 'failed';
+              reason = `gate "${step.gate}" failed on step ${step.id} and the step has no on_gate_fail policy`;
+              break;
+            }
+            if (this.context.loop >= policy.maxLoops) {
+              status = policy.then === 'escalate_to_human' ? 'escalated' : 'failed';
+              reason = `gate "${step.gate}" on step ${step.id} still failing after ${this.context.loop} fix round(s)`;
+              break;
+            }
+            const feedback: Record<string, unknown> = {};
+            for (const expr of policy.feed) feedback[expr] = (await evaluate(expr, this.context)) ?? null;
+            this.context.loop += 1;
+            this.context.feedback = feedback;
+            this.maxLoops = policy.maxLoops;
+            this.emit({ type: 'loop.goto', step: step.id, data: { to: policy.goto, loop: this.context.loop, max_loops: policy.maxLoops, feedback } });
+            i = steps.findIndex((s) => s.id === policy.goto);
+            continue;
+          }
+        }
+        i += 1;
+      }
+    } catch (err) {
+      status = 'failed';
+      reason = this.opts.signal?.aborted ? 'aborted' : (err as Error).message;
+    }
+
+    // Members' proposals from this run (and earlier ones) go to the curator.
+    const { curator, curate: when } = this.team.brain;
+    if (curator && when === 'after_run' && !this.opts.signal?.aborted && this.store.proposals('pending').length) {
+      try {
+        await curate({ team: this.team, store: this.store, runner: this.opts.runner, repo: this.workspace.repo, runId: this.runId, buildInvocation, env: this.opts.env, signal: this.opts.signal });
+      } catch (err) {
+        this.emit({ type: 'agent.error', step: 'curate', agent: curator, data: { ok: false, error: (err as Error).message } });
+      }
+    }
+
+    this.store.finishRun(this.runId, status);
+    this.emit({
+      type: 'run.finished',
+      data: { status, reason, branch: this.workspace.branch, loops: this.context.loop, cost_usd: this.costUsd, feedback: this.context.feedback },
+    });
+    return { runId: this.runId, status, reason, branch: this.workspace.branch, context: this.context, costUsd: this.costUsd };
+  }
+
+  private async runStep(step: Step): Promise<unknown> {
+    if (step.kind === 'agent') {
+      const task = step.task ? await evaluate(step.task, this.context) : undefined;
+      return this.invoke(step.agent, step, task, step.outputSchema);
+    }
+
+    const output: Record<string, unknown> = {};
+    const runBranch = async (b: Branch) => {
+      const task = b.task ? await evaluate(b.task, this.context) : undefined;
+      if (b.task && (task == null || (Array.isArray(task) && task.length === 0))) {
+        this.emit({ type: 'step.skipped', step: step.id, agent: b.agent, data: { reason: 'no task', task_expr: b.task } });
+        return;
+      }
+      output[b.agent] = await this.invoke(b.agent, step, task, b.outputSchema);
+    };
+    // Let every branch finish (and merge its work) before reporting a failure.
+    const results = await Promise.allSettled(step.branches.map(runBranch));
+    const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failed) throw failed.reason;
+    return output;
+  }
+
+  private async invoke(agentName: string, step: Step, task: unknown, outputSchema: JsonSchema | undefined): Promise<unknown> {
+    const agent = this.team.agents[agentName]!;
+    const base = { step: step.id, agent: agent.name };
+
+    let env: Env;
+    try {
+      const built = backendEnv(agent.backend, this.opts.env ?? process.env);
+      env = built.env;
+      for (const w of built.warnings) {
+        if (!this.warned.has(w)) {
+          this.warned.add(w);
+          this.emit({ ...base, type: 'backend.warning', data: { message: w } });
+        }
+      }
+    } catch (err) {
+      if (err instanceof BackendError) throw new StepError(`${agent.name}: ${err.message}`);
+      throw err;
+    }
+
+    const release = await this.slots.acquire();
+    try {
+      const cwd = await this.workspace.prepare(agent.name, agent.writes);
+      const messages = this.store.drainInbox(this.runId, agent.name);
+      for (const m of messages) this.emit({ ...base, type: 'message.delivered', data: { id: m.id, from: m.from } });
+
+      const previous = this.store.getSession(this.runId, agent.name);
+      const resume = previous && previous.cwd === cwd ? previous.sessionId : undefined;
+      const prompt = turnPrompt({
+        goal: this.opts.goal,
+        stepId: step.id,
+        loop: this.context.loop,
+        maxLoops: this.maxLoops,
+        instructions: step.instructions,
+        task,
+        feedback: this.context.feedback,
+        messages,
+        structured: !!outputSchema,
+      });
+
+      this.emit({
+        ...base,
+        type: 'agent.started',
+        data: { model: agent.model ?? null, backend: agent.backend.type, cwd, resumed: !!resume, loop: this.context.loop },
+      });
+      const result = await this.runAgent(agent, { cwd, prompt, resume, env, outputSchema, step: step.id });
+      this.costUsd += result.costUsd;
+      if (result.sessionId) this.store.saveSession(this.runId, agent.name, result.sessionId, cwd);
+
+      const finished = finishedData(agent, result);
+      if (!result.ok) {
+        this.emit({ ...base, type: 'agent.error', data: finished });
+        throw new StepError(`${agent.name} failed on step ${step.id}: ${result.error ?? 'unknown error'}`);
+      }
+      this.emit({ ...base, type: 'agent.finished', data: finished });
+
+      if (this.team.brain.curator === agent.name) {
+        const commit = await commitBrain(this.workspace.repo, `${agent.name} during ${step.id}`, agent.name);
+        if (commit) this.emit({ ...base, type: 'brain.updated', data: { commit } });
+      }
+      if (agent.writes) {
+        const c = await this.workspace.collect(agent.name, agent.writeScope, `${step.id}: ${agent.name} (round ${this.context.loop})`);
+        if (c.reverted.length) this.emit({ ...base, type: 'scope.violation', data: { files: c.reverted, scope: agent.writeScope ?? null } });
+        if (c.commit) this.emit({ ...base, type: 'git.commit', data: { commit: c.commit, files: c.files } });
+        if (c.merged) this.emit({ ...base, type: 'git.merge', data: { into: this.workspace.branch } });
+      }
+      return this.output(agent, step.id, result, outputSchema);
+    } finally {
+      release();
+    }
+  }
+
+  private runAgent(
+    agent: AgentConfig,
+    p: { cwd: string; prompt: string; resume?: string; env: Env; outputSchema?: JsonSchema; step: string },
+  ): Promise<AgentResult> {
+    const timeout = AbortSignal.timeout(agent.limits.timeout_min * 60_000);
+    const signal = this.opts.signal ? AbortSignal.any([this.opts.signal, timeout]) : timeout;
+    const inv = buildInvocation(this.team, this.store, this.runId, agent, {
+      ...p,
+      root: this.team.isolation === 'none' ? this.workspace.repo : p.cwd,
+      signal,
+      repo: this.workspace.repo,
+    });
+    // Stop live delivery even if a runner forgets to signal the end of its turn.
+    return this.opts.runner.run(inv).finally(() => inv.onControl?.(null));
+  }
+
+  private output(agent: AgentConfig, stepId: string, result: AgentResult, schema: JsonSchema | undefined): unknown {
+    if (!schema) return { text: result.text };
+    const value = result.structured ?? extractJson(result.text);
+    let validate = this.validators.get(schema);
+    if (!validate) {
+      validate = this.ajv.compile(schema);
+      this.validators.set(schema, validate);
+    }
+    if (value === undefined || !validate(value)) {
+      const why = value === undefined ? 'no structured output' : this.ajv.errorsText(validate.errors);
+      throw new StepError(`${agent.name} on step ${stepId}: report does not match its output schema (${why})`);
+    }
+    return value;
+  }
+}
+
+/**
+ * Wire one agent turn to the event stream, the scope checker and the team
+ * inbox. Shared by workflow steps and direct chat.
+ */
+export function buildInvocation(
+  team: TeamConfig,
+  store: EventStore,
+  runId: string,
+  agent: AgentConfig,
+  p: {
+    cwd: string;
+    root: string;
+    prompt: string;
+    resume?: string;
+    env: Env;
+    outputSchema?: JsonSchema;
+    step: string;
+    signal: AbortSignal;
+    /** The project, for its brain. */
+    repo?: string;
+    extraTools?: CustomTool[];
+    /** A curation pass (the curator edits the brain and decides proposals). */
+    curating?: boolean;
+  },
+): AgentInvocation {
+  const base = { step: p.step, agent: agent.name };
+  const emit = (e: NewEvent) => store.append(runId, e);
+  let stopLive: (() => void) | undefined;
+  const brain = p.repo ? brainRoot(p.repo) : undefined;
+  const isCurator = !!brain && team.brain.curator === agent.name;
+  const tools: CustomTool[] = [...(brain && !isCurator && !p.curating ? [proposeTool(store, runId, agent.name, p.step)] : []), ...(p.extraTools ?? [])];
+  const sandbox = agent.sandbox && isCurator ? { ...agent.sandbox, allowWrite: [...agent.sandbox.allowWrite, brain!] } : agent.sandbox;
+  return {
+    agentName: agent.name,
+    prompt: p.prompt,
+    systemPrompt: [systemPrompt(team, agent), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
+    readDirs: brain && !p.curating ? [brain] : undefined,
+    skills: resolveSkills(agent.skills),
+    customTools: tools.length ? tools : undefined,
+    cwd: p.cwd,
+    resumeSessionId: p.resume,
+    model: agent.model,
+    tools: agent.tools,
+    outputSchema: p.outputSchema,
+    env: p.env,
+    maxTurns: agent.limits.max_turns,
+    maxBudgetUsd: agent.limits.max_budget_usd,
+    settingSources: team.settingSources,
+    signal: p.signal,
+    canMessage: agent.canMessage,
+    checkToolUse: makeToolChecker({ root: p.root, cwd: p.cwd, writeScope: agent.writes ? agent.writeScope : [], extraRoots: isCurator && brain ? [brain] : undefined }),
+    sendMessage: (to, text) => {
+      if (!agent.canMessage.includes(to)) return `You cannot message ${to}.`;
+      const m = store.enqueue(runId, to, agent.name, text, 'steer');
+      emit({ ...base, type: 'message.queued', data: { id: m.id, to, text, mode: 'steer' } });
+      return `Sent to ${to}. If ${to} is working it reads it between its tool calls; otherwise at the start of its next turn.`;
+    },
+    sandbox,
+    // While the agent works, hand it steer/interrupt messages from its inbox.
+    // Polling the store (not an in-memory hook) also reaches runs started by
+    // another process, such as the CLI.
+    onControl: (control) => {
+      stopLive?.();
+      stopLive = undefined;
+      if (!control) return;
+      const deliver = () => {
+        for (const m of store.liveMessages(runId, agent.name)) {
+          const text =
+            m.from === 'human' ? `[Message from the human, sent while you were working]\n${m.text}` : `[Message from your teammate ${m.from}]\n${m.text}`;
+          if (!control.send(text, m.mode === 'interrupt' ? 'now' : 'next')) return; // stays queued for its next turn
+          store.markDelivered([m.id]);
+          emit({ ...base, type: 'message.delivered', data: { id: m.id, from: m.from, live: true, mode: m.mode } });
+        }
+      };
+      deliver();
+      const timer = setInterval(deliver, 500);
+      stopLive = () => clearInterval(timer);
+    },
+    onEvent: eventSink(store, runId, base),
+  };
+}
+
+/** Turn an agent's stream into stored events (text, tool calls, denials, plan usage). */
+export function eventSink(store: EventStore, runId: string, base: { step?: string; agent?: string }) {
+  const emit = (e: NewEvent) => store.append(runId, e);
+  return (e: AgentStreamEvent) => {
+    if (e.kind === 'text') emit({ ...base, type: 'agent.text', data: { text: clip(e.text, 4000) } });
+    else if (e.kind === 'tool') emit({ ...base, type: 'agent.tool', data: { tool: e.tool, input: summarize(e.input) } });
+    else if (e.kind === 'denied') emit({ ...base, type: 'scope.denied', data: { tool: e.tool, input: summarize(e.input), reason: e.reason } });
+    else if (e.kind === 'rate_limit') emit({ ...base, type: 'usage.limit', data: { ...e.info } });
+  };
+}
+
+/** Fallback for backends that return the report as text: take the last JSON object in it. */
+export function extractJson(text: string): unknown {
+  const fenced = [...text.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/g)].map((m) => m[1]!);
+  for (const candidate of [...fenced.reverse(), text]) {
+    try {
+      return JSON.parse(candidate.trim());
+    } catch {
+      // try the next candidate
+    }
+  }
+  return undefined;
+}
+
+function clip(s: string, n: number) {
+  return s.length > n ? `${s.slice(0, n)}… [${s.length - n} more chars]` : s;
+}
+
+/** Keep tool inputs readable in the log: long strings (file contents) are clipped. */
+function summarize(input: unknown): unknown {
+  if (typeof input === 'string') return clip(input, 300);
+  if (Array.isArray(input)) return input.slice(0, 20).map(summarize);
+  if (input && typeof input === 'object') {
+    return Object.fromEntries(Object.entries(input).map(([k, v]) => [k, summarize(v)]));
+  }
+  return input;
+}
+
+class Semaphore {
+  private waiting: (() => void)[] = [];
+  constructor(private free: number) {}
+  async acquire(): Promise<() => void> {
+    if (this.free > 0) this.free -= 1;
+    else await new Promise<void>((r) => this.waiting.push(r));
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = this.waiting.shift();
+      if (next) next();
+      else this.free += 1;
+    };
+  }
+}

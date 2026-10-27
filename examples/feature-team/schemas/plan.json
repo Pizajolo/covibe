@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "tasks"],
+  "properties": {
+    "summary": { "type": "string" },
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "owner", "title", "description", "acceptance"],
+        "properties": {
+          "id": { "type": "string" },
+          "owner": { "enum": ["frontend", "backend"] },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "acceptance": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

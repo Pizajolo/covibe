@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "test report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command", "passed", "failed", "failures"],
+  "properties": {
+    "command": { "type": "string" },
+    "passed": { "type": "integer", "minimum": 0 },
+    "failed": { "type": "integer", "minimum": 0 },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["test", "message"],
+        "properties": {
+          "test": { "type": "string" },
+          "message": { "type": "string" },
+          "owner": { "enum": ["frontend", "backend"] }
+        }
+      }
+    }
+  }
+}

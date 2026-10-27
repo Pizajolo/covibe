@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["blocking_count", "findings"],
+  "properties": {
+    "blocking_count": { "type": "integer", "minimum": 0 },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "owner", "file", "message"],
+        "properties": {
+          "severity": { "enum": ["blocking", "minor"] },
+          "owner": { "enum": ["frontend", "backend"] },
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "message": { "type": "string" }
+        }
+      }
+    }
+  }
+}

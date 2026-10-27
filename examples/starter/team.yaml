@@ -1,0 +1,22 @@
+# The smallest useful team: one assistant that works on the goal. Add
+# members and steps from the Members and Workflow tabs.
+version: 1
+name: starter
+description: A single assistant. A starting point for your own team.
+
+defaults:
+  backend: { type: subscription }
+  isolation: worktree
+  limits: { max_turns: 40, timeout_min: 30 }
+
+agents:
+  assistant:
+    description: Works on the goal end to end.
+    prompt: prompts/assistant.md
+    model: sonnet
+    tools: [Read, Edit, Write, Bash, Grep, Glob]
+
+workflow:
+  steps:
+    - id: work
+      agent: assistant

@@ -1,0 +1,38 @@
+# A builder and a reviewer. The reviewer's blocking findings go back to the
+# builder, at most twice, then the run comes back to you.
+version: 1
+name: build-and-review
+description: One builder, one reviewer, a review gate and two fix rounds.
+
+defaults:
+  backend: { type: subscription }
+  isolation: worktree
+  max_parallel: 1
+  limits: { max_turns: 40, timeout_min: 30 }
+
+agents:
+  builder:
+    description: Implements the goal anywhere in the repository.
+    prompt: prompts/builder.md
+    model: sonnet
+    tools: [Read, Edit, Write, Bash, Grep, Glob]
+
+  reviewer:
+    description: Reviews the change and runs the tests; never edits.
+    prompt: prompts/reviewer.md
+    model: sonnet
+    tools: [Read, Grep, Glob]
+    output_schema: schemas/review.json
+
+workflow:
+  on_gate_fail:
+    goto: build
+    max_loops: 2
+    feed: [review.findings]
+    then: escalate_to_human
+  steps:
+    - id: build
+      agent: builder
+    - id: review
+      agent: reviewer
+      gate: "review.blocking_count = 0"
