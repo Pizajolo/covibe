@@ -34,7 +34,7 @@ workflow:
 describe('loadTeam', () => {
   it('loads the example team and resolves prompts, schemas and defaults', () => {
     const team = loadTeam(EXAMPLE);
-    expect(Object.keys(team.agents)).toEqual(['manager', 'frontend', 'backend', 'qa', 'tester']);
+    expect(Object.keys(team.agents)).toEqual(['manager', 'frontend', 'backend', 'designer', 'qa', 'tester']);
     expect(team.agents.manager!.prompt).toContain('engineering manager');
     expect(team.agents.manager!.writes).toBe(false);
     expect(team.agents.frontend!.writeScope).toEqual(['web/**']);

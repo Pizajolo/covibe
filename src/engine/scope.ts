@@ -6,7 +6,7 @@ const READ_ONLY_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS', 'WebSearch', 'Web
 
 /** The agent as it may act in a question session: same role and model, no tools that change anything. */
 export function readOnly(agent: AgentConfig): AgentConfig {
-  return { ...agent, tools: agent.tools.filter((t) => READ_ONLY_TOOLS.has(t)), writes: false, writeScope: [], canMessage: [], sandbox: undefined };
+  return { ...agent, tools: agent.tools.filter((t) => READ_ONLY_TOOLS.has(t)), writes: false, writeScope: [], canMessage: [], canRequest: [], sandbox: undefined };
 }
 
 /** Tools that write files, and where each keeps the path it writes. */

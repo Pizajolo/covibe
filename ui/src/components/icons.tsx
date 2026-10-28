@@ -45,4 +45,5 @@ export const IconSpinner = (p: P) => (
 );
 export const IconSparkle = base(<path d="M8 2.2 9.3 6.7 13.8 8 9.3 9.3 8 13.8 6.7 9.3 2.2 8l4.5-1.3z" />);
 export const IconClock = base(<><circle cx="8" cy="8" r="6" /><path d="M8 4.5V8l2.5 1.5" /></>);
+export const IconPlan = base(<><rect x="3" y="2.5" width="10" height="11.5" rx="1.5" /><path d="M6 2.5V2h4v.5M5.5 6.5l1 1 1.8-2M9.5 6.8H11M5.5 10.5l1 1 1.8-2M9.5 10.8H11" /></>);
 export const IconEye = base(<><path d="M1.8 8S4 3.8 8 3.8 14.2 8 14.2 8 12 12.2 8 12.2 1.8 8 1.8 8z" /><circle cx="8" cy="8" r="1.8" /></>);

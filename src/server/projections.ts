@@ -3,7 +3,7 @@
 import type { RunEvent, RunRecord } from '../events/types.js';
 import { QUESTION_STEP } from '../engine/questions.js';
 import type { PlanUsage } from '../runner/types.js';
-import type { AgentState, AppNotification, BoardCard, ChatItem, NotificationKind, NotifyChoice, QuestionView, RunSummary, Stats, StepState, UsageReport, UsageWindow } from './api-types.js';
+import type { AgentState, AppNotification, BoardCard, ChatItem, NotificationKind, NotifyChoice, QuestionView, RequestView, RunSummary, Stats, StepReport, StepState, UsageReport, UsageWindow } from './api-types.js';
 
 type D = Record<string, any>;
 
@@ -73,6 +73,7 @@ export function summarizeRun(
   let worktreesRemoved = false;
   const openCards = new Map<string, BoardCard>();
   const questions = new Map<number, QuestionView>();
+  const requests = new Map<number, RequestView>();
   let paused = false;
   let limitEnd: { resetsAt?: string } | undefined;
   /** member → its last limit stop, until it starts again */
@@ -166,13 +167,20 @@ export function summarizeRun(
         a.limitedUntil = undefined;
         limited.delete(e.agent!);
         if (e.step !== QUESTION_STEP) a.step = e.step;
-        a.activity = e.step === QUESTION_STEP && answeringFor.has(e.agent!) ? `answering ${answeringFor.get(e.agent!)}'s question` : d.resumed ? 'resuming…' : 'starting…';
+        a.activity =
+          e.step === QUESTION_STEP && answeringFor.has(e.agent!)
+            ? `answering ${answeringFor.get(e.agent!)}'s question`
+            : d.request_from
+              ? `working on ${d.request_from}'s request`
+              : d.resumed
+                ? 'resuming…'
+                : 'starting…';
         a.invocations += 1;
         a.updatedAt = e.ts;
         // A live tab outlasts the turn; a browser it drove some other way does not.
         if (!a.browser?.live) a.browser = undefined;
         if (e.step && e.step !== 'chat' && e.step !== QUESTION_STEP) {
-          const card: BoardCard = { agent: e.agent!, round: loops, status: 'working', costUsd: 0 };
+          const card: BoardCard = { agent: e.agent!, round: loops, status: 'working', costUsd: 0, ...(d.request_from ? { requestedBy: d.request_from } : {}) };
           step(e.step).cards.push(card);
           openCards.set(e.agent!, card);
         }
@@ -279,6 +287,21 @@ export function summarizeRun(
         a.updatedAt = e.ts;
         break;
       }
+      case 'request.sent': {
+        requests.set(d.id, { id: d.id, from: e.agent!, to: d.to, step: e.step, status: 'working', request: d.request, context: d.context ?? undefined, files: [], sentAt: e.ts });
+        const a = agent(e.agent!);
+        a.activity = `waiting for ${d.to}: ${String(d.request).slice(0, 80)}`;
+        a.updatedAt = e.ts;
+        break;
+      }
+      case 'request.done': {
+        const r = requests.get(d.id);
+        if (r) Object.assign(r, { status: d.ok ? 'done' : 'failed', reply: d.reply ?? undefined, error: d.error ?? undefined, files: d.files ?? [], doneAt: e.ts });
+        const a = agent(e.agent!);
+        a.activity = d.ok ? `got ${d.to}'s work` : `${d.to} could not do the request`;
+        a.updatedAt = e.ts;
+        break;
+      }
       case 'run.paused':
         paused = true;
         break;
@@ -315,6 +338,7 @@ export function summarizeRun(
   if (!live) {
     paused = false;
     for (const q of questions.values()) if (q.status === 'lead' || q.status === 'open') q.status = 'cancelled';
+    for (const r of requests.values()) if (r.status === 'working') r.status = 'failed';
     for (const a of agents.values()) {
       a.waitingOn = undefined;
       a.limitedUntil = undefined;
@@ -353,6 +377,7 @@ export function summarizeRun(
     worktreesRemoved,
     paused,
     questions: [...questions.values()],
+    requests: [...requests.values()],
     ...(limit ? { limit } : {}),
     ...(restart ? { restart } : {}),
   };
@@ -384,15 +409,45 @@ export function chatThreads(events: RunEvent[], roots: string[] = []): Record<st
       const item = pending.get(d.id);
       if (item) item.pending = false;
       if (item?.kind === 'human' && d.live) push(e.agent!, { ...base, kind: 'note', text: d.mode === 'interrupt' ? 'Stopped what it was doing to read your message' : 'Read your message while working' });
+    } else if (e.type === 'request.sent' && e.agent) {
+      push(e.agent, { ...base, kind: 'note', text: `Asked ${d.to} for work: ${d.request}` });
+      push(d.to, { ...base, kind: 'note', text: `Request from ${e.agent}: ${d.request}` });
+      lastStep[d.to] = `request:${d.id}`;
+    } else if (e.type === 'request.done' && e.agent) {
+      push(e.agent, { ...base, kind: d.ok ? 'note' : 'error', text: d.ok ? `${d.to} finished: ${d.reply}` : `${d.to} could not do it: ${d.error}` });
     } else if (e.type === 'agent.started' && e.agent) {
-      if (e.step !== 'chat' && lastStep[e.agent] !== `${e.step}`) push(e.agent, { ...base, kind: 'note', text: `Started step "${e.step}"` });
-      lastStep[e.agent] = e.step;
+      // A request already has its note.
+      if (e.step !== 'chat' && !d.request_from && lastStep[e.agent] !== `${e.step}`) push(e.agent, { ...base, kind: 'note', text: `Started step "${e.step}"` });
+      if (!d.request_from) lastStep[e.agent] = e.step;
     } else if (e.type === 'agent.text' && e.agent) push(e.agent, { ...base, kind: 'agent', text: d.text });
     else if (e.type === 'agent.tool' && e.agent) push(e.agent, { ...base, kind: 'tool', text: toolLabel(String(d.tool), d.input, roots) });
     else if (e.type === 'scope.denied' && e.agent) push(e.agent, { ...base, kind: 'error', text: `Blocked: ${d.reason}` });
     else if (e.type === 'agent.error' && e.agent) push(e.agent, { ...base, kind: 'error', text: `Failed: ${d.error}` });
   }
   return threads;
+}
+
+/**
+ * The latest report of every step, in the order steps first ran, and which
+ * one is the plan: a step named "plan" (or "planning"), or else the first
+ * whose report lists tasks.
+ */
+export function stepReports(events: RunEvent[]): { reports: StepReport[]; planStep?: string } {
+  let order: string[] = [];
+  const latest = new Map<string, StepReport>();
+  for (const e of events) {
+    const d = e.data as D;
+    if (e.type === 'run.started') order = [...((d.steps as string[]) ?? [])];
+    else if (e.type === 'step.finished' && e.step && d.output !== undefined) {
+      if (!order.includes(e.step)) order.push(e.step);
+      latest.set(e.step, { step: e.step, round: d.loop ?? 0, ts: e.ts, agents: (d.agents as string[]) ?? [], parallel: !!d.parallel, output: d.output });
+    }
+  }
+  const reports = order.map((id) => latest.get(id)).filter((r): r is StepReport => !!r);
+  const named = order.find((id) => /^plan(ning)?$/i.test(id));
+  const listed = reports.find((r) => !r.parallel && Array.isArray((r.output as D | null)?.tasks))?.step;
+  const planStep = named ?? listed;
+  return { reports, ...(planStep ? { planStep } : {}) };
 }
 
 const DAY = 86_400_000;

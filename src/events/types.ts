@@ -40,6 +40,8 @@ export type EventType =
   | 'question.asked'
   | 'question.escalated'
   | 'question.answered'
+  | 'request.sent'
+  | 'request.done'
   | 'run.paused'
   | 'run.resumed'
   | 'run.restart_scheduled'

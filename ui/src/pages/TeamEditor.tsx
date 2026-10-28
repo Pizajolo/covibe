@@ -478,6 +478,29 @@ function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, o
         </section>
       )}
 
+      {names.length > 1 && (
+        <section className="form-section">
+          <h3>Can ask for work</h3>
+          <div className="chips">
+            {names
+              .filter((n) => n !== name)
+              .map((n) => {
+                const list: string[] = Array.isArray(agent.can_request) ? agent.can_request : [];
+                const on = list.includes(n);
+                return (
+                  <button key={n} className={`chip ${on ? 'on' : ''}`} onClick={() => void edit([{ op: 'set', path: p('can_request'), value: on ? (list.filter((x) => x !== n).length ? list.filter((x) => x !== n) : null) : [...list, n] }])}>
+                    {on ? '✓ ' : ''}
+                    {n}
+                  </button>
+                );
+              })}
+          </div>
+          <span className="tiny faint">
+            When it wants to, {name} can ask these teammates to do something for it (say, a designer for a mockup). They work on it in a turn of their own, even if they have no workflow step, and {name} gets their reply and their changes.
+          </span>
+        </section>
+      )}
+
       <div className="grid grid-2">
         <section className="form-section">
           <h3>Connection</h3>

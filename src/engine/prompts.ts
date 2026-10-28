@@ -2,7 +2,7 @@ import type { AgentConfig, TeamConfig } from '../config/types.js';
 import type { InboxMessage } from '../events/types.js';
 
 /** Role prompt plus the team protocol, appended to Claude Code's system prompt. */
-export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAsk?: boolean } = {}): string {
+export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAsk?: boolean; canRequest?: boolean } = {}): string {
   const teammates = Object.values(team.agents)
     .filter((a) => a.name !== agent.name)
     .map((a) => `- ${a.name}${a.description ? `: ${a.description}` : ''}`)
@@ -26,6 +26,19 @@ export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAs
   if (agent.canMessage.length) {
     lines.push(
       `You can message ${agent.canMessage.join(', ')} with the send_message tool. A teammate who is working reads it between its tool calls; otherwise at the start of its next turn.`,
+    );
+  }
+  if (opts.canRequest && agent.canRequest.length) {
+    lines.push(
+      `You can ask ${agent.canRequest.join(', ')} to do work for you with the request_work tool: they do it in a turn of their own, their changes are merged so you can use them, and their reply is the tool's answer. You wait until they finish. Use it when their part would make yours better (say, a design to build from); you do not have to, and you can do your work without it.`,
+    );
+  }
+  const askers = Object.values(team.agents)
+    .filter((a) => a.canRequest.includes(agent.name))
+    .map((a) => a.name);
+  if (askers.length) {
+    lines.push(
+      `${askers.join(', ')} can ask you to do work for them. A request comes as a turn of its own, between workflow steps or while you have none: do what is asked and reply with what you did.`,
     );
   }
   if (opts.canAsk) {

@@ -56,6 +56,8 @@ export interface AgentConfig {
   cacheTtl?: CacheTtl;
   tools: string[];
   canMessage: string[];
+  /** Teammates it may ask to do work for it (request_work); they run a turn of their own and reply. */
+  canRequest: string[];
   /** Globs relative to the repo root. `undefined` = whole worktree, `[]` = nothing. */
   writeScope?: string[];
   outputSchema?: JsonSchema;

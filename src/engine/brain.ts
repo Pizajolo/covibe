@@ -212,7 +212,7 @@ export async function curate(opts: {
   const dir = await ensureBrain(opts.repo);
   const base = team.agents[name]!;
   // The curator works in the brain folder with file tools only.
-  const agent: AgentConfig = { ...base, tools: base.tools.filter((t) => ['Read', 'Write', 'Edit', 'MultiEdit', 'Grep', 'Glob'].includes(t)), writeScope: undefined, writes: true, canMessage: [], sandbox: undefined };
+  const agent: AgentConfig = { ...base, tools: base.tools.filter((t) => ['Read', 'Write', 'Edit', 'MultiEdit', 'Grep', 'Glob'].includes(t)), writeScope: undefined, writes: true, canMessage: [], canRequest: [], sandbox: undefined };
   let decided = 0;
   const decide: CustomTool = {
     name: 'decide_proposal',

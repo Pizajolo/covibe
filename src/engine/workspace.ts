@@ -123,6 +123,25 @@ export class Workspace {
   }
 
   /**
+   * Bring an agent's worktree up to date with the integration branch while it
+   * works (a teammate it asked for work merged changes). Its own uncommitted
+   * changes stay; returns false when they are in the way and nothing merged.
+   */
+  async refresh(agent: string): Promise<boolean> {
+    const dir = this.agentDirs.get(agent);
+    if (this.isolation === 'none' || !dir) return true;
+    return this.exclusive(async () => {
+      try {
+        await git(dir, ['merge', '-q', '--no-edit', this.branch!], commitEnv('covibe'));
+        return true;
+      } catch {
+        await git(dir, ['merge', '--abort']).catch(() => undefined);
+        return false;
+      }
+    });
+  }
+
+  /**
    * Commit what an agent changed, discard anything outside its write scope,
    * and merge the result into the integration branch.
    */

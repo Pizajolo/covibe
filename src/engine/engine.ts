@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
 import type { AgentConfig, Branch, JsonSchema, Step, TeamConfig } from '../config/types.js';
 import type { EventStore } from '../events/store.js';
-import type { NewEvent, RunStatus } from '../events/types.js';
+import type { InboxMessage, NewEvent, RunStatus } from '../events/types.js';
 import type { Connections } from '../connections/store.js';
 import { MAIN_ACCOUNT } from '../connections/types.js';
 import { BackendError, plainBackends, type BackendEnv, type BackendResolver, type Env } from '../runner/backend.js';
@@ -16,6 +16,7 @@ import { browserActivity } from './browser.js';
 import { browserHub } from '../browser/hub.js';
 import { browserTools } from '../browser/tools.js';
 import { ASK_TOOL, Deadline, LEAD_SCHEMA, leadPrompt, leadVerdict, QUESTION_STEP, questionOptions, RunPause, waitForAnswer, type LeadVerdict } from './questions.js';
+import { REQUEST_TOOL, RequestChains, requestPrompt } from './requests.js';
 import { makeToolChecker, readOnly } from './scope.js';
 import { Workspace } from './workspace.js';
 
@@ -148,6 +149,10 @@ class Engine {
   private readonly validators = new WeakMap<JsonSchema, ValidateFunction>();
   private readonly warned = new Set<string>();
   private readonly pause: RunPause;
+  /** One turn at a time per member: a teammate's request waits for its workflow turn, and the other way round. */
+  private readonly members = new Map<string, Semaphore>();
+  private readonly chains = new RequestChains();
+  private requests = 0;
   private costUsd = 0;
   private maxLoops: number | undefined;
 
@@ -201,8 +206,11 @@ class Engine {
         this.opts.signal?.throwIfAborted();
         const step = steps[i]!;
         this.emit({ type: 'step.started', step: step.id, data: { loop: this.context.loop } });
-        this.context[step.id] = await this.runStep(step);
-        this.emit({ type: 'step.finished', step: step.id, data: { loop: this.context.loop } });
+        const output = await this.runStep(step);
+        this.context[step.id] = output;
+        // The report goes into the log too, so the plan and every other report can be read while the run goes.
+        const agents = step.kind === 'agent' ? [step.agent] : Object.keys(output as object);
+        this.emit({ type: 'step.finished', step: step.id, data: { loop: this.context.loop, agents, parallel: step.kind === 'parallel', output: clipReport(output) } });
 
         if (step.gate) {
           const { passed, value } = await evaluateGate(step.gate, this.context);
@@ -283,13 +291,46 @@ class Engine {
 
   private async invoke(agentName: string, step: Step, task: unknown, outputSchema: JsonSchema | undefined): Promise<unknown> {
     const agent = this.team.agents[agentName]!;
-    const base = { step: step.id, agent: agent.name };
-    const connections = this.opts.connections;
-    const balanced = isBalanced(agent, connections);
-
     // Nothing new starts while a question waits for the human.
     await this.pause.wait(this.opts.signal);
     const release = await this.slots.acquire();
+    try {
+      const result = await this.work(agent, step.id, outputSchema, (messages) =>
+        turnPrompt({
+          goal: this.opts.goal,
+          stepId: step.id,
+          loop: this.context.loop,
+          maxLoops: this.maxLoops,
+          instructions: step.instructions,
+          task,
+          feedback: this.context.feedback,
+          messages,
+          structured: !!outputSchema,
+        }),
+      );
+      return this.output(agent, step.id, result, outputSchema);
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * One turn of a member, for a workflow step or a teammate's request (both
+   * labelled with `stepId`): its workspace and inbox, the plan's usage limit,
+   * and committing and merging what it changed. Throws a StepError when the
+   * turn fails.
+   */
+  private async work(
+    agent: AgentConfig,
+    stepId: string,
+    outputSchema: JsonSchema | undefined,
+    prompt: (messages: InboxMessage[]) => string,
+    request?: { id: number; from: string },
+  ): Promise<AgentResult & { files: string[] }> {
+    const base = { step: stepId, agent: agent.name };
+    const connections = this.opts.connections;
+    const balanced = isBalanced(agent, connections);
+    const releaseMember = await this.member(agent.name).acquire();
     let unclaim = () => {};
     try {
       let built = await this.environment(agent, base, balanced ? await connections!.pick() : undefined);
@@ -304,32 +345,23 @@ class Engine {
 
       const previous = this.store.getSession(this.runId, agent.name);
       const resume = previous && previous.cwd === cwd ? previous.sessionId : undefined;
-      const prompt = turnPrompt({
-        goal: this.opts.goal,
-        stepId: step.id,
-        loop: this.context.loop,
-        maxLoops: this.maxLoops,
-        instructions: step.instructions,
-        task,
-        feedback: this.context.feedback,
-        messages,
-        structured: !!outputSchema,
-      });
+      const text = prompt(messages);
+      const requested = request ? { request: request.id, request_from: request.from } : {};
 
       this.emit({
         ...base,
         type: 'agent.started',
-        data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd, resumed: !!resume, loop: this.context.loop },
+        data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd, resumed: !!resume, loop: this.context.loop, ...requested },
       });
       const turn = (p: { prompt: string; resume?: string }) =>
-        this.runAgent(agent, { cwd, ...p, env: built.env, pricing: built.pricing, account: accountOf(built), via: built.via, outputSchema, step: step.id });
+        this.runAgent(agent, { cwd, ...p, env: built.env, pricing: built.pricing, account: accountOf(built), via: built.via, outputSchema, step: stepId });
       /** Move this member to another account. */
       const move = async (account: string) => {
         unclaim();
         built = await this.environment(agent, base, account);
         claim();
       };
-      let result = await turn({ prompt, resume });
+      let result = await turn({ prompt: text, resume });
       // The plan's usage limit stopped the turn: move on to another account
       // (when sharing them), or wait for the reset and pick the session up
       // again (or stop the run).
@@ -340,7 +372,7 @@ class Engine {
         const resetsAt = resetIso(result.limit.resetsAt);
         const limited = { ...finishedData(agent, result, built.via), resets_at: resetsAt ?? null, window: result.limit.window ?? null };
         // A session to pick up continues; without one the turn starts over.
-        const again = { prompt: result.sessionId ? LIMIT_RESUME : prompt, resume: result.sessionId ?? resume };
+        const again = { prompt: result.sessionId ? LIMIT_RESUME : text, resume: result.sessionId ?? resume };
         const account = accountOf(built);
         if (balanced && account) {
           connections!.exhausted(account, result.limit.resetsAt);
@@ -348,8 +380,8 @@ class Engine {
           if (next) {
             this.emit({ ...base, type: 'agent.limited', data: { ...limited, waiting: false, until: null, switched_to: next } });
             await move(next);
-            this.emit({ ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd, resumed: !!result.sessionId, after_limit: true, switched: true, loop: this.context.loop } });
-            result = await turn({ ...again, prompt: result.sessionId ? LIMIT_SWITCH : prompt });
+            this.emit({ ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd, resumed: !!result.sessionId, after_limit: true, switched: true, loop: this.context.loop, ...requested } });
+            result = await turn({ ...again, prompt: result.sessionId ? LIMIT_SWITCH : text });
             continue;
           }
         }
@@ -359,13 +391,13 @@ class Engine {
         const free = balanced ? connections!.nextFree() : undefined;
         if (free) until = Math.min(until, Math.max(free + LIMIT_GRACE_MS, Date.now() + 2_000));
         this.emit({ ...base, type: 'agent.limited', data: { ...limited, waiting: !stop, until: stop ? null : new Date(until).toISOString() } });
-        if (stop) throw new LimitError(`${agent.name} hit the plan's usage limit on step ${step.id}${resetsAt ? `; it resets at ${resetsAt}` : ''}`, resetsAt);
+        if (stop) throw new LimitError(`${agent.name} hit the plan's usage limit on step ${stepId}${resetsAt ? `; it resets at ${resetsAt}` : ''}`, resetsAt);
         await sleep(until - Date.now(), this.opts.signal);
         if (balanced) {
           const next = await connections!.pick();
           if (next && next !== account) await move(next);
         }
-        this.emit({ ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd, resumed: !!result.sessionId, after_limit: true, loop: this.context.loop } });
+        this.emit({ ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd, resumed: !!result.sessionId, after_limit: true, loop: this.context.loop, ...requested } });
         result = await turn(again);
       }
       this.costUsd += result.costUsd;
@@ -374,25 +406,34 @@ class Engine {
       const finished = finishedData(agent, result, built.via);
       if (!result.ok) {
         this.emit({ ...base, type: 'agent.error', data: finished });
-        throw new StepError(`${agent.name} failed on step ${step.id}: ${result.error ?? 'unknown error'}`);
+        throw new StepError(`${agent.name} failed on step ${stepId}: ${result.error ?? 'unknown error'}`);
       }
       this.emit({ ...base, type: 'agent.finished', data: finished });
 
       if (this.team.brain.curator === agent.name) {
-        const commit = await commitBrain(this.workspace.repo, `${agent.name} during ${step.id}`, agent.name);
+        const commit = await commitBrain(this.workspace.repo, `${agent.name} during ${stepId}`, agent.name);
         if (commit) this.emit({ ...base, type: 'brain.updated', data: { commit } });
       }
+      let files: string[] = [];
       if (agent.writes) {
-        const c = await this.workspace.collect(agent.name, agent.writeScope, `${step.id}: ${agent.name} (round ${this.context.loop})`);
+        const label = request ? `${stepId}: ${agent.name} for ${request.from} (request ${request.id})` : `${stepId}: ${agent.name} (round ${this.context.loop})`;
+        const c = await this.workspace.collect(agent.name, agent.writeScope, label);
         if (c.reverted.length) this.emit({ ...base, type: 'scope.violation', data: { files: c.reverted, scope: agent.writeScope ?? null } });
         if (c.commit) this.emit({ ...base, type: 'git.commit', data: { commit: c.commit, files: c.files } });
         if (c.merged) this.emit({ ...base, type: 'git.merge', data: { into: this.workspace.branch } });
+        files = c.files;
       }
-      return this.output(agent, step.id, result, outputSchema);
+      return { ...result, files };
     } finally {
-      release();
+      releaseMember();
       unclaim();
     }
+  }
+
+  private member(name: string): Semaphore {
+    let s = this.members.get(name);
+    if (!s) this.members.set(name, (s = new Semaphore(1)));
+    return s;
   }
 
   /** Resolve a member's environment (on `account` when balancing chose one), reporting backend warnings once. */
@@ -426,7 +467,7 @@ class Engine {
       root: this.team.isolation === 'none' ? this.workspace.repo : p.cwd,
       signal,
       repo: this.workspace.repo,
-      extraTools: [this.askTool(agent.name, p.step, deadline)],
+      extraTools: [this.askTool(agent.name, p.step, deadline), ...(agent.canRequest.length ? [this.requestTool(agent, p.step, deadline)] : [])],
       // A paused run holds working members at their next tool call.
       beforeToolUse: () => this.pause.wait(signal),
     });
@@ -486,6 +527,61 @@ class Engine {
         this.pause.remove(id);
       }
     } finally {
+      release();
+    }
+  }
+
+  private requestTool(from: AgentConfig, step: string, deadline: Deadline): CustomTool {
+    const names = from.canRequest;
+    const who = names.map((n) => (this.team.agents[n]?.description ? `${n} (${this.team.agents[n]!.description})` : n)).join(', ');
+    return {
+      name: REQUEST_TOOL,
+      description: `Ask a teammate to do work for you: ${who}. They work on it in a turn of their own; their changes are committed and merged, so you can use them, and their reply is this tool's answer. You wait until they finish. Use it when their part would help; you do not have to.`,
+      params: {
+        to: { type: 'string', enum: names, description: 'The teammate to ask.' },
+        request: { type: 'string', description: 'What you need from them, specific enough to do without seeing your work: what to make or decide, where it should go, and what you will do with it.' },
+        context: { type: 'string', optional: true, description: 'What they should know: the files involved, constraints, what you have so far.' },
+      },
+      run: (args) => {
+        const context = typeof args.context === 'string' && args.context.trim() ? args.context.trim() : undefined;
+        return this.request(from, step, String(args.to ?? ''), String(args.request ?? '').trim(), context, deadline);
+      },
+    };
+  }
+
+  /** A member asks a teammate for work and waits for its reply. Returns the text the member sees. */
+  private async request(from: AgentConfig, step: string, to: string, text: string, context: string | undefined, deadline: Deadline): Promise<string> {
+    if (!from.canRequest.includes(to)) throw new Error(`you cannot request work from ${to || 'nobody'}; you can ask ${from.canRequest.join(', ')}`);
+    if (!text) throw new Error('the request is empty');
+    const cycle = this.chains.cycle(from.name, to);
+    if (cycle) throw new Error(`${cycle.join(' → ')} ${cycle.length > 1 ? 'are' : 'is'} waiting for you, so ${to} cannot take a request now. Finish your part, or send_message it if you can.`);
+    const target = this.team.agents[to]!;
+    const id = ++this.requests;
+    const base = { step, agent: from.name };
+    const release = deadline.hold();
+    const done = this.chains.wait(from.name, to);
+    this.emit({ ...base, type: 'request.sent', data: { id, to, request: text, context: context ?? null } });
+    try {
+      await this.pause.wait(this.opts.signal);
+      const result = await this.work(target, step, undefined, (messages) => requestPrompt({ goal: this.opts.goal, from: from.name, to, request: text, context, messages }), { id, from: from.name });
+      const reply = result.text.trim() || '(no reply)';
+      // A member working in a worktree of its own gets the teammate's changes right away.
+      const synced = result.files.length && from.writes ? await this.workspace.refresh(from.name) : true;
+      this.emit({ ...base, type: 'request.done', data: { id, to, ok: true, reply: clip(reply, 4000), files: result.files } });
+      const files = result.files.length
+        ? synced
+          ? `\n\n${to} changed: ${result.files.join(', ')}. The changes are merged into your working folder.`
+          : `\n\n${to} changed: ${result.files.join(', ')}. They could not be merged into your working folder while you have changes there; read them in ${this.workspace.integrationDir} (you get them in your folder at your next turn).`
+        : '';
+      return `Reply from ${to}:\n${reply}${files}`;
+    } catch (err) {
+      this.opts.signal?.throwIfAborted();
+      const error = (err as Error).message;
+      this.emit({ ...base, type: 'request.done', data: { id, to, ok: false, error } });
+      // The asking member decides what to do without it; its own step goes on.
+      throw new Error(`${to} could not finish your request: ${error}`);
+    } finally {
+      done();
       release();
     }
   }
@@ -654,7 +750,7 @@ export function buildInvocation(
   return {
     agentName: agent.name,
     prompt: p.prompt,
-    systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL) }), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
+    systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL), canRequest: tools.some((t) => t.name === REQUEST_TOOL) }), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
     readDirs: brain && !p.curating ? [brain] : undefined,
     skills: resolveSkills(agent.skills),
     customTools: tools.length ? tools : undefined,
@@ -754,6 +850,14 @@ export function extractJson(text: string): unknown {
     }
   }
   return undefined;
+}
+
+/** A step's report as the log keeps it: long strings clipped. */
+function clipReport(value: unknown): unknown {
+  if (typeof value === 'string') return clip(value, 20_000);
+  if (Array.isArray(value)) return value.map(clipReport);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, clipReport(v)]));
+  return value;
 }
 
 function clip(s: string, n: number) {

@@ -15,6 +15,7 @@ import {
   IconHome,
   IconInfo,
   IconLoop,
+  IconPlan,
   IconQuestion,
   IconRuns,
   IconSend,
@@ -24,6 +25,7 @@ import {
   IconX,
 } from '../components/icons';
 import { BrowserPreview, viewSrc } from '../components/BrowserView';
+import { PlanTab } from '../components/Plan';
 import { Preview } from '../components/Preview';
 import { askedToShip, markAskedToShip, ShipDialog } from '../components/ShipDialog';
 import { Toolbar } from '../components/Toolbar';
@@ -32,7 +34,7 @@ import { go, href, useData, useLive } from '../data';
 import { clock, countdown, duration, money, resetTime, tokens, toolText } from '../format';
 import { useNotify } from '../notify';
 
-type Tab = 'office' | 'board' | 'activity' | 'chat' | 'changes' | 'preview';
+type Tab = 'office' | 'plan' | 'board' | 'activity' | 'chat' | 'changes' | 'preview';
 type Delivery = 'queue' | 'steer' | 'interrupt';
 
 const DELIVERY: Record<Delivery, { label: string; pending: string; help: (a: string) => string; toast: (a: string) => string }> = {
@@ -99,7 +101,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
   if (!detail) return <Toolbar title="Loading…" />;
   const run = detail.summary;
   const isAsk = run.kind === 'ask';
-  const tab: Tab = (['office', 'board', 'activity', 'chat', 'changes', 'preview'].includes(tabParam ?? '') ? tabParam : isAsk ? 'chat' : 'office') as Tab;
+  const tab: Tab = (['office', 'plan', 'board', 'activity', 'chat', 'changes', 'preview'].includes(tabParam ?? '') ? tabParam : isAsk ? 'chat' : 'office') as Tab;
   const setTab = (t: Tab) => go('runs', projectId, runId, t);
   const openChat = (agent: string) => {
     setChatWith(agent);
@@ -179,6 +181,12 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
             </button>
           )}
           {!isAsk && (
+            <button className={tab === 'plan' ? 'on' : ''} onClick={() => setTab('plan')}>
+              <IconPlan width={14} height={14} /> {detail.planStep ? 'Plan' : 'Reports'}
+              {run.requests.some((r) => r.status === 'working') && <span className="badge">{run.requests.filter((r) => r.status === 'working').length}</span>}
+            </button>
+          )}
+          {!isAsk && (
             <button className={tab === 'board' ? 'on' : ''} onClick={() => setTab('board')}>
               <IconFlow width={14} height={14} /> Board
             </button>
@@ -202,7 +210,8 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
         </nav>
 
         {tab === 'office' && <OfficeTab detail={detail} projectId={projectId} selected={chatWith} onSelect={setChatWith} onSent={reload} />}
-        {tab === 'board' && <Board run={run} onOpen={openChat} />}
+        {tab === 'plan' && <PlanTab detail={detail} onOpen={openChat} />}
+        {tab === 'board' && <Board run={run} planStep={detail.planStep} onOpen={openChat} onPlan={() => setTab('plan')} />}
         {tab === 'activity' && <Activity events={detail.events} run={run} roots={detail.roots} />}
         {tab === 'chat' && <Chat detail={detail} projectId={projectId} selected={chatWith} onSelect={setChatWith} onSent={reload} />}
         {tab === 'changes' && <Changes projectId={projectId} run={run} />}
@@ -359,7 +368,7 @@ function Banner({ run }: { run: RunSummary }) {
 
 // ---------------------------------------------------------------- board
 
-function Board({ run, onOpen }: { run: RunSummary; onOpen: (agent: string) => void }) {
+function Board({ run, planStep, onOpen, onPlan }: { run: RunSummary; planStep?: string; onOpen: (agent: string) => void; onPlan: () => void }) {
   const index = (name: string) => run.agents.findIndex((a) => a.name === name);
   if (!run.steps.length) return <Empty title="No workflow steps" />;
   return (
@@ -372,6 +381,11 @@ function Board({ run, onOpen }: { run: RunSummary; onOpen: (agent: string) => vo
               <StepBadge status={s.status} />
             </div>
             {s.gate && <span className="gate" title={`Gate: ${s.gate}`}>gate: {s.gate}</span>}
+            {s.id === planStep && s.status !== 'pending' && s.status !== 'running' && (
+              <button className="btn sm ghost" style={{ alignSelf: 'flex-start' }} onClick={onPlan}>
+                <IconPlan /> View plan
+              </button>
+            )}
             {s.rounds > 1 && (
               <span className="tiny faint row" style={{ gap: 4 }}>
                 <IconLoop width={12} height={12} /> ran {s.rounds} times
@@ -388,6 +402,7 @@ function Board({ run, onOpen }: { run: RunSummary; onOpen: (agent: string) => vo
                   {c.round > 0 && <span className="pill warn">round {c.round}</span>}
                   {c.status === 'working' ? <IconSpinner width={14} height={14} style={{ color: 'var(--accent)' }} /> : null}
                 </div>
+                {c.requestedBy && <span className="for">on {c.requestedBy}'s request</span>}
                 {c.summary && <span className="summary">{c.summary}</span>}
                 <span className="tiny faint">
                   {c.status === 'working' ? 'working…' : c.status === 'skipped' ? 'skipped' : c.status === 'error' ? 'failed' : 'done'} · {money(c.costUsd)}
@@ -611,6 +626,7 @@ function MemberPanel({
               <Chips label="Can change" items={!member.writes ? [] : member.writeScope ?? ['anything in its worktree']} empty="nothing (read-only)" />
               <Chips label="Tools" items={member.tools} empty="none" />
               <Chips label="Can message" items={member.canMessage} empty="nobody" />
+              {member.canRequest.length > 0 && <Chips label="Can ask for work" items={member.canRequest} empty="nobody" />}
             </>
           )}
           {answered.length > 0 && (

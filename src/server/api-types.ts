@@ -197,6 +197,37 @@ export interface BoardCard {
   status: 'working' | 'done' | 'error' | 'skipped';
   costUsd: number;
   summary?: string;
+  /** Set when the member worked on a teammate's request (request_work) rather than its own step. */
+  requestedBy?: string;
+}
+
+/** A member asking a teammate for work (see the request.* events). */
+export interface RequestView {
+  id: number;
+  from: string;
+  to: string;
+  /** The step the asking member was in. */
+  step?: string;
+  status: 'working' | 'done' | 'failed';
+  request: string;
+  context?: string;
+  reply?: string;
+  error?: string;
+  files: string[];
+  sentAt: string;
+  doneAt?: string;
+}
+
+/** The latest report of a workflow step: the plan, a review, test results… */
+export interface StepReport {
+  step: string;
+  /** The fix round it came from. */
+  round: number;
+  ts: string;
+  /** Who wrote it. A parallel step's output has one report per member, keyed by name. */
+  agents: string[];
+  parallel: boolean;
+  output: unknown;
 }
 
 export interface StepState {
@@ -233,6 +264,7 @@ export interface RunSummary {
   /** A question waits for you and the team is on hold until you answer it. */
   paused: boolean;
   questions: QuestionView[];
+  requests: RequestView[];
   /**
    * The plan's usage limit: members waiting for it to reset (waiting, until
    * when they continue), or the run stopped because of it (resetsAt).
@@ -266,6 +298,7 @@ export interface MemberInfo {
   writeScope?: string[];
   writes: boolean;
   canMessage: string[];
+  canRequest: string[];
   /** Answers teammates' questions first. */
   lead: boolean;
   /** Maintains the project brain. */
@@ -278,6 +311,10 @@ export interface RunDetail {
   members: MemberInfo[];
   events: RunEvent[];
   threads: Record<string, ChatItem[]>;
+  /** The latest report of every step that finished, in workflow order. */
+  reports: StepReport[];
+  /** The step that plans the work (a step named "plan", or the first whose report lists tasks), if any. */
+  planStep?: string;
   /** Whether a chat message right now is queued (live run) or answered immediately. */
   chatMode: 'queue' | 'answer';
   /** The run was started by this app and can be stopped from it. */

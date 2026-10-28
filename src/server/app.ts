@@ -42,7 +42,7 @@ import type { AgentRunner } from '../runner/types.js';
 import type { AccountInfo, ConnectionsInfo, MemberInfo, PreviewSite, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UsageReport } from './api-types.js';
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
 import { gitCheckout, gitCommit, gitMerge, gitOverview, gitPull, gitPullRequest, gitPush, gitRevert, gitShow } from './gitops.js';
-import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, summarizeRun, usageReport } from './projections.js';
+import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, stepReports, summarizeRun, usageReport } from './projections.js';
 import { diskSource, gitSource, isText, PREVIEW_BRIDGE, relPath, SiteServer, type SiteSource } from './site.js';
 import { browserHub, type LiveTab } from '../browser/hub.js';
 import type { BrowserProvider } from '../browser/types.js';
@@ -453,6 +453,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       writeScope: a.writeScope,
       writes: a.writes,
       canMessage: a.canMessage,
+      canRequest: a.canRequest,
       lead: team.lead === a.name,
       curator: team.brain.curator === a.name,
     }));
@@ -778,6 +779,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         members: membersOf(run),
         events,
         threads: chatThreads(events, [project.path]),
+        ...stepReports(events),
         roots: [project.path],
         chatMode: store.isLive(run) ? 'queue' : 'answer',
         canStop: active.has(`${project.id}/${run.id}`),

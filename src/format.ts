@@ -45,9 +45,18 @@ export function formatEvent(e: RunEvent): string {
     case 'step.started':
       text = cyan(`▶ step ${e.step}`) + (d.loop ? dim(` round ${d.loop}`) : '');
       break;
-    case 'step.finished':
+    case 'step.finished': {
       text = dim(`✓ step ${e.step} done`);
+      // A plan reads as its summary and one line per task.
+      const out = (d.parallel ? undefined : d.output) as Record<string, unknown> | undefined;
+      if (out && Array.isArray(out.tasks)) {
+        const tasks = (out.tasks as Record<string, unknown>[]).map(
+          (t) => `\n${' '.repeat(28)}• ${t.owner ? cyan(`[${t.owner}] `) : ''}${one(String(t.title ?? t.description ?? t.id ?? JSON.stringify(t)), 120)}`,
+        );
+        text += (typeof out.summary === 'string' ? `: ${one(out.summary, 200)}` : '') + tasks.join('');
+      }
       break;
+    }
     case 'step.skipped':
       text = dim(`skipped (${d.reason})`);
       break;
@@ -61,7 +70,7 @@ export function formatEvent(e: RunEvent): string {
       text = yellow(`↺ back to ${d.to} (round ${d.loop}/${d.max_loops})`) + dim(` feedback: ${one(JSON.stringify(d.feedback), 200)}`);
       break;
     case 'agent.started':
-      text = `started ${dim(`${d.model ?? 'default model'} via ${d.backend}${d.resumed ? ', resumed' : ''}`)}`;
+      text = `started ${dim(`${d.model ?? 'default model'} via ${d.backend}${d.resumed ? ', resumed' : ''}`)}${d.request_from ? ` on ${d.request_from}'s request #${d.request}` : ''}`;
       break;
     case 'agent.text':
       text = one(String(d.text));
@@ -116,6 +125,14 @@ export function formatEvent(e: RunEvent): string {
       break;
     case 'question.answered':
       text = green(`✓ #${d.id} answered by ${d.by === 'human' ? 'you' : d.by}: `) + one(String(d.answer), 200);
+      break;
+    case 'request.sent':
+      text = `⇢ asks ${d.to} for work (#${d.id}): ${one(String(d.request), 200)}`;
+      break;
+    case 'request.done':
+      text = d.ok
+        ? green(`⇠ ${d.to} finished request #${d.id}: `) + one(String(d.reply), 200)
+        : red(`⇠ ${d.to} could not finish request #${d.id}: ${one(String(d.error), 200)}`);
       break;
     case 'run.paused':
       text = bold(yellow('⏸ run paused until you answer'));
