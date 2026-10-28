@@ -240,7 +240,8 @@ class Engine {
 
     // Members' proposals from this run (and earlier ones) go to the curator.
     const { curator, curate: when } = this.team.brain;
-    if (curator && when === 'after_run' && !this.opts.signal?.aborted && this.store.proposals('pending').length) {
+    // Waiting for a batch of proposals saves a curation session per run.
+    if (curator && when === 'after_run' && !this.opts.signal?.aborted && this.store.proposals('pending').length >= this.team.brain.minProposals) {
       try {
         await curate({ team: this.team, store: this.store, runner: this.opts.runner, repo: this.workspace.repo, runId: this.runId, buildInvocation, env: this.opts.env, connections: this.opts.connections, signal: this.opts.signal });
       } catch (err) {
@@ -557,6 +558,24 @@ export function checkBackend(backend: AgentConfig['backend'], connections: Conne
   if (backend.type === 'subscription' && backend.account && backend.account !== MAIN_ACCOUNT) throw new BackendError(`Claude account "${backend.account}" is not set up (Settings → Advanced)`);
 }
 
+/**
+ * The member's prompt-cache lifetime, for Claude Code. Only Anthropic's API
+ * knows it: a member pointed elsewhere (another provider, the OpenAI
+ * translator, a gateway) is left alone.
+ */
+export function withCacheTtl(env: Env, ttl: AgentConfig['cacheTtl']): Env {
+  if (!ttl) return env;
+  const base = env.ANTHROPIC_BASE_URL;
+  if (base) {
+    try {
+      if (!/(^|\.)anthropic\.com$/.test(new URL(base).hostname)) return env;
+    } catch {
+      return env;
+    }
+  }
+  return { ...env, CLAUDE_CODE_PROMPT_CACHE_TTL: ttl };
+}
+
 /** The backends a run, chat or curation resolves agent environments with. */
 export function resolverOf(connections: Connections | undefined): BackendResolver {
   return connections ?? plainBackends;
@@ -623,7 +642,7 @@ export function buildInvocation(
     thinking: agent.thinking,
     tools: agent.tools,
     outputSchema: p.outputSchema,
-    env: p.env,
+    env: withCacheTtl(p.env, agent.cacheTtl),
     pricing: p.pricing,
     maxTurns: agent.limits.max_turns,
     maxBudgetUsd: agent.limits.max_budget_usd,

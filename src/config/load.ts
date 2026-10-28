@@ -7,6 +7,7 @@ import { parseDocument } from 'yaml';
 import type {
   AgentConfig,
   BackendConfig,
+  CacheTtl,
   Branch,
   Effort,
   GateFailPolicy,
@@ -136,6 +137,7 @@ interface RawAgent {
   model?: string;
   effort?: Effort;
   thinking?: Thinking;
+  cache_ttl?: CacheTtl;
   tools: string[];
   can_message?: string[];
   scope?: { write?: string[] };
@@ -168,6 +170,7 @@ interface RawTeam {
     model?: string;
     effort?: Effort;
     thinking?: Thinking;
+    cache_ttl?: CacheTtl;
     isolation?: 'worktree' | 'none';
     limits?: Partial<Limits>;
     max_parallel?: number;
@@ -175,7 +178,7 @@ interface RawTeam {
     sandbox?: RawSandbox;
     skills?: string[];
   };
-  brain?: { curator?: string; curate?: 'after_run' | 'manual' };
+  brain?: { curator?: string; curate?: 'after_run' | 'manual'; min_proposals?: number };
   lead?: string | null;
   agents: Record<string, RawAgent>;
   workflow: { on_gate_fail?: RawPolicy; steps: RawStep[] };
@@ -252,6 +255,7 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
       model: backend.model ?? a.model ?? defaults.model,
       effort: a.effort ?? defaults.effort,
       thinking: a.thinking ?? defaults.thinking,
+      cacheTtl: a.cache_ttl ?? defaults.cache_ttl,
       tools: a.tools,
       canMessage: a.can_message ?? [],
       writeScope: a.scope?.write,
@@ -340,7 +344,7 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
 
   if (problems.length) throw new ConfigError(file, problems);
   return {
-    brain: { curator, curate: raw.brain?.curate ?? 'after_run' },
+    brain: { curator, curate: raw.brain?.curate ?? 'after_run', minProposals: raw.brain?.min_proposals ?? 1 },
     lead,
     name: raw.name,
     description: raw.description,

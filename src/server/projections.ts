@@ -396,7 +396,7 @@ export function computeStats(
   }
   const stats: Stats = {
     costUsd: { today: 0, week: 0, month: 0, all: 0 },
-    tokens: { today: 0, week: 0, all: 0, input: 0, output: 0, cacheRead: 0 },
+    tokens: { today: 0, week: 0, all: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     runs: { total: 0, running: 0, succeeded: 0, escalated: 0, failed: 0, questions: 0 },
     activeAgents: 0,
     daily: [],
@@ -425,6 +425,7 @@ export function computeStats(
     stats.tokens.input += d.tokens?.input ?? 0;
     stats.tokens.output += d.tokens?.output ?? 0;
     stats.tokens.cacheRead += d.tokens?.cacheRead ?? 0;
+    stats.tokens.cacheWrite += d.tokens?.cacheWrite ?? 0;
     if (t >= startOfDay) {
       stats.costUsd.today += cost;
       stats.tokens.today += tok;

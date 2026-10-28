@@ -155,6 +155,7 @@ agents:
     model: opus                     # an alias (opus | sonnet | haiku) or a model id
     effort: high                    # low | medium | high | xhigh | max (also under defaults)
     thinking: adaptive              # adaptive | off | a token budget such as 8000 (older models)
+    cache_ttl: 1h                   # 5m | 1h: how long Claude keeps its prompt cache (also under defaults)
     tools: [Read, Grep, Glob]       # no edit tools: plans, cannot change code
   frontend:
     prompt: prompts/frontend.md
@@ -202,6 +203,7 @@ defaults:
 brain:
   curator: reviewer              # maintains the project brain; needs Write or Edit
   curate: after_run              # or: manual (only when you ask)
+  min_proposals: 5               # after_run: wait until this many proposals are waiting (default 1)
 agents:
   reviewer:
     skills: [code-review, pdf]   # library skills by name, or Claude Code built-ins
@@ -217,7 +219,8 @@ outside the repository, and its own git repository (so every change has an autho
 can read it (it is added as a readable folder) and its system prompt lists the notes. Members other than the
 curator get a `propose_brain_note` tool; their file tools are blocked from the brain, and the shell sandbox
 cannot write there. The curator may edit the brain directly. With `curate: after_run`, the curator reviews
-pending proposals at the end of every run, merging accepted ones into notes and recording a decision for each.
+pending proposals at the end of a run, merging accepted ones into notes and recording a decision for each.
+Each review is a session of its own, so `min_proposals` lets proposals collect over several runs first.
 
 ### How the pieces fit
 
@@ -450,6 +453,19 @@ Spend and tokens update while members work, not only when a turn ends. Every few
 its running total (`agent.usage`: tokens from the responses streamed so far, priced at Claude's list prices or at the
 prices set for a provider's model). Only the latest total per member and run is kept. When the turn ends, Claude
 Code's exact figure replaces the estimate. Home, the sidebar, runs and the Office all show the running figures.
+
+## Saving tokens
+
+- **Effort per role.** Lower effort means less thinking, fewer tool calls and shorter answers. The templates run
+  reviewers and testers at `medium`; planners and builders keep the model's default.
+- **Prompt cache.** Claude reads a cached conversation at a tenth of the input price. Claude Code keeps the cache
+  for an hour on a subscription and for 5 minutes on an API key, so on an API key a member that picks up its
+  session after a long wait (a fix round after a review, a chat later) pays to cache its whole conversation again.
+  `cache_ttl: 1h` costs more per cache write (2× input instead of 1.25×) and avoids that. It applies only to
+  Anthropic's API; members on other providers are left alone.
+- **Batched brain reviews.** `brain.min_proposals` (Team settings → Project brain → "once 5 or more are waiting").
+- **Cache hit rate.** Home shows how much of what members sent was read from the cache. A low rate on a busy
+  setup usually means caches expire between turns.
 
 ## Events
 

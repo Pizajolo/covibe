@@ -464,6 +464,7 @@ function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, o
         <section className="form-section">
           <h3>Connection</h3>
           <BackendFields backend={backend} allowDefault onChange={(v) => void edit([{ op: 'set', path: p('backend'), value: v }])} />
+          <CacheTtlField value={agent.cache_ttl} inherit="Team default" onChange={(v) => void edit([{ op: 'set', path: p('cache_ttl'), value: v }])} />
         </section>
         <section className="form-section">
           <h3>Limits</h3>
@@ -578,6 +579,26 @@ function providerOf(backend: Doc | undefined): { id: string; model?: string } | 
 }
 
 const providerBackend = (c: ProviderChoice) => ({ type: 'connection', connection: c.id, model: c.model });
+
+const BATCH_PROPOSALS = 5;
+
+/** How long Claude keeps a member's prompt cache (team default or one member). */
+function CacheTtlField({ value, inherit, onChange }: { value: string | undefined; inherit: string; onChange: (v: string | null) => void }) {
+  return (
+    <label className="field">
+      Prompt cache
+      <select className="input" value={value ?? ''} onChange={(e) => onChange(e.target.value || null)}>
+        <option value="">{inherit}</option>
+        <option value="1h">1 hour</option>
+        <option value="5m">5 minutes</option>
+      </select>
+      <span className="help">
+        How long Claude keeps a member's conversation cached. 1 hour costs more per cache write but saves re-reading the whole conversation when a member
+        picks up again after a long wait (a fix round after a review, a chat later). Worth it for API-key teams with fix loops; Anthropic's API only.
+      </span>
+    </label>
+  );
+}
 
 function BackendFields({ backend, onChange, allowDefault }: { backend: Doc | undefined; onChange: (v: Doc | null) => void; allowDefault?: boolean }) {
   const type = backend?.type ?? '';
@@ -1250,6 +1271,7 @@ function TeamSettings({ doc, edit }: { doc: Doc; edit: Edit }) {
         <section className="form-section">
           <h3>Connection for every member</h3>
           <BackendFields backend={d.backend ?? { type: 'subscription' }} onChange={(v) => void edit([{ op: 'set', path: ['defaults', 'backend'], value: v }])} />
+          <CacheTtlField value={d.cache_ttl} inherit="Automatic: 1 hour on your subscription, 5 minutes on an API key" onChange={(v) => void edit([{ op: 'set', path: ['defaults', 'cache_ttl'], value: v }])} />
         </section>
         <section className="form-section">
           <h3>Where members work</h3>
@@ -1276,7 +1298,7 @@ function TeamSettings({ doc, edit }: { doc: Doc; edit: Edit }) {
           <div className="row wrap">
             <label className="field" style={{ minWidth: 220 }}>
               Curator
-              <select className="input" value={doc.brain?.curator ?? ''} onChange={(e) => void edit([{ op: 'set', path: ['brain'], value: e.target.value ? { curator: e.target.value, ...(doc.brain?.curate ? { curate: doc.brain.curate } : {}) } : null }])}>
+              <select className="input" value={doc.brain?.curator ?? ''} onChange={(e) => void edit([{ op: 'set', path: ['brain'], value: e.target.value ? { ...doc.brain, curator: e.target.value } : null }])}>
                 <option value="">Nobody: I review proposals myself</option>
                 {Object.keys(doc.agents ?? {}).map((a) => (
                   <option key={a} value={a}>
@@ -1288,10 +1310,20 @@ function TeamSettings({ doc, edit }: { doc: Doc; edit: Edit }) {
             {doc.brain?.curator && (
               <label className="field" style={{ minWidth: 220 }}>
                 When it reviews proposals
-                <select className="input" value={doc.brain?.curate ?? 'after_run'} onChange={(e) => void edit([{ op: 'set', path: ['brain', 'curate'], value: e.target.value }])}>
-                  <option value="after_run">At the end of every run</option>
+                <select
+                  className="input"
+                  value={doc.brain?.curate === 'manual' ? 'manual' : (doc.brain?.min_proposals ?? 1) > 1 ? 'batch' : 'after_run'}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    const { curate: _c, min_proposals: _m, ...rest } = doc.brain ?? {};
+                    void edit([{ op: 'set', path: ['brain'], value: { ...rest, ...(v === 'manual' ? { curate: 'manual' } : v === 'batch' ? { curate: 'after_run', min_proposals: BATCH_PROPOSALS } : {}) } }]);
+                  }}
+                >
+                  <option value="after_run">After every run with new proposals</option>
+                  <option value="batch">After a run, once {BATCH_PROPOSALS} or more are waiting</option>
                   <option value="manual">Only when I ask</option>
                 </select>
+                <span className="help">Each review is a session of its own; batching proposals saves tokens.</span>
               </label>
             )}
           </div>

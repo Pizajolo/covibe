@@ -1,6 +1,6 @@
 import { BarChart, HBars, Meter } from '../components/charts';
 import { Composer } from '../components/Composer';
-import { IconBolt, IconCheck, IconCoin, IconFolder, IconGauge, IconInfo, IconPlus, IconTeam } from '../components/icons';
+import { IconBolt, IconCheck, IconCoin, IconFolder, IconGauge, IconInfo, IconLoop, IconPlus, IconTeam } from '../components/icons';
 import { RunCard, RunRow } from '../components/RunCard';
 import { Toolbar } from '../components/Toolbar';
 import { UsageMeters, useUsage } from '../components/Usage';
@@ -55,6 +55,7 @@ export function Home({ onNewGoal }: { onNewGoal: () => void }) {
               value={String(stats.runs.total)}
               foot={`${stats.runs.succeeded} succeeded · ${stats.runs.escalated} need you · ${stats.runs.failed} failed`}
             />
+            <CacheTile tokens={stats.tokens} />
             <Tile
               icon={<IconGauge />}
               label="Gates passed first time"
@@ -203,6 +204,29 @@ export function Home({ onNewGoal }: { onNewGoal: () => void }) {
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * How much of what members sent was read back from Claude's prompt cache
+ * (a tenth of the input price) instead of being processed again.
+ */
+function CacheTile({ tokens: t }: { tokens: { input: number; cacheRead: number; cacheWrite: number } }) {
+  const sent = t.input + t.cacheRead + t.cacheWrite;
+  const rate = sent ? t.cacheRead / sent : undefined;
+  return (
+    <Tile
+      icon={<IconLoop />}
+      label="Read from cache"
+      value={rate === undefined ? '—' : `${Math.round(rate * 100)}%`}
+      foot={
+        rate === undefined
+          ? 'of input tokens, once members have worked'
+          : rate < 0.5 && sent > 200_000
+            ? 'of input tokens in 60 days: low; long waits between turns lose the cache (Team → Prompt cache)'
+            : `of ${tokens(sent)} input tokens in the last 60 days`
+      }
+    />
   );
 }
 

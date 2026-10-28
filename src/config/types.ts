@@ -21,6 +21,8 @@ export interface BackendConfig {
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 /** Extended thinking: Claude decides (adaptive), none, or a fixed token budget. */
 export type Thinking = 'adaptive' | 'off' | number;
+/** How long Claude keeps a member's prompt cache. */
+export type CacheTtl = '5m' | '1h';
 
 export interface Limits {
   max_turns: number;
@@ -50,6 +52,8 @@ export interface AgentConfig {
   /** Unset = the model's default. */
   effort?: Effort;
   thinking?: Thinking;
+  /** Unset = Claude Code decides (1 hour on a subscription, 5 minutes on an API key). */
+  cacheTtl?: CacheTtl;
   tools: string[];
   canMessage: string[];
   /** Globs relative to the repo root. `undefined` = whole worktree, `[]` = nothing. */
@@ -68,6 +72,8 @@ export interface AgentConfig {
 export interface BrainConfig {
   curator?: string;
   curate: 'after_run' | 'manual';
+  /** With after_run: review once at least this many proposals are waiting. */
+  minProposals: number;
 }
 
 export interface GateFailPolicy {

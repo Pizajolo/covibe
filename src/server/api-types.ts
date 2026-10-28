@@ -317,7 +317,7 @@ export interface ConnectionsInfo {
 
 export interface Stats {
   costUsd: { today: number; week: number; month: number; all: number };
-  tokens: { today: number; week: number; all: number; input: number; output: number; cacheRead: number };
+  tokens: { today: number; week: number; all: number; input: number; output: number; cacheRead: number; cacheWrite: number };
   runs: { total: number; running: number; succeeded: number; escalated: number; failed: number; questions: number };
   activeAgents: number;
   /** Last 14 days, oldest first. */
