@@ -314,8 +314,8 @@ export interface UsageWindow {
 
 /** The plan's limits as the app shows them (sidebar, Home, run countdowns). */
 export interface UsageReport {
-  /** "claude": read from Claude Code like /usage does; "runs": the last values members' turns reported; "none": nothing known yet. */
-  source: 'claude' | 'runs' | 'none';
+  /** "claude": read from Claude Code like /usage does; "codex": read from the ChatGPT account; "runs": the last values members' turns reported; "none": nothing known yet. */
+  source: 'claude' | 'codex' | 'runs' | 'none';
   subscription?: string;
   windows: {
     window: string;
@@ -329,20 +329,22 @@ export interface UsageReport {
   }[];
   extra?: { enabled: boolean; limit: number | null; used: number | null; utilization: number | null; currency?: string };
   checkedAt: string;
-  /** Your other Claude accounts (Settings → Advanced); the fields above are your own login's. */
+  /** Your other Claude accounts and your ChatGPT accounts (Settings → Advanced); the fields above are your own login's. */
   accounts?: AccountUsage[];
-  /** Members share work across the accounts. */
+  /** Members share work across the Claude accounts. */
   balance?: boolean;
 }
 
 export interface AccountUsage {
   id: string;
   label: string;
+  /** A Claude account, or a ChatGPT account (Codex). */
+  kind: 'claude' | 'codex';
   email?: string;
   usage: Omit<UsageReport, 'accounts' | 'balance'>;
 }
 
-/** A Claude account's sign-in, as Claude Code reports it. */
+/** A Claude account's sign-in, as Claude Code reports it; a ChatGPT account's, from its tokens (subscriptionType is the ChatGPT plan). */
 export interface AccountInfo {
   loggedIn: boolean;
   email?: string;

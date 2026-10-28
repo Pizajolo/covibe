@@ -28,7 +28,8 @@ import {
   updateSkill,
   writeSkillFile,
 } from '../skills.js';
-import { ConnectionError, Connections, listModels, startLogin, type NewConnection } from '../connections/store.js';
+import { CodexAuthError } from '../connections/codex-auth.js';
+import { ConnectionError, Connections, listModels, openInBrowser, startLogin, type NewConnection } from '../connections/store.js';
 import { MAIN_ACCOUNT, type ProviderModel } from '../connections/types.js';
 import { backendEnv, BackendError } from '../runner/backend.js';
 import type { EnvironmentInfo, PlanUsage } from '../runner/types.js';
@@ -123,16 +124,27 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   };
   // Plan usage from Claude Code, read at most once a minute per account (each read starts a Claude Code process).
   const planUsage = (fresh = false): Promise<PlanUsage | undefined> => connections.usage(MAIN_ACCOUNT, fresh);
-  /** Your login's limits, plus every other Claude account's. */
+  /** Your login's limits, plus every other Claude account's and every ChatGPT account's. */
   const usageAll = async (fresh = false): Promise<UsageReport> => {
     const fromRuns = stats().usage;
     const main = usageReport(await planUsage(fresh), fromRuns);
-    const accounts = await Promise.all(
+    const claude = await Promise.all(
       connections.accounts().map(async (a) => {
         const [plan, info] = await Promise.all([connections.usage(a.id, fresh), accountInfo(a.id)]);
-        return { id: a.id, label: a.label, ...(info.email ? { email: info.email } : {}), usage: usageReport(plan, fromRuns, new Date(), a.id) };
+        return { id: a.id, label: a.label, kind: 'claude' as const, ...(info.email ? { email: info.email } : {}), usage: usageReport(plan, fromRuns, new Date(), a.id) };
       }),
     );
+    const codex = await Promise.all(
+      connections
+        .list()
+        .filter((c) => c.kind === 'codex')
+        .map(async (c) => {
+          const info = connections.codexInfo(c.id);
+          const plan = info.loggedIn ? await connections.usage(c.id, fresh) : undefined;
+          return { id: c.id, label: c.label, kind: 'codex' as const, ...(info.email ? { email: info.email } : {}), usage: usageReport(plan, [], new Date(), c.id, 'codex') };
+        }),
+    );
+    const accounts = [...claude, ...codex];
     return accounts.length ? { ...main, accounts, balance: connections.balance } : main;
   };
   // Who each extra account is signed in as: `claude auth status`, then the account details Claude Code reports.
@@ -157,7 +169,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   };
   const connectionsInfo = async (): Promise<ConnectionsInfo> => {
     const env = await discover();
-    const views = await Promise.all(connections.views().map(async (c) => (c.kind === 'claude' ? { ...c, account: await accountInfo(c.id) } : c)));
+    const views = await Promise.all(
+      connections.views().map(async (c) => (c.kind === 'claude' ? { ...c, account: await accountInfo(c.id) } : c.kind === 'codex' ? { ...c, account: connections.codexInfo(c.id) } : c)),
+    );
     const main: AccountInfo = { loggedIn: !!env.account, ...env.account };
     return { connections: views, main, balance: connections.balance, secretStore: connections.secrets.kind };
   };
@@ -165,7 +179,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const connectionsNote = (): string => {
     const lines = ['# Accounts and providers', '- Your own Claude login: { type: subscription }'];
     for (const c of connections.list()) {
+      const models = (c.models ?? []).map((m) => m.id).join(', ') || 'no models yet';
       if (c.kind === 'claude') lines.push(`- Claude account "${c.label}": { type: subscription, account: ${c.id} }`);
+      else if (c.kind === 'codex') lines.push(`- ChatGPT account "${c.label}" (OpenAI models on the ChatGPT plan, with Claude Code's tools): { type: connection, connection: ${c.id}, model: <one of ${models}> }`);
       else lines.push(`- ${c.label} (${c.kind === 'anthropic' ? 'Anthropic-compatible' : 'OpenAI-compatible'}): { type: connection, connection: ${c.id}, model: <one of ${(c.models ?? []).map((m) => m.id).join(', ') || 'no models yet'}> }`);
     }
     if (connections.balance) lines.push('Sharing across Claude accounts is on: members with { type: subscription } and no account use whichever account has room.');
@@ -514,10 +530,21 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const c = connections.get(p.id!);
       if (!c) throw new NotFound(`no connection "${p.id}"`);
       infoCache.delete(c.id);
+      if (c.kind === 'codex') {
+        // The browser does the sign-in; the app watches the account until it shows up.
+        const { url } = await connections.codexSignIn(c.id);
+        return { url, opened: await openInBrowser(url) };
+      }
       return startLogin(c);
     }],
+    ['GET', '/api/connections/:id/login', (p) => {
+      if (connections.get(p.id!)?.kind !== 'codex') throw new NotFound(`no ChatGPT account "${p.id}"`);
+      return { ...connections.codexSignInState(p.id!), account: connections.codexInfo(p.id!) };
+    }],
     ['GET', '/api/connections/:id/account', (p, _b, q) => {
-      if (connections.get(p.id!)?.kind !== 'claude') throw new NotFound(`no Claude account "${p.id}"`);
+      const kind = connections.get(p.id!)?.kind;
+      if (kind === 'codex') return connections.codexInfo(p.id!);
+      if (kind !== 'claude') throw new NotFound(`no Claude or ChatGPT account "${p.id}"`);
       return accountInfo(p.id!, q.get('fresh') === '1');
     }],
     // The models a provider offers: for a saved connection (its stored key), or for one being set up.
@@ -525,6 +552,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const b = body as { id?: string; kind?: string; baseUrl?: string; apiKey?: string };
       const saved = b.id ? connections.get(b.id) : undefined;
       const kind = (saved?.kind ?? b.kind) as string;
+      if (saved?.kind === 'codex') return { models: await connections.codexModels(saved.id) };
       if (kind !== 'anthropic' && kind !== 'openai') throw new BadRequest('"kind" is anthropic or openai');
       return { models: await listModels(kind, b.baseUrl ?? saved?.baseUrl ?? '', b.apiKey || (saved ? connections.key(saved.id) : undefined)) };
     }],
@@ -965,7 +993,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           ? 409
           : err instanceof NotFound
             ? 404
-            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof BrainError || err instanceof ConnectionError || err instanceof BackendError
+            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof BackendError
               ? 400
               : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;

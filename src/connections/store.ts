@@ -7,6 +7,7 @@ import type { BackendConfig } from '../config/types.js';
 import { covibeHome } from '../home.js';
 import { backendEnv, BackendError, type BackendEnv, type BackendResolver, type Env, type Link } from '../runner/backend.js';
 import type { PlanUsage } from '../runner/types.js';
+import { CODEX_ENDPOINTS, CODEX_MODELS, CodexAuth, planUsageFromHeaders, startCodexLogin, type CodexEndpoints, type CodexIdentity, type CodexLogin } from './codex-auth.js';
 import { OpenAiTranslator } from './openai-proxy.js';
 import { defaultSecrets, type SecretStore } from './secrets.js';
 import { MAIN_ACCOUNT, type Connection, type ConnectionKind, type ConnectionsFile, type ConnectionView, type Pricing, type ProviderModel } from './types.js';
@@ -32,7 +33,7 @@ export function mainConfigDir(parent: Env = process.env): string {
   return parent.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
 }
 
-/** The folder that holds the extra accounts' Claude Code config folders. */
+/** The folder that holds the extra accounts' folders: Claude Code config folders, and ChatGPT accounts' sign-ins. */
 export function accountsRoot(home = covibeHome()): string {
   return join(home, 'accounts');
 }
@@ -60,10 +61,10 @@ const frac = (u: PlanUsage | undefined, w: string) => {
 /**
  * The connections from Settings → Advanced, shared by the app and the CLI:
  * ~/.covibe/connections.json for the list, the Keychain (or a private file)
- * for keys, ~/.covibe/accounts/<id> for each extra Claude account's login.
- * It also turns team backends into agent environments, starting the OpenAI
- * translator when a member needs it, and spreads members across Claude
- * accounts when balancing is on.
+ * for keys, ~/.covibe/accounts/<id> for each extra Claude account's login and
+ * each ChatGPT account's sign-in. It also turns team backends into agent
+ * environments, starting the OpenAI translator when a member needs it, and
+ * spreads members across Claude accounts when balancing is on.
  */
 export class Connections implements BackendResolver {
   private readonly file: string;
@@ -75,10 +76,17 @@ export class Connections implements BackendResolver {
   private readonly usageCache = new Map<string, { at: number; value: Promise<PlanUsage | undefined> }>();
   /** Reads an account's plan usage (the runner's usage()); set by the app and the CLI. */
   usageReader?: (env: Env) => Promise<PlanUsage>;
+  private readonly codexAuths = new Map<string, CodexAuth>();
+  /** The ChatGPT sign-in in progress (one at a time: they share the callback port). */
+  private codexLogin?: { id: string; login: CodexLogin };
+  /** How each account's last sign-in ended, for the app to show. */
+  private readonly codexLoginEnded = new Map<string, { error?: string }>();
 
   constructor(
     readonly home = covibeHome(),
     readonly secrets: SecretStore = defaultSecrets(home),
+    /** Where ChatGPT accounts sign in and send requests (tests point these at a fake). */
+    readonly codexEndpoints: CodexEndpoints = CODEX_ENDPOINTS,
   ) {
     this.file = join(home, 'connections.json');
     mkdirSync(home, { recursive: true });
@@ -102,7 +110,7 @@ export class Connections implements BackendResolver {
   }
 
   views(): ConnectionView[] {
-    return this.list().map((c) => ({ ...c, hasKey: c.kind !== 'claude' && !!this.secrets.get(c.id) }));
+    return this.list().map((c) => ({ ...c, hasKey: c.kind === 'codex' ? this.codex(c).signedIn() : c.kind !== 'claude' && !!this.secrets.get(c.id) }));
   }
 
   get(id: string): Connection | undefined {
@@ -125,7 +133,7 @@ export class Connections implements BackendResolver {
     const all = this.read();
     const label = input.label?.trim();
     if (!label) throw new ConnectionError('a name is required');
-    if (!['claude', 'anthropic', 'openai'].includes(input.kind)) throw new ConnectionError(`unknown kind "${input.kind}"`);
+    if (!['claude', 'anthropic', 'openai', 'codex'].includes(input.kind)) throw new ConnectionError(`unknown kind "${input.kind}"`);
     const id = input.id ?? uniqueId(slug(label), new Set(all.connections.map((c) => c.id)));
     if (!ID.test(id)) throw new ConnectionError('the id takes lowercase letters, digits, - and _, starting with a letter');
     if (id === MAIN_ACCOUNT) throw new ConnectionError(`"${MAIN_ACCOUNT}" stands for your own claude login; pick another id`);
@@ -134,11 +142,17 @@ export class Connections implements BackendResolver {
     if (input.kind === 'claude') {
       c.configDir = join(accountsRoot(this.home), id);
       mkdirSync(c.configDir, { recursive: true });
+    } else if (input.kind === 'codex') {
+      // Signed in from the browser (codexSignIn), not with a key; the account's models replace these once it is.
+      c.configDir = join(accountsRoot(this.home), id);
+      mkdirSync(c.configDir, { recursive: true, mode: 0o700 });
+      c.baseUrl = this.codexEndpoints.baseUrl;
+      c.models = cleanModels(input.models?.length ? input.models : CODEX_MODELS);
     } else {
       c.baseUrl = checkUrl(input.baseUrl);
       c.models = cleanModels(input.models ?? []);
     }
-    if (input.apiKey && input.kind !== 'claude') this.secrets.set(id, input.apiKey.trim());
+    if (input.apiKey && input.kind !== 'claude' && input.kind !== 'codex') this.secrets.set(id, input.apiKey.trim());
     this.write({ ...all, connections: [...all.connections, c] });
     return c;
   }
@@ -151,7 +165,9 @@ export class Connections implements BackendResolver {
       if (!patch.label.trim()) throw new ConnectionError('a name is required');
       c.label = patch.label.trim();
     }
-    if (c.kind !== 'claude') {
+    if (c.kind === 'codex') {
+      if (patch.models !== undefined) c.models = cleanModels(patch.models);
+    } else if (c.kind !== 'claude') {
       if (patch.baseUrl !== undefined) c.baseUrl = checkUrl(patch.baseUrl);
       if (patch.models !== undefined) c.models = cleanModels(patch.models);
       if (patch.apiKey === null) this.secrets.delete(id);
@@ -169,6 +185,12 @@ export class Connections implements BackendResolver {
     if (c.kind === 'claude' && c.configDir) {
       await exec('claude', ['auth', 'logout'], { env: { ...backendEnv({ type: 'subscription' }).env, CLAUDE_CONFIG_DIR: c.configDir }, timeout: 20_000 }).catch(() => undefined);
       if (c.configDir.startsWith(accountsRoot(this.home))) rmSync(c.configDir, { recursive: true, force: true });
+    } else if (c.kind === 'codex') {
+      if (this.codexLogin?.id === id) this.codexLogin.login.cancel();
+      await this.codex(c).signOut();
+      if (c.configDir?.startsWith(accountsRoot(this.home))) rmSync(c.configDir, { recursive: true, force: true });
+      this.codexAuths.delete(id);
+      this.usageCache.delete(id);
     } else this.secrets.delete(id);
     this.write({ ...all, connections: all.connections.filter((x) => x.id !== id) });
   }
@@ -190,6 +212,7 @@ export class Connections implements BackendResolver {
     if (backend.type !== 'connection') return undefined;
     const c = backend.connection ? this.get(backend.connection) : undefined;
     if (!c || c.kind === 'claude') throw new BackendError(`connection "${backend.connection}" is not set up (Settings → Advanced)`);
+    if (c.kind === 'codex' && !this.codex(c).signedIn()) throw new BackendError(`ChatGPT account "${c.id}" is not signed in (Settings → Advanced)`);
     const model = c.models?.find((m) => m.id === backend.model);
     const common = { model: backend.model, maxOutput: model?.maxOutput, pricing: model?.price };
     if (c.kind === 'anthropic') {
@@ -202,7 +225,8 @@ export class Connections implements BackendResolver {
 
   async resolve(backend: BackendConfig, parent: Env = process.env): Promise<BackendEnv> {
     const built = backendEnv(backend, parent, await this.link(backend));
-    if (backend.type === 'connection' && !built.pricing) {
+    // A ChatGPT plan is not paid per token: no price is not a mistake there.
+    if (backend.type === 'connection' && !built.pricing && this.get(backend.connection ?? '')?.kind !== 'codex') {
       built.warnings.push(`no price set for ${backend.model ?? 'this model'} on ${backend.connection}; its spend shows as $0 (Settings → Advanced).`);
     }
     return built;
@@ -217,14 +241,31 @@ export class Connections implements BackendResolver {
       const c = backend.connection ? this.get(backend.connection) : undefined;
       if (!c || c.kind === 'claude') throw new BackendError(`connection "${backend.connection}" is not set up (Settings → Advanced)`);
       if (!backend.model) throw new BackendError(`connection "${backend.connection}": no model chosen`);
+      if (c.kind === 'codex' && !this.codex(c).signedIn()) throw new BackendError(`ChatGPT account "${c.id}" is not signed in (Settings → Advanced)`);
     }
   }
 
   private async openai(): Promise<OpenAiTranslator> {
     this.translator ??= new OpenAiTranslator((id) => {
       const c = this.get(id);
-      if (!c || c.kind !== 'openai' || !c.baseUrl) return undefined;
-      return { baseUrl: c.baseUrl, key: this.key(id), maxOutput: (m) => c.models?.find((x) => x.id === m)?.maxOutput };
+      if (!c || (c.kind !== 'openai' && c.kind !== 'codex') || !c.baseUrl) return undefined;
+      const maxOutput = (m: string) => c.models?.find((x) => x.id === m)?.maxOutput;
+      if (c.kind === 'openai') return { baseUrl: c.baseUrl, key: this.key(id), maxOutput };
+      const auth = this.codex(c);
+      return {
+        baseUrl: c.baseUrl,
+        maxOutput,
+        codex: {
+          headers: (force) => auth.headers(force),
+          efforts: (m) => c.models?.find((x) => x.id === m)?.efforts,
+          // Every answer says how much of the plan is used; keep it for the usage meters.
+          seen: (headers) => {
+            const u = planUsageFromHeaders(headers);
+            if (u) this.usageCache.set(id, { at: Date.now(), value: Promise.resolve({ ...u, subscription: auth.identity()?.plan }) });
+          },
+          limited: () => this.usageCache.delete(id),
+        },
+      };
     });
     await this.translator.start();
     return this.translator;
@@ -233,6 +274,79 @@ export class Connections implements BackendResolver {
   async close(): Promise<void> {
     await this.translator?.close();
     this.translator = undefined;
+  }
+
+  // ---- ChatGPT accounts
+
+  /** A ChatGPT account's sign-in. */
+  codex(c: Connection): CodexAuth {
+    if (c.kind !== 'codex' || !c.configDir) throw new ConnectionError(`${c.id} is not a ChatGPT account`);
+    let auth = this.codexAuths.get(c.id);
+    if (!auth) this.codexAuths.set(c.id, (auth = new CodexAuth(c.configDir, this.codexEndpoints)));
+    return auth;
+  }
+
+  /** Who a ChatGPT account is signed in as. */
+  codexInfo(id: string): { loggedIn: boolean; email?: string; subscriptionType?: string } {
+    const c = this.get(id);
+    if (!c || c.kind !== 'codex') throw new ConnectionError(`no ChatGPT account "${id}"`);
+    const auth = this.codex(c);
+    if (!auth.signedIn()) return { loggedIn: false };
+    const who: CodexIdentity = auth.identity() ?? {};
+    return { loggedIn: true, ...(who.email ? { email: who.email } : {}), ...(who.plan ? { subscriptionType: who.plan } : {}) };
+  }
+
+  /**
+   * Start signing a ChatGPT account in: returns the page to open in a
+   * browser. When the sign-in finishes, the account's own model list
+   * replaces the one it was added with (prices and caps set by hand stay).
+   */
+  async codexSignIn(id: string): Promise<{ url: string; done: Promise<CodexIdentity> }> {
+    const c = this.get(id);
+    if (!c || c.kind !== 'codex') throw new ConnectionError(`no ChatGPT account "${id}"`);
+    this.codexLogin?.login.cancel();
+    const login = await startCodexLogin(this.codex(c));
+    this.codexLogin = { id, login };
+    this.codexLoginEnded.delete(id);
+    const done = login.done.then(async (who) => {
+      this.usageCache.delete(id);
+      const models = await this.codexModels(id).catch(() => undefined);
+      if (models?.length) {
+        const kept = new Map((this.get(id)?.models ?? []).map((m) => [m.id, m]));
+        this.update(id, { models: models.map((m) => ({ ...kept.get(m.id), ...m })) });
+      }
+      return who;
+    });
+    void done.then(
+      () => this.codexLoginEnded.set(id, {}),
+      (err: Error) => this.codexLoginEnded.set(id, { error: err.message }),
+    ).finally(() => {
+      if (this.codexLogin?.login === login) this.codexLogin = undefined;
+    });
+    return { url: login.url, done };
+  }
+
+  /** Whether a ChatGPT account's sign-in is still waiting for the browser, and how the last one ended. */
+  codexSignInState(id: string): { pending: boolean; error?: string } {
+    if (this.codexLogin?.id === id) return { pending: true };
+    return { pending: false, ...this.codexLoginEnded.get(id) };
+  }
+
+  /** The models a ChatGPT account may use, from the account. */
+  codexModels(id: string): Promise<ProviderModel[]> {
+    const c = this.get(id);
+    if (!c || c.kind !== 'codex') throw new ConnectionError(`no ChatGPT account "${id}"`);
+    return this.codex(c).models();
+  }
+
+  private async codexUsage(c: Connection): Promise<PlanUsage | undefined> {
+    const auth = this.codex(c);
+    if (!auth.signedIn()) return undefined;
+    try {
+      return await auth.usage();
+    } catch {
+      return { available: false, windows: [], ...(auth.identity()?.plan ? { subscription: auth.identity()!.plan } : {}) };
+    }
   }
 
   // ---- accounts: usage and balancing
@@ -245,10 +359,11 @@ export class Connections implements BackendResolver {
 
   /** An account's plan usage, read at most once a minute. */
   usage(account: string, fresh = false): Promise<PlanUsage | undefined> {
-    if (!this.usageReader) return Promise.resolve(undefined);
+    const codex = account === MAIN_ACCOUNT ? undefined : this.get(account);
+    if (!this.usageReader && codex?.kind !== 'codex') return Promise.resolve(undefined);
     const cached = this.usageCache.get(account);
     if (!fresh && cached && Date.now() - cached.at < 60_000) return cached.value;
-    const value = this.usageReader(this.accountEnv(account)).catch(() => undefined);
+    const value = codex?.kind === 'codex' ? this.codexUsage(codex) : this.usageReader!(this.accountEnv(account)).catch(() => undefined);
     this.usageCache.set(account, { at: Date.now(), value });
     return value;
   }
@@ -341,6 +456,8 @@ function cleanModels(models: ProviderModel[]): ProviderModel[] {
     const price = cleanPrice(m.price);
     if (price) model.price = price;
     if (m.maxOutput && Number.isFinite(m.maxOutput) && m.maxOutput > 0) model.maxOutput = Math.round(m.maxOutput);
+    const efforts = Array.isArray(m.efforts) ? m.efforts.filter((e): e is string => typeof e === 'string' && /^[a-z]+$/.test(e)) : [];
+    if (efforts.length) model.efforts = [...new Set(efforts)];
     out.push(model);
   }
   return out;
@@ -385,6 +502,15 @@ export async function listModels(kind: 'anthropic' | 'openai', baseUrl: string, 
   }
   const body = (await res.json().catch(() => ({}))) as { data?: { id?: string; display_name?: string; name?: string }[] };
   return (body.data ?? []).filter((m) => typeof m.id === 'string').map((m) => ({ id: m.id!, ...(m.display_name || m.name ? { name: m.display_name ?? m.name } : {}) }));
+}
+
+/** Open a page in the default browser; false when that fails (the app then shows the link to open by hand). */
+export async function openInBrowser(url: string): Promise<boolean> {
+  const [cmd, args] = process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : ['xdg-open', [url]];
+  return exec(cmd, args, { timeout: 10_000 }).then(
+    () => true,
+    () => false,
+  );
 }
 
 /** The shell command that signs a Claude account in, in its own config folder. */

@@ -637,7 +637,7 @@ function BackendFields({ backend, onChange, allowDefault }: { backend: Doc | und
       >
         {allowDefault && <option value="">Team default</option>}
         <option value="subscription">Claude subscription</option>
-        {(providers.length > 0 || type === 'connection') && <option value="connection">Another provider (Settings → Advanced)</option>}
+        {(providers.length > 0 || type === 'connection') && <option value="connection">ChatGPT account or another provider (Settings → Advanced)</option>}
         <option value="api_key">API key</option>
         <option value="gateway">Gateway (LiteLLM / proxy)</option>
         <option value="bedrock">Amazon Bedrock</option>
@@ -663,7 +663,7 @@ function BackendFields({ backend, onChange, allowDefault }: { backend: Doc | und
       {type === 'connection' && (
         <>
           <label className="field">
-            Provider
+            {providers.some((c) => c.kind === 'codex') ? 'Account or provider' : 'Provider'}
             <select className="input" value={backend?.connection ?? ''} onChange={(e) => {
               const c = providers.find((x) => x.id === e.target.value);
               onChange({ type: 'connection', connection: e.target.value, model: c?.models?.[0]?.id });
