@@ -19,6 +19,9 @@ export function tempRepo(): string {
   const git = (...args: string[]) =>
     execFileSync('git', args, { cwd: dir, stdio: 'ignore', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
   git('init', '-q', '-b', 'main');
+  // An identity of its own, like a user's checkout: CI runners have no global one.
+  git('config', 'user.name', 't');
+  git('config', 'user.email', 't@t');
   writeFileSync(join(dir, 'README.md'), '# app\n');
   git('add', '-A');
   git('commit', '-q', '-m', 'init');
