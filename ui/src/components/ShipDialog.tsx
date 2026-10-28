@@ -6,6 +6,7 @@ import { money } from '../format';
 import { PrDialog, useGit } from '../pages/GitView';
 import { IconBranch, IconCheck, IconUp } from './icons';
 import { Modal, useAction, useToast } from './ui';
+import { go } from '../data';
 
 const SEEN_KEY = 'covibe-shipped';
 
@@ -36,8 +37,15 @@ export function ShipDialog({ projectId, run, onClose }: { projectId: string; run
   const branch = run.branch!;
   const api = `/api/projects/${projectId}/git`;
 
+  const [conflicts, setConflicts] = useState<string[]>([]);
   const [merge, merging] = useAction(async () => {
-    await post(`${api}/merge`, { branch });
+    const out = await post<{ conflicts: string[] }>(`${api}/merge`, { branch });
+    if (out.conflicts.length) {
+      // The merge stays in progress in your checkout; the Git tab resolves or aborts it.
+      setConflicts(out.conflicts);
+      await reload();
+      return;
+    }
     const steps = [`Merged into ${g!.branch}`];
     if (pushAfter && g!.remotes.length) {
       await post(`${api}/push`, { branch: g!.branch });
@@ -81,6 +89,16 @@ export function ShipDialog({ projectId, run, onClose }: { projectId: string; run
           checkout is untouched until you merge it.
         </p>
         {error && <div className="banner bad small">{error}</div>}
+        {conflicts.length > 0 && (
+          <div className="banner warn small">
+            <div className="grow">
+              <strong>The merge stopped on conflicts</strong> in {conflicts.join(', ')}. It is still in progress in your checkout: resolve it (or abort it) in the project's Git tab, where the git helper can help.
+            </div>
+            <button className="btn sm" onClick={() => (onClose(), go('projects', projectId, 'git'))}>
+              Open Git
+            </button>
+          </div>
+        )}
         {!g ? (
           <span className="faint small">Reading the repository…</span>
         ) : !result ? (
@@ -100,7 +118,7 @@ export function ShipDialog({ projectId, run, onClose }: { projectId: string; run
                   </label>
                 )}
               </div>
-              <button className="btn primary" disabled={busy || !g.branch || merged} onClick={() => void merge()}>
+              <button className="btn primary" disabled={busy || !g.branch || merged || conflicts.length > 0 || !!g.operation} onClick={() => void merge()}>
                 {merged ? <IconCheck /> : null} {merged ? 'Merged' : 'Merge'}
               </button>
             </div>

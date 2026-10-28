@@ -468,17 +468,110 @@ export interface GitBranch {
   run: boolean;
 }
 
+export interface GitFile {
+  path: string;
+  /** Some of its change is staged (goes into the next commit). */
+  staged: boolean;
+  /** Some of its change is not staged yet (new files count as unstaged). */
+  unstaged: boolean;
+  state: 'modified' | 'added' | 'deleted' | 'renamed' | 'new' | 'conflict';
+  /** A renamed file's old path. */
+  from?: string;
+}
+
+export interface GitRemoteBranch {
+  /** As git names it: "origin/feature". */
+  name: string;
+  remote: string;
+  /** The branch's name on the remote: "feature". */
+  branch: string;
+  date: string;
+  sha: string;
+  subject: string;
+  /** A local branch tracks it. */
+  tracked: boolean;
+}
+
+/** A merge, rebase, cherry-pick, revert, bisect, or a stash that did not apply cleanly, still in progress. */
+export interface GitOperation {
+  kind: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'bisect' | 'stash';
+  subject: string;
+  /** Files with conflicts still to resolve. */
+  conflicts: string[];
+  /** What "current" and "incoming" mean for this operation (a rebase swaps them). */
+  labels: { current: string; incoming: string };
+  /** It can skip the commit it stopped at (rebase, cherry-pick, revert). */
+  canSkip: boolean;
+}
+
 export interface GitOverview {
   /** Checked-out branch; undefined when HEAD is detached. */
   branch?: string;
   detached: boolean;
+  /** The current commit; undefined before the first one. */
+  head?: string;
   /** Uncommitted changes. */
-  files: { path: string; staged: boolean; state: 'modified' | 'added' | 'deleted' | 'renamed' | 'new' | 'conflict' }[];
+  files: GitFile[];
   branches: GitBranch[];
+  /** Branches on the remotes ("origin/feature"). */
+  remoteBranches: GitRemoteBranch[];
   /** Recent commits of every branch (members' working branches left out), newest first. */
   commits: GitCommit[];
   remotes: { name: string; url: string; web?: string }[];
+  stashes: { index: number; ref: string; message: string; date: string }[];
+  tags: { name: string; sha: string }[];
+  operation?: GitOperation;
+  /** The name and email commits record; missing ones make commits fail. */
+  identity: { name?: string; email?: string };
+  /** When the remotes were last fetched. */
+  fetchedAt?: string;
   defaultBranch?: string;
   /** How pull requests are made: with gh, by opening the forge's page, or not at all (no remote). */
   pullRequests: 'gh' | 'browser' | 'none';
+}
+
+/** What kind of trouble a git command ran into (see gitops.ts problem()). */
+export type GitProblemKind =
+  | 'auth'
+  | 'network'
+  | 'lock'
+  | 'identity'
+  | 'signing'
+  | 'dirty'
+  | 'in_progress'
+  | 'conflict'
+  | 'diverged'
+  | 'rejected'
+  | 'no_upstream'
+  | 'no_remote'
+  | 'detached'
+  | 'unmerged'
+  | 'hook'
+  | 'nothing'
+  | 'timeout'
+  | 'not_found'
+  | 'invalid'
+  | 'other';
+
+/** One entry in a conversation with the git helper. */
+export type HelperItem =
+  | { id: number; ts: string; kind: 'human' | 'agent' | 'tool' | 'note' | 'error'; text: string }
+  /** A read-only command it ran by itself. */
+  | { id: number; ts: string; kind: 'command'; program: 'git' | 'gh'; args: string[]; ok: boolean; output: string }
+  /** A command that changes something, waiting for the person (or run, declined, or no longer waiting). */
+  | { id: number; ts: string; kind: 'proposal'; proposal: string; program: 'git' | 'gh'; args: string[]; why?: string; state: 'waiting' | 'ran' | 'skipped' | 'expired'; ok?: boolean; output?: string };
+
+export interface HelperDetail {
+  runId: string;
+  busy: boolean;
+  thread: HelperItem[];
+  costUsd: number;
+}
+
+/** The body of an error response from a git operation. */
+export interface GitProblemInfo {
+  kind: GitProblemKind;
+  hint?: string;
+  detail?: string;
+  command?: string;
 }

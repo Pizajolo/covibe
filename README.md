@@ -57,7 +57,7 @@ To try the UI in a browser instead, run `covibe app`.
 | **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, who it can ask for work, report format, connection, limits), **Workflow** (a drag-and-drop graph: drag steps to reorder, drag members onto a step or between steps, drag a gate's ↺ handle onto an earlier step to set where failed work goes back; plus forms for gates and the fix loop), **Team settings** (connection, sandbox, limits), **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
 | **Team chat** | Describe the team you need and an architect agent sets it up: it reads your project to fit the stack and folders, asks only if something important is unclear, and saves the team through a tool that refuses invalid files and hands the problems back to it. Keep talking to change it ("add a security reviewer", "use haiku for the tester"). Available in New project, New team, and every team's **Chat** tab. |
 | **Skills** | One library of skills for all teams: **write your own**, **add from GitHub** (a repository or a folder; private ones work if git can clone them), or install from **Anthropic's skills**. Claude Code's **built-in skills** are listed too. Give skills to a member, to every member of a team, or mark one **Everyone** to give it to all members of all teams. |
-| **Projects** | Each project has **Runs**, **Brain** and **Git** tabs. **Git** shows your checkout: the branch and whether it is pushed, uncommitted changes (commit them all with a message), branches (switch, merge into the current one, push, pull request) and a graph of recent commits on every branch (click one for its diff, and revert it with a new commit). Pull requests are created with the GitHub CLI when it is signed in; otherwise the branch is pushed and the forge's page opens. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
+| **Projects** | Each project has **Runs**, **Brain** and **Git** tabs. **Git** works with your checkout (see [The Git tab](#the-git-tab)): fetch, pull, push, stage and commit, stashes, branches local and on the remote, merges and rebases with conflicts resolved file by file, a commit graph to revert, cherry-pick, branch, tag or reset from, remotes, any git command, and a **git helper** to chat with when something is stuck. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
 | **Settings → Advanced** | Sign in more **Claude accounts** (each in its own Claude Code folder), turn on **sharing work across them**, sign in **ChatGPT accounts** (the sign-in Codex uses) to put members on OpenAI's models within your ChatGPT plan, and add **model providers** with an API key (DeepSeek, Moonshot, Z.ai, OpenAI, OpenRouter, Groq, a local Ollama, or any Anthropic- or OpenAI-compatible API). Their models then appear in every team's model list. See [Accounts and providers](#accounts-and-providers). |
 | **Brain** | The project's shared notes. Every member reads them before working and can **propose** additions; only the team's **curator** (or you) writes. Review proposals yourself (accept into a new or existing note, or reject) or ask the curator. Edit notes directly; every change is in the brain's own git history. |
 
@@ -447,6 +447,24 @@ can type an option's number.
 A member waits up to 7 days for an answer. Stopping the run cancels open questions; so does quitting the app or
 the terminal that runs it, since runs do not survive their process yet.
 
+## The Git tab
+
+Each project's **Git** tab works with your own checkout (runs never touch it; their results are on `covibe/…` branches).
+
+- **Where you stand.** The branch, how far it is ahead of and behind its remote branch, and when the remotes were last fetched; the tab fetches by itself when that was more than five minutes ago, so the numbers are real.
+- **Changes.** Tick files to stage them, click one for its diff, discard one or all, stash, commit what is staged (or everything), amend the last commit, or undo a commit you have not pushed yet.
+- **Branches.** Switch (uncommitted changes in the way can be stashed first), create one from any branch or commit, merge, rebase, rename, delete, push, open a pull request. Branches on the remote are listed too: switching to one makes a local branch that tracks it, and you can delete it on the remote.
+- **Pull and push.** Pull fast-forwards; when both sides have new commits it rebases yours on top, or merges. Uncommitted changes are put aside and brought back. A push the remote refuses offers to pull first, or a force push with lease (it refuses if someone pushed since your last fetch).
+- **Conflicts.** A merge, rebase, cherry-pick, revert or stash that stops on conflicts stays in progress: keep either side per file, or edit the file and mark it resolved, then continue (or skip a commit, or abort).
+- **History.** Click a commit to see it, revert it, cherry-pick it onto your branch, check it out, branch or tag from it, or reset your branch to it.
+- **Remotes and tags,** your name and email when git has none yet, and a box to **run any git command** in the checkout.
+
+**When something fails,** the tab says what went wrong in plain words and what to do, with the fix one click away (stash and switch, pull with rebase then push, remove a stale lock…), git's own output, and **Ask the git helper**.
+
+Git runs without a terminal, so it can never hang waiting for a password or an editor: sign-in problems come back as an explanation instead (for GitHub: `gh auth login` and `gh auth setup-git` once in a terminal). Reading the repository takes no locks, so refreshing the tab never trips up a commit, and a lock left by another git program is waited out (or, when it is stale, removed on request).
+
+**The git helper** is a chat beside the tab. It reads the repository by itself (status, log, diff, branches… and the state of the checkout comes with every message) and explains what is going on. Every command that would change something (the repository, your files or a remote) appears as a proposal with its reason; nothing runs until you click **Run it**. It may edit files only while they have merge conflicts, to resolve them.
+
 ## Requests between members
 
 The workflow is the backbone, but members can also call on each other when they want to. Give a member
@@ -571,7 +589,7 @@ All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event t
 `agent.started` `agent.text` `agent.tool` `agent.view` `agent.limited` `agent.finished` `agent.error` `scope.denied` `scope.violation`
 `git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit` `agent.usage`
 `workspace.cleaned` `brain.proposed` `brain.decided` `brain.updated` `team.saved` `question.asked`
-`question.escalated` `question.answered` `request.sent` `request.done` `run.paused` `run.resumed` `run.restart_scheduled` `run.restart_cancelled`
+`question.escalated` `question.answered` `request.sent` `request.done` `git.proposed` `git.ran` `git.skipped` `run.paused` `run.resumed` `run.restart_scheduled` `run.restart_cancelled`
 `run.restarted` `browser.opened` `browser.page` `browser.control` `browser.closed`
 
 `agent.finished` carries turns, estimated cost, duration, model and token counts; `usage.limit` carries the plan
@@ -603,7 +621,8 @@ src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.
 src/server/library.ts      projects and teams library, comment-preserving YAML edits
 src/server/projections.ts  events → run summaries, member status, board, chat threads, step reports and the plan, stats,
                            notifications, plan usage
-src/server/gitops.ts       git in the project's checkout: status, branches, graph, commit, merge, push, revert, PRs
+src/server/gitops.ts       git in the project's checkout: every operation the Git tab offers, run without a terminal, with failures explained
+src/server/git-helper.ts   the git helper: reads freely, proposes changes for you to run, edits only conflicted files
 ui/src/components/Office.tsx    the run as a pixel office (office-art.ts draws it, office-state.ts maps member states)
 src/main.ts                CLI
 ui/                        the app UI (React, Vite, CodeMirror)

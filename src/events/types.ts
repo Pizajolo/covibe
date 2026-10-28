@@ -4,7 +4,7 @@
 export type RunStatus = 'running' | 'succeeded' | 'failed' | 'escalated';
 
 /** A workflow run, or a read-only question session with one agent. */
-export type RunKind = 'workflow' | 'ask' | 'curate' | 'design';
+export type RunKind = 'workflow' | 'ask' | 'curate' | 'design' | 'git';
 
 export type EventType =
   | 'run.started'
@@ -40,6 +40,9 @@ export type EventType =
   | 'question.asked'
   | 'question.escalated'
   | 'question.answered'
+  | 'git.proposed'
+  | 'git.ran'
+  | 'git.skipped'
   | 'request.sent'
   | 'request.done'
   | 'run.paused'
