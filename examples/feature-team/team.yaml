@@ -29,6 +29,7 @@ agents:
     model: sonnet
     tools: &builder [Read, Edit, Write, Bash, Grep, Glob]
     scope: { write: ["web/**"] }
+    browser: true                   # checks its pages in covibe's browser; you can watch it live
     can_message: [backend]
     output_schema: schemas/build.json
 

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent } from '../src/runner/types.js';
+import { outputText, type AgentInvocation, type AgentResult, type AgentRunner, type AgentStreamEvent } from '../src/runner/types.js';
 
 export function tempDir(prefix = 'covibe-test-') {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -109,7 +109,7 @@ export class ScriptedRunner implements AgentRunner {
       await inv.beforeToolUse?.();
       let result: string;
       try {
-        result = await tool.run(c.args);
+        result = outputText(await tool.run(c.args));
       } catch (err) {
         result = `Error: ${(err as Error).message}`;
       }

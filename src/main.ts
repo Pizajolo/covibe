@@ -8,6 +8,7 @@ import { chat } from './engine/chat.js';
 import { cleanupWorktrees } from './engine/cleanup.js';
 import type { DeliveryMode, RunEvent } from './events/types.js';
 import { runTeam } from './engine/engine.js';
+import { browserHub } from './browser/hub.js';
 import { answerQuestion } from './engine/questions.js';
 import { EventStore } from './events/store.js';
 import { bold, dim, formatEvent, formatRun, green, QUIET_EVENTS, red, yellow } from './format.js';
@@ -106,6 +107,9 @@ export async function main(argv: string[]): Promise<number> {
     if (err instanceof ConfigError) console.error(red(err.message));
     else console.error(red(`error: ${(err as Error).message}`));
     return 1;
+  } finally {
+    // Members' browsers belong to this command; close them so the process can end.
+    await browserHub.shutdown();
   }
 }
 
@@ -138,7 +142,7 @@ function validate(file: string | undefined): number {
   console.log(`  team ${bold(team.name)}: ${Object.keys(team.agents).length} agents, ${team.steps.length} steps, isolation ${team.isolation}, max ${team.maxParallel} in parallel`);
   for (const a of Object.values(team.agents)) {
     const scope = a.writeScope === undefined ? (a.writes ? 'writes anywhere' : 'read-only') : a.writeScope.length ? `writes ${a.writeScope.join(', ')}` : 'read-only';
-    console.log(dim(`  - ${a.name.padEnd(12)} ${(a.model ?? 'default').padEnd(14)} ${a.backend.type.padEnd(12)} ${scope}`));
+    console.log(dim(`  - ${a.name.padEnd(12)} ${(a.model ?? 'default').padEnd(14)} ${a.backend.type.padEnd(12)} ${scope}${a.browser ? ', browser' : ''}`));
   }
   return 0;
 }

@@ -146,6 +146,7 @@ interface RawAgent {
   limits?: Partial<Limits>;
   sandbox?: RawSandbox;
   skills?: string[];
+  browser?: boolean;
 }
 interface RawBranch {
   agent: string;
@@ -177,6 +178,7 @@ interface RawTeam {
     setting_sources?: SettingSource[];
     sandbox?: RawSandbox;
     skills?: string[];
+    browser?: boolean;
   };
   brain?: { curator?: string; curate?: 'after_run' | 'manual'; min_proposals?: number };
   lead?: string | null;
@@ -265,6 +267,7 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
       writes: a.tools.some((t) => WRITE_TOOLS.has(t)),
       sandbox: resolveSandbox(a.tools, defaults.sandbox, a.sandbox),
       skills: [...new Set([...(defaults.skills ?? []), ...(a.skills ?? [])])],
+      browser: a.browser ?? defaults.browser ?? false,
     };
     if (a.scope?.write && !agents[name].writes) {
       problems.push(`${where}/scope: has a write scope but no tool that can write`);

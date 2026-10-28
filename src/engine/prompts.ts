@@ -45,6 +45,12 @@ export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAs
       `Shell commands run in a sandbox: they can write only in your working folder, temp folders and package caches, and reach only these domains: ${agent.sandbox.network.join(', ') || 'none'}. If a command fails because of the sandbox, report what you needed instead of working around it.`,
     );
   }
+  if (agent.browser) {
+    lines.push(
+      'You have a browser (the browser_* tools). Open your dev server or the pages you build (a path in your working folder works) to check they work and look right: read pages with browser_snapshot, act by element number, and take a screenshot when the look matters. People can watch it live and may take control for a moment; your browser tools wait until they hand it back.' +
+        (agent.sandbox ? ' It reaches the same domains as your shell commands, plus local addresses.' : ''),
+    );
+  }
   lines.push('', '# Your role', agent.prompt.trim());
   return lines.join('\n');
 }

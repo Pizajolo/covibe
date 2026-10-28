@@ -40,7 +40,7 @@ export function clock(iso: string): string {
 export function toolText(tool: string, input: unknown, roots: string[] = []): string {
   const i = (input ?? {}) as Record<string, unknown>;
   const pick = i.file_path ?? i.notebook_path ?? i.command ?? i.pattern ?? i.path ?? i.url ?? i.query ?? i.to;
-  const name = tool.replace(/^mcp__team__/, '');
+  const name = tool.replace(/^mcp__(team|covibe)__/, '');
   if (pick === undefined) return name;
   let shown = String(pick).replace(/\S*\/worktrees\/(?:[^/\s]+\/)?\d{8}-\d{6}-[0-9a-f]{4}\/[^/\s]+\/?/g, '');
   for (const r of roots) shown = shown.split(`${r}/`).join('').split(r).join('.');

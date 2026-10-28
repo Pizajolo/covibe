@@ -13,6 +13,8 @@ import { brainPrompt, commitBrain, curate, ensureBrain, proposeTool } from './br
 import { evaluate, evaluateGate } from './expr.js';
 import { systemPrompt, turnPrompt } from './prompts.js';
 import { browserActivity } from './browser.js';
+import { browserHub } from '../browser/hub.js';
+import { browserTools } from '../browser/tools.js';
 import { ASK_TOOL, Deadline, LEAD_SCHEMA, leadPrompt, leadVerdict, QUESTION_STEP, questionOptions, RunPause, waitForAnswer, type LeadVerdict } from './questions.js';
 import { makeToolChecker, readOnly } from './scope.js';
 import { Workspace } from './workspace.js';
@@ -626,6 +628,28 @@ export function buildInvocation(
   const brain = p.repo ? brainRoot(p.repo) : undefined;
   const isCurator = !!brain && team.brain.curator === agent.name;
   const tools: CustomTool[] = [...(brain && !isCurator && !p.curating ? [proposeTool(store, runId, agent.name, p.step)] : []), ...(p.extraTools ?? [])];
+  if (agent.browser) {
+    tools.push(
+      ...browserTools({
+        hub: browserHub,
+        runId,
+        agent: agent.name,
+        root: p.cwd,
+        network: agent.sandbox?.network,
+        signal: p.signal,
+        onChange: (c) =>
+          emit(
+            c.kind === 'opened'
+              ? { ...base, type: 'browser.opened', data: { provider: c.provider } }
+              : c.kind === 'page'
+                ? { ...base, type: 'browser.page', data: { url: c.url } }
+                : c.kind === 'control'
+                  ? { ...base, type: 'browser.control', data: { by: c.by } }
+                  : { ...base, type: 'browser.closed', data: { reason: c.reason } },
+          ),
+      }),
+    );
+  }
   const sandbox = agent.sandbox && isCurator ? { ...agent.sandbox, allowWrite: [...agent.sandbox.allowWrite, brain!] } : agent.sandbox;
   return {
     agentName: agent.name,

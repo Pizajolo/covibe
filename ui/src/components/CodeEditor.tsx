@@ -40,14 +40,17 @@ export function CodeEditor({
   minHeight = 200,
   placeholder,
   lineNumbers: showLines = true,
+  readOnly = false,
 }: {
   value: string;
-  onChange: (v: string) => void;
+  onChange?: (v: string) => void;
   language: 'yaml' | 'markdown' | 'json' | 'text';
   onSave?: () => void;
   minHeight?: number;
   placeholder?: string;
   lineNumbers?: boolean;
+  /** Show the text without letting it be edited. */
+  readOnly?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
@@ -81,15 +84,16 @@ export function CodeEditor({
         theme,
         EditorView.theme({ '.cm-content, .cm-gutter': { minHeight: `${minHeight}px` } }),
         lang,
+        readOnly ? EditorState.readOnly.of(true) : [],
         EditorView.updateListener.of((u) => {
-          if (u.docChanged) onChangeRef.current(u.state.doc.toString());
+          if (u.docChanged) onChangeRef.current?.(u.state.doc.toString());
         }),
       ],
     });
     view.current = new EditorView({ state, parent: host.current! });
     return () => view.current?.destroy();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [language]);
+  }, [language, readOnly]);
 
   // Replace the document when the value changes from outside (load, form edits).
   useEffect(() => {
