@@ -17,7 +17,7 @@ export const DESK_HELP: Record<DeskState, string> = {
   working: 'In a turn. The plate shows what it is doing.',
   asking: 'Asked the team lead a question and waits for the answer.',
   needs: 'Asked you a question, or (the lead) passed one on to you. The team is on hold until you answer; click the ? to answer.',
-  held: 'Stopped at its next tool call while a question waits for you.',
+  held: "Stopped at its next tool call while a question waits for you, or waiting for the plan's usage limit to reset (it continues on its own).",
   done: 'Finished its part of the current step.',
   stopped: 'Its turn failed or was stopped.',
 };
@@ -39,6 +39,7 @@ export function deskState(a: AgentState, run: RunSummary, answering: boolean): D
   if (answering) return 'working';
   if (live && a.waitingOn) return a.waitingOn === 'human' ? 'needs' : 'asking';
   if (deskQuestion(a, run)) return 'needs';
+  if (live && a.status === 'limited') return 'held';
   if (a.status === 'working') return run.paused ? 'held' : 'working';
   if (a.status === 'error') return 'stopped';
   if (a.status === 'done' && live) return 'done';
@@ -51,7 +52,7 @@ export function deskNote(a: AgentState, state: DeskState, run: RunSummary): stri
     case 'working': return a.activity ?? 'thinking…';
     case 'asking': return `asking ${a.waitingOn}`;
     case 'needs': return a.waitingOn === 'human' ? 'needs you' : 'question for you';
-    case 'held': return 'on hold';
+    case 'held': return a.status === 'limited' ? 'waiting for the limit' : 'on hold';
     case 'done': return a.step ? `done with ${a.step}` : 'done';
     case 'stopped': return 'stopped';
   }

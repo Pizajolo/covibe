@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RunEvent, RunRecord } from '../src/events/types.js';
 import type { NotificationKind } from '../src/server/api-types.js';
-import { chatThreads, collectNotifications, shortenPaths, summarizeRun } from '../src/server/projections.js';
+import { chatThreads, collectNotifications, shortenPaths, summarizeRun, usageReport } from '../src/server/projections.js';
 
 const run: RunRecord = { id: 'r1', kind: 'workflow', team: 't', teamFile: '/t.yaml', repo: '/code/app', goal: 'g', status: 'succeeded', pid: 1, startedAt: '2026-10-27T10:00:00.000Z' };
 let id = 0;
@@ -66,6 +66,37 @@ describe('projections', () => {
     // Kinds switched off everywhere are left out; the rest carry their choices.
     const choices = { ...all(false, false), question: { bell: true, push: false } };
     expect(collectNotifications([src], choices).map((n) => [n.kind, n.bell, n.push])).toEqual([['question', true, false], ['question', true, false]]);
+  });
+
+  it("reports the plan's limits from Claude Code, or else from what turns reported", () => {
+    const now = new Date('2026-10-28T10:00:00.000Z');
+    const later = Date.parse('2026-10-28T12:00:00.000Z') / 1000;
+    const turns = [
+      { window: 'five_hour', status: 'rejected', utilization: 1, resetsAt: later, seenAt: '' },
+      { window: 'seven_day', status: 'allowed', utilization: 0.4, resetsAt: Date.parse('2026-10-27T00:00:00.000Z') / 1000, seenAt: '' },
+    ];
+    const plan = {
+      available: true,
+      subscription: 'max',
+      windows: [
+        { window: 'five_hour', label: '5-hour session', utilization: 100, resetsAt: '2026-10-28T12:00:00.000Z' },
+        { window: 'seven_day', label: 'Weekly (all models)', utilization: 35, resetsAt: '2026-11-01T00:00:00.000Z' },
+      ],
+    };
+    expect(usageReport(plan, turns, now)).toMatchObject({
+      source: 'claude',
+      subscription: 'max',
+      windows: [
+        { window: 'five_hour', utilization: 1, resetsAt: '2026-10-28T12:00:00.000Z', status: 'rejected' },
+        { window: 'seven_day', utilization: 0.35, status: undefined },
+      ],
+    });
+    // Without Claude Code's numbers, what turns reported, minus windows that have reset since.
+    expect(usageReport({ available: false, windows: [] }, turns, now)).toMatchObject({
+      source: 'runs',
+      windows: [{ window: 'five_hour', label: '5-hour session', utilization: 1, status: 'rejected', resetsAt: '2026-10-28T12:00:00.000Z' }],
+    });
+    expect(usageReport(undefined, [], now)).toMatchObject({ source: 'none', windows: [] });
   });
 
   it('shortens worktree and project paths', () => {

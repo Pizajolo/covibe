@@ -26,6 +26,8 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Git ref to start from, e.g. an earlier run's branch to build on its result. Defaults to HEAD. */
   base?: string;
+  /** When the plan's usage limit stops a member: wait for the reset and continue (default), or stop the run. */
+  onLimit?: 'wait' | 'stop';
 }
 
 export interface RunOutcome {
@@ -47,6 +49,41 @@ export interface RunContext {
 }
 
 class StepError extends Error {}
+
+/** The plan's usage limit stopped a member and the run stops (onLimit: stop). */
+class LimitError extends StepError {
+  constructor(
+    message: string,
+    readonly resetsAt: string | undefined,
+  ) {
+    super(message);
+  }
+}
+
+/** Without a reset time, look again after this long. */
+const LIMIT_RETRY_MS = 30 * 60_000;
+/** Wait a little past the reset, so the window has really turned over. */
+const LIMIT_GRACE_MS = 60_000;
+const MAX_LIMIT_WAIT_MS = 7 * 24 * 60 * 60_000;
+
+const resetIso = (epoch: number | undefined) => (epoch ? new Date(epoch < 1e12 ? epoch * 1000 : epoch).toISOString() : undefined);
+
+/** Sleep until `ms` from now, or until the signal aborts. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason ?? new Error('aborted'));
+    const timer = setTimeout(done, ms);
+    function done() {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }
+    function onAbort() {
+      clearTimeout(timer);
+      reject(signal!.reason ?? new Error('aborted'));
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 export function newRunId(date = new Date()): string {
   const p = (n: number) => String(n).padStart(2, '0');
@@ -142,6 +179,7 @@ class Engine {
 
     let status: RunOutcome['status'] = 'succeeded';
     let reason: string | undefined;
+    let limit: { resets_at: string | null } | undefined;
     try {
       let i = 0;
       while (i < steps.length) {
@@ -183,6 +221,7 @@ class Engine {
     } catch (err) {
       status = 'failed';
       reason = this.opts.signal?.aborted ? 'aborted' : (err as Error).message;
+      if (err instanceof LimitError) limit = { resets_at: err.resetsAt ?? null };
     }
     this.store.cancelQuestions(this.runId);
 
@@ -199,7 +238,7 @@ class Engine {
     this.store.finishRun(this.runId, status);
     this.emit({
       type: 'run.finished',
-      data: { status, reason, branch: this.workspace.branch, loops: this.context.loop, cost_usd: this.costUsd, feedback: this.context.feedback },
+      data: { status, reason, branch: this.workspace.branch, loops: this.context.loop, cost_usd: this.costUsd, feedback: this.context.feedback, ...(limit ? { limit } : {}) },
     });
     return { runId: this.runId, status, reason, branch: this.workspace.branch, context: this.context, costUsd: this.costUsd };
   }
@@ -272,7 +311,33 @@ class Engine {
         type: 'agent.started',
         data: { model: agent.model ?? null, backend: agent.backend.type, cwd, resumed: !!resume, loop: this.context.loop },
       });
-      const result = await this.runAgent(agent, { cwd, prompt, resume, env, outputSchema, step: step.id });
+      let result = await this.runAgent(agent, { cwd, prompt, resume, env, outputSchema, step: step.id });
+      // The plan's usage limit stopped the turn: wait for the reset and pick the session up again (or stop the run).
+      const waitedSince = Date.now();
+      while (result.limit) {
+        this.costUsd += result.costUsd;
+        if (result.sessionId) this.store.saveSession(this.runId, agent.name, result.sessionId, cwd);
+        const resetsAt = resetIso(result.limit.resetsAt);
+        const stop = this.opts.onLimit === 'stop' || Date.now() - waitedSince > MAX_LIMIT_WAIT_MS;
+        const until = resetsAt ? Math.max(Date.parse(resetsAt) + LIMIT_GRACE_MS, Date.now() + 2_000) : Date.now() + LIMIT_RETRY_MS;
+        this.emit({
+          ...base,
+          type: 'agent.limited',
+          data: { ...finishedData(agent, result), resets_at: resetsAt ?? null, window: result.limit.window ?? null, waiting: !stop, until: stop ? null : new Date(until).toISOString() },
+        });
+        if (stop) throw new LimitError(`${agent.name} hit the plan's usage limit on step ${step.id}${resetsAt ? `; it resets at ${resetsAt}` : ''}`, resetsAt);
+        await sleep(until - Date.now(), this.opts.signal);
+        this.emit({ ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, cwd, resumed: !!result.sessionId, after_limit: true, loop: this.context.loop } });
+        result = await this.runAgent(agent, {
+          cwd,
+          // A session to pick up continues; without one the turn starts over.
+          prompt: result.sessionId ? LIMIT_RESUME : prompt,
+          resume: result.sessionId ?? resume,
+          env,
+          outputSchema,
+          step: step.id,
+        });
+      }
       this.costUsd += result.costUsd;
       if (result.sessionId) this.store.saveSession(this.runId, agent.name, result.sessionId, cwd);
 
@@ -476,6 +541,8 @@ export function buildInvocation(
     resumeSessionId: p.resume,
     forkSession: p.fork,
     model: agent.model,
+    effort: agent.effort,
+    thinking: agent.thinking,
     tools: agent.tools,
     outputSchema: p.outputSchema,
     env: p.env,
@@ -516,6 +583,9 @@ export function buildInvocation(
     onEvent: eventSink(store, runId, base),
   };
 }
+
+const LIMIT_RESUME =
+  "Your last turn stopped because the plan's usage limit was reached. The limit has reset: continue where you left off and finish the task as asked.";
 
 /** Larger images are not kept (screenshots are well below this). */
 const MAX_VIEW_BYTES = 10 << 20;

@@ -21,6 +21,7 @@ export type EventType =
   | 'agent.finished'
   | 'agent.error'
   | 'agent.view'
+  | 'agent.limited'
   | 'scope.denied'
   | 'scope.violation'
   | 'git.commit'
@@ -39,7 +40,10 @@ export type EventType =
   | 'question.escalated'
   | 'question.answered'
   | 'run.paused'
-  | 'run.resumed';
+  | 'run.resumed'
+  | 'run.restart_scheduled'
+  | 'run.restart_cancelled'
+  | 'run.restarted';
 
 export interface RunEvent {
   id: number;

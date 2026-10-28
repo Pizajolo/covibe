@@ -219,6 +219,42 @@ describe('server', () => {
     await expect(api('GET', `/api/runs/${project.id}/${runId}/views/9`)).rejects.toThrow(/not kept/);
   });
 
+  it('restarts a run the plan limit stopped: now, or when the limit resets', async () => {
+    const later = Math.floor(Date.now() / 1000) + 3600;
+    const { api } = await setup({
+      builder: (inv) =>
+        inv.prompt.includes('Add module b') ? { fail: 'Claude AI usage limit reached', limit: { resetsAt: later } } : { write: { 'src/a.js': 'export const a = 1;' }, text: 'Built.' },
+      reviewer: () => ({ structured: { blocking_count: 0, findings: [] } }),
+    });
+    await api('PUT', '/api/settings', { onLimit: 'stop' });
+    await expect(api('PUT', '/api/settings', { onLimit: 'never' })).rejects.toThrow(/onLimit/);
+    const project = await api('POST', '/api/projects', { path: tempRepo() });
+    const team = await api('POST', '/api/teams', { name: 'duo', template: 'build-and-review' });
+    const { runId } = await api('POST', '/api/runs', { project: project.id, team: team.id, goal: 'Add module b' });
+    const stopped = await until(
+      () => api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`),
+      (d) => d.summary.status !== 'running',
+    );
+    expect(stopped.summary).toMatchObject({ status: 'failed', limit: { waiting: false, resetsAt: new Date(later * 1000).toISOString(), agents: ['builder'] } });
+
+    // At the reset (a minute past it), then cancelled.
+    const { at } = await api('POST', `/api/runs/${project.id}/${runId}/restart`, { when: 'reset' });
+    expect(at).toBe(new Date((later + 60) * 1000).toISOString());
+    expect((await api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`)).summary.restart).toEqual({ at });
+    await api('POST', `/api/runs/${project.id}/${runId}/restart`, { when: 'cancel' });
+    expect((await api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`)).summary.restart).toBeUndefined();
+
+    // Now: the same goal and team, from the stopped run's branch.
+    const restarted = await api('POST', `/api/runs/${project.id}/${runId}/restart`, { when: 'now' });
+    const again = await api<RunDetail>('GET', `/api/runs/${project.id}/${restarted.runId}`);
+    expect(again.summary).toMatchObject({ goal: 'Add module b', team: 'duo', base: stopped.summary.branch });
+    expect((await api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`)).summary.restart).toEqual({ runId: restarted.runId });
+    await until(
+      () => api<RunDetail>('GET', `/api/runs/${project.id}/${restarted.runId}`),
+      (d) => d.summary.status !== 'running',
+    );
+  });
+
   it('reorders and inserts workflow steps without losing comments', async () => {
     const { api } = await setup();
     const team = await api('POST', '/api/teams', { name: 'flow', template: 'feature-team' });

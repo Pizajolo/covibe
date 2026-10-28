@@ -10,7 +10,7 @@ export function RunCard({ run }: { run: RunSummary }) {
   return (
     <a className="card card-pad col" href={href('runs', run.projectId, run.id)} style={{ color: 'var(--text)', gap: 12 }}>
       <div className="row">
-        <RunStatusPill status={run.status} kind={run.kind} paused={run.paused} />
+        <RunStatusPill status={run.status} kind={run.kind} paused={run.paused} limited={run.limit?.waiting} />
         <LoopBadge loops={run.loops} max={run.maxLoops} />
         <span className="grow" />
         <span className="tiny faint num">
@@ -59,7 +59,7 @@ export function RunRow({ run }: { run: RunSummary }) {
         {money(run.costUsd)}
       </span>
       <div style={{ width: 96, display: 'flex', justifyContent: 'flex-end' }}>
-        <RunStatusPill status={run.status} kind={run.kind} paused={run.paused} />
+        <RunStatusPill status={run.status} kind={run.kind} paused={run.paused} limited={run.limit?.waiting} />
       </div>
     </a>
   );

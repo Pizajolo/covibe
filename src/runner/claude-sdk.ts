@@ -7,13 +7,14 @@ import {
   tool,
   type HookCallback,
   type Options,
+  type SDKControlGetUsageResponse,
   type SDKMessage,
   type SDKResultMessage,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { Env } from './backend.js';
-import type { AgentInvocation, AgentResult, AgentRunner, CustomTool, EnvironmentInfo, LivePriority, TokenUsage } from './types.js';
+import type { AgentInvocation, AgentResult, AgentRunner, CustomTool, EnvironmentInfo, LivePriority, PlanUsage, TokenUsage } from './types.js';
 
 const TEAM_SERVER = 'team';
 const SEND_MESSAGE_TOOL = `mcp__${TEAM_SERVER}__send_message`;
@@ -60,6 +61,10 @@ export class ClaudeSdkRunner implements AgentRunner {
     return discoverEnvironment(env);
   }
 
+  usage(env: Env): Promise<PlanUsage> {
+    return readPlanUsage(env);
+  }
+
   async run(inv: AgentInvocation): Promise<AgentResult> {
     const started = Date.now();
     const abortController = new AbortController();
@@ -94,6 +99,8 @@ export class ClaudeSdkRunner implements AgentRunner {
       // hook (run paused); lift Claude Code's limits on both to the longest wait.
       env: { MCP_TOOL_TIMEOUT: String(MAX_WAIT_MS), ...inv.env },
       model: inv.model,
+      effort: inv.effort,
+      thinking: inv.thinking === undefined ? undefined : inv.thinking === 'adaptive' ? { type: 'adaptive' } : inv.thinking === 'off' ? { type: 'disabled' } : { type: 'enabled', budgetTokens: inv.thinking },
       abortController,
       resume: inv.resumeSessionId,
       forkSession: inv.forkSession && !!inv.resumeSessionId,
@@ -146,6 +153,8 @@ export class ClaudeSdkRunner implements AgentRunner {
     /** Tool calls by id, so an image in a result can say which call showed it. */
     const calls = new Map<string, { tool: string; input: unknown }>();
     let lastText = '';
+    /** The plan limit a turn ran into, if any. */
+    let rejected: AgentResult['limit'];
     let last: SDKResultMessage | undefined;
     let turns = 0;
     try {
@@ -171,6 +180,7 @@ export class ClaudeSdkRunner implements AgentRunner {
           }
         } else if (msg.type === 'rate_limit_event') {
           const info = msg.rate_limit_info;
+          if (info.status === 'rejected') rejected = { resetsAt: info.resetsAt, window: info.rateLimitType };
           inv.onEvent({ kind: 'rate_limit', info: { status: info.status, window: info.rateLimitType, utilization: info.utilization, resetsAt: info.resetsAt } });
         } else if (msg.type === 'result') {
           last = msg;
@@ -186,18 +196,23 @@ export class ClaudeSdkRunner implements AgentRunner {
     } catch (err) {
       stop();
       const error = inv.signal.aborted ? 'aborted (timeout or cancel)' : (err as Error).message;
-      return { ok: false, sessionId, text: lastText, error, turns, costUsd: last?.total_cost_usd ?? 0, durationMs: Date.now() - started };
+      const limit = inv.signal.aborted ? undefined : limitOf(error, rejected);
+      return { ok: false, sessionId, text: lastText, error, turns, costUsd: last?.total_cost_usd ?? 0, durationMs: Date.now() - started, ...(limit ? { limit } : {}) };
     } finally {
       stop();
       inv.signal.removeEventListener('abort', onAbort);
     }
 
-    if (!last) return { ok: false, sessionId, text: lastText, error: 'session ended without a result', turns, costUsd: 0, durationMs: Date.now() - started };
+    if (!last) {
+      const limit = limitOf(lastText, rejected);
+      return { ok: false, sessionId, text: lastText, error: limit ? lastText || 'usage limit reached' : 'session ended without a result', turns, costUsd: 0, durationMs: Date.now() - started, ...(limit ? { limit } : {}) };
+    }
     // Cost and usage are running totals across the turns of one query().
     const base = { sessionId: last.session_id, turns, costUsd: last.total_cost_usd, durationMs: Date.now() - started, tokens: tokensOf(last) };
     if (last.subtype === 'success' && !last.is_error) return { ...base, ok: true, text: last.result || lastText, structured: last.structured_output };
     const error = last.subtype === 'success' ? last.result : [last.subtype, ...last.errors].join(': ');
-    return { ...base, ok: false, text: lastText, error };
+    const limit = limitOf(error, rejected);
+    return { ...base, ok: false, text: lastText, error, ...(limit ? { limit } : {}) };
   }
 }
 
@@ -210,7 +225,11 @@ export async function discoverEnvironment(env: Env): Promise<EnvironmentInfo> {
   const q = query({ prompt: 'hi', options: { cwd: process.cwd(), env, settingSources: [], tools: ['Skill'], permissionMode: 'dontAsk', maxTurns: 1 } });
   const timer = setTimeout(() => q.close(), 30_000);
   try {
-    const [account, commands] = await Promise.all([q.accountInfo().catch(() => undefined), q.supportedCommands().catch(() => [])]);
+    const [account, commands, models] = await Promise.all([
+      q.accountInfo().catch(() => undefined),
+      q.supportedCommands().catch(() => []),
+      q.supportedModels().catch(() => []),
+    ]);
     let names: string[] = [];
     for await (const msg of q as AsyncIterable<SDKMessage>) {
       if (msg.type === 'system' && msg.subtype === 'init') {
@@ -219,11 +238,82 @@ export async function discoverEnvironment(env: Env): Promise<EnvironmentInfo> {
       }
     }
     const describe = new Map(commands.map((c) => [c.name, c.description]));
-    return { skills: names.map((name) => ({ name, description: describe.get(name) ?? '' })), account };
+    return {
+      skills: names.map((name) => ({ name, description: describe.get(name) ?? '' })),
+      account,
+      models: models.map((m) => ({
+        value: m.value,
+        name: m.displayName,
+        description: m.description,
+        resolved: m.resolvedModel,
+        efforts: m.supportsEffort ? (m.supportedEffortLevels ?? []) : [],
+        adaptiveThinking: !!m.supportsAdaptiveThinking,
+      })),
+    };
   } finally {
     clearTimeout(timer);
     q.close();
   }
+}
+
+const WINDOW_LABELS: Record<string, string> = {
+  five_hour: '5-hour session',
+  seven_day: 'Weekly (all models)',
+  seven_day_opus: 'Weekly (Opus)',
+  seven_day_sonnet: 'Weekly (Sonnet)',
+  seven_day_oauth_apps: 'Weekly (apps)',
+};
+
+/**
+ * The plan's usage windows, read like /usage does: no model call. The SDK
+ * marks this API experimental, so anything unexpected reads as "not available"
+ * and the app falls back to the usage members' turns reported.
+ */
+export async function readPlanUsage(env: Env): Promise<PlanUsage> {
+  // An empty prompt stream: the session starts and answers control requests, but no message is ever sent.
+  const input = new Input();
+  const q = query({ prompt: input, options: { cwd: process.cwd(), env, settingSources: [], tools: [], permissionMode: 'dontAsk', maxTurns: 1 } });
+  const timer = setTimeout(() => q.close(), 30_000);
+  try {
+    const read = (q as unknown as { usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: (o: { skipBehaviors: boolean }) => Promise<SDKControlGetUsageResponse> })
+      .usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+    if (!read) return { available: false, windows: [] };
+    const u = await read.call(q, { skipBehaviors: true });
+    const limits = u.rate_limits_available ? u.rate_limits : null;
+    if (!limits) return { available: false, subscription: u.subscription_type ?? undefined, windows: [] };
+    const windows: PlanUsage['windows'] = [];
+    for (const [key, label] of Object.entries(WINDOW_LABELS)) {
+      const w = (limits as Record<string, { utilization: number | null; resets_at: string | null } | null | undefined>)[key];
+      if (w) windows.push({ window: key, label, utilization: w.utilization, resetsAt: w.resets_at });
+    }
+    for (const m of limits.model_scoped ?? []) windows.push({ window: `model:${m.display_name}`, label: `Weekly (${m.display_name})`, utilization: m.utilization, resetsAt: m.resets_at });
+    const x = limits.extra_usage;
+    return {
+      available: true,
+      subscription: u.subscription_type ?? undefined,
+      windows,
+      extra: x ? { enabled: x.is_enabled, limit: x.monthly_limit, used: x.used_credits, utilization: x.utilization, currency: x.currency ?? undefined } : undefined,
+    };
+  } catch {
+    return { available: false, windows: [] };
+  } finally {
+    clearTimeout(timer);
+    input.close();
+    q.close();
+  }
+}
+
+/**
+ * Whether a failed turn ran into the plan's usage limit: Claude Code reported
+ * a rejected rate limit, or says so in the error ("Claude AI usage limit
+ * reached|<reset epoch>", "5-hour limit reached ∙ resets 3pm").
+ */
+export function limitOf(error: string, rejected: AgentResult['limit']): AgentResult['limit'] {
+  const said = /usage limit|limit reached|rate.?limit/i.test(error);
+  if (!rejected && !said) return undefined;
+  const epoch = /\|(\d{10,13})\b/.exec(error)?.[1];
+  const resetsAt = rejected?.resetsAt ?? (epoch ? Math.round(Number(epoch) / (epoch.length > 10 ? 1000 : 1)) : undefined);
+  return { resetsAt, window: rejected?.window };
 }
 
 /** Base64 images inside tool results: what the agent sees of a screenshot it read or a browser tool returned. */

@@ -2,7 +2,8 @@
 // talks to SDKs or git; everything is derived from stored events.
 import type { RunEvent, RunRecord } from '../events/types.js';
 import { QUESTION_STEP } from '../engine/questions.js';
-import type { AgentState, AppNotification, BoardCard, ChatItem, NotificationKind, NotifyChoice, QuestionView, RunSummary, Stats, StepState, UsageWindow } from './api-types.js';
+import type { PlanUsage } from '../runner/types.js';
+import type { AgentState, AppNotification, BoardCard, ChatItem, NotificationKind, NotifyChoice, QuestionView, RunSummary, Stats, StepState, UsageReport, UsageWindow } from './api-types.js';
 
 type D = Record<string, any>;
 
@@ -71,6 +72,10 @@ export function summarizeRun(
   const openCards = new Map<string, BoardCard>();
   const questions = new Map<number, QuestionView>();
   let paused = false;
+  let limitEnd: { resetsAt?: string } | undefined;
+  /** member → its last limit stop, until it starts again */
+  const limited = new Map<string, { resetsAt?: string; until?: string; waiting: boolean }>();
+  let restart: RunSummary['restart'];
   /** lead → the member whose question it is answering */
   const answeringFor = new Map<string, string>();
 
@@ -82,7 +87,40 @@ export function summarizeRun(
         break;
       case 'run.finished':
         reason = d.reason;
+        if (d.limit) limitEnd = { resetsAt: d.limit.resets_at ?? undefined };
         break;
+      case 'run.restart_scheduled':
+        restart = { at: d.at };
+        break;
+      case 'run.restart_cancelled':
+        restart = undefined;
+        break;
+      case 'run.restarted':
+        restart = { runId: d.run_id };
+        break;
+      case 'agent.limited': {
+        const a = agent(e.agent!);
+        a.status = 'limited';
+        a.turns += d.turns ?? 0;
+        a.costUsd += d.cost_usd ?? 0;
+        a.tokens += tokensOf(d);
+        costUsd += d.cost_usd ?? 0;
+        tokens += tokensOf(d);
+        a.limitedUntil = d.until ?? undefined;
+        a.activity = d.waiting ? "waiting for the plan's limit to reset" : "stopped by the plan's limit";
+        a.updatedAt = e.ts;
+        limited.set(e.agent!, { resetsAt: d.resets_at ?? undefined, until: d.until ?? undefined, waiting: !!d.waiting });
+        const card = openCards.get(e.agent!);
+        if (card) {
+          card.costUsd += d.cost_usd ?? 0;
+          card.summary = d.waiting ? "waiting for the plan's limit to reset" : "stopped by the plan's limit";
+          if (!d.waiting) {
+            card.status = 'error';
+            openCards.delete(e.agent!);
+          }
+        }
+        break;
+      }
       case 'step.started': {
         const s = step(e.step!);
         s.status = 'running';
@@ -112,6 +150,8 @@ export function summarizeRun(
       case 'agent.started': {
         const a = agent(e.agent!);
         a.status = 'working';
+        a.limitedUntil = undefined;
+        limited.delete(e.agent!);
         if (e.step !== QUESTION_STEP) a.step = e.step;
         a.activity = e.step === QUESTION_STEP && answeringFor.has(e.agent!) ? `answering ${answeringFor.get(e.agent!)}'s question` : d.resumed ? 'resuming…' : 'starting…';
         a.invocations += 1;
@@ -215,19 +255,30 @@ export function summarizeRun(
     if (e.type === 'agent.started' && e.step === 'chat') worktreesRemoved = false;
   }
 
+  // Members waiting for the limit, or what stopped the run.
+  let limit: RunSummary['limit'];
+  if (live && [...limited.values()].some((l) => l.waiting)) {
+    const waiting = [...limited.entries()].filter(([, l]) => l.waiting);
+    const until = waiting.map(([, l]) => l.until).filter((u): u is string => !!u).sort()[0];
+    limit = { waiting: true, until, resetsAt: waiting.map(([, l]) => l.resetsAt).find(Boolean), agents: waiting.map(([n]) => n) };
+  } else if (!live && (limitEnd || limited.size)) {
+    limit = { waiting: false, resetsAt: limitEnd?.resetsAt ?? [...limited.values()].map((l) => l.resetsAt).find(Boolean), agents: [...limited.keys()] };
+  }
+
   // A run that is no longer live cannot have working agents or open questions.
   if (!live) {
     paused = false;
     for (const q of questions.values()) if (q.status === 'lead' || q.status === 'open') q.status = 'cancelled';
     for (const a of agents.values()) {
       a.waitingOn = undefined;
-      if (a.status === 'working' && !busy.has(a.name)) a.status = 'error';
+      a.limitedUntil = undefined;
+      if ((a.status === 'working' || a.status === 'limited') && !busy.has(a.name)) a.status = 'error';
     }
   }
   if (live) {
     for (const a of agents.values()) {
       if (a.waitingOn) a.status = 'asking';
-      else if (a.status !== 'working' && a.inbox > 0) a.status = 'waiting';
+      else if (a.status !== 'working' && a.status !== 'limited' && a.inbox > 0) a.status = 'waiting';
     }
   }
 
@@ -256,6 +307,8 @@ export function summarizeRun(
     worktreesRemoved,
     paused,
     questions: [...questions.values()],
+    ...(limit ? { limit } : {}),
+    ...(restart ? { restart } : {}),
   };
 }
 
@@ -359,7 +412,7 @@ export function computeStats(
         if (!prev || prev.seenAt <= e.ts) usage.set(key, { window: key, status: d.status, utilization: d.utilization, resetsAt: d.resetsAt, seenAt: e.ts });
         continue;
       }
-      if (e.type !== 'agent.finished' && e.type !== 'agent.error') continue;
+      if (e.type !== 'agent.finished' && e.type !== 'agent.error' && e.type !== 'agent.limited') continue;
       const t = Date.parse(e.ts);
       const cost = Number(d.cost_usd ?? 0);
       const tok = tokensOf(d);
@@ -408,7 +461,7 @@ export function computeStats(
 }
 
 /** The events notifications come from. */
-export const NOTIFY_EVENTS = ['question.asked', 'question.escalated', 'question.answered', 'usage.limit', 'run.finished'];
+export const NOTIFY_EVENTS = ['question.asked', 'question.escalated', 'question.answered', 'usage.limit', 'agent.limited', 'run.finished'];
 
 const LIMIT_WINDOWS: Record<string, string> = {
   five_hour: '5-hour',
@@ -456,8 +509,15 @@ export function collectNotifications(
           title: d.status === 'rejected' ? `Reached your ${name} limit` : `Close to your ${name} limit`,
           body: d.status === 'rejected' ? 'Members on your subscription wait until it resets.' : used !== undefined ? `${used}% used.` : undefined,
         });
+      } else if (e.type === 'agent.limited' && d.waiting) {
+        // One per run and reset: every member that hits the limit reports it.
+        const key = `${e.runId}/${d.resets_at}`;
+        if (limits.has(key)) continue;
+        limits.add(key);
+        add('limit', { title: 'Waiting for the plan limit to reset', body: run ? `${run.goal}: continues on its own${d.until ? ' after the reset' : ''}.` : undefined });
       } else if (e.type === 'run.finished' && run?.kind === 'workflow') {
         if (d.status === 'succeeded') add('done', { title: 'Job done', body: run.goal });
+        else if (d.limit) add('stopped', { title: 'Stopped by the plan limit', body: run.goal });
         else if (d.status === 'escalated') add('stopped', { title: 'Stopped: out of fix rounds', body: run.goal });
         else if (d.reason === 'aborted') add('stopped', { title: 'Run stopped', body: run.goal });
         else add('error', { title: 'Run failed', body: d.reason ? `${run.goal}: ${d.reason}` : run.goal });
@@ -465,4 +525,60 @@ export function collectNotifications(
     }
   }
   return out.sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, limit);
+}
+
+const USAGE_LABELS: Record<string, string> = {
+  five_hour: '5-hour session',
+  seven_day: 'Weekly (all models)',
+  seven_day_opus: 'Weekly (Opus)',
+  seven_day_sonnet: 'Weekly (Sonnet)',
+  seven_day_overage_included: 'Weekly (incl. extra usage)',
+  overage: 'Extra usage',
+};
+
+/** A reset time as ISO: Claude Code reports seconds (or milliseconds) since the epoch on turns, ISO from /usage. */
+export function resetIso(v: unknown): string | undefined {
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) return new Date(v < 1e12 ? v * 1000 : v).toISOString();
+  if (typeof v === 'string' && !Number.isNaN(Date.parse(v))) return new Date(v).toISOString();
+  return undefined;
+}
+
+/**
+ * The plan's limits: what Claude Code reports when asked (like /usage), and
+ * otherwise the last values members' turns reported. A window whose reset
+ * time has passed counts as fresh.
+ */
+export function usageReport(plan: PlanUsage | undefined, fromRuns: UsageWindow[], now = new Date()): UsageReport {
+  const status = new Map(fromRuns.map((u) => [u.window, u]));
+  const fresh = (resetsAt: string | undefined) => !resetsAt || Date.parse(resetsAt) > now.getTime();
+  if (plan?.available) {
+    return {
+      source: 'claude',
+      subscription: plan.subscription,
+      windows: plan.windows.map((w) => {
+        const turn = status.get(w.window);
+        const resetsAt = resetIso(w.resetsAt);
+        return {
+          window: w.window,
+          label: w.label,
+          utilization: w.utilization === null ? undefined : w.utilization / 100,
+          resetsAt,
+          status: turn && fresh(resetIso(turn.resetsAt)) && resetIso(turn.resetsAt) === resetsAt ? turn.status : undefined,
+        };
+      }),
+      extra: plan.extra,
+      checkedAt: now.toISOString(),
+    };
+  }
+  const windows = fromRuns
+    .map((u) => ({ u, resetsAt: resetIso(u.resetsAt) }))
+    .filter(({ resetsAt }) => fresh(resetsAt))
+    .map(({ u, resetsAt }) => ({
+      window: u.window,
+      label: USAGE_LABELS[u.window] ?? u.window,
+      utilization: typeof u.utilization === 'number' ? (u.utilization > 1 ? u.utilization / 100 : u.utilization) : undefined,
+      resetsAt,
+      status: u.status,
+    }));
+  return { source: windows.length ? 'runs' : 'none', subscription: plan?.subscription, windows, checkedAt: now.toISOString() };
 }

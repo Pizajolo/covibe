@@ -8,6 +8,7 @@ import type {
   AgentConfig,
   BackendConfig,
   Branch,
+  Effort,
   GateFailPolicy,
   JsonSchema,
   Limits,
@@ -15,6 +16,7 @@ import type {
   SettingSource,
   Step,
   TeamConfig,
+  Thinking,
 } from './types.js';
 
 const SCHEMA_URL = new URL('../../schemas/team.schema.json', import.meta.url);
@@ -132,6 +134,8 @@ interface RawAgent {
   description?: string;
   prompt: string;
   model?: string;
+  effort?: Effort;
+  thinking?: Thinking;
   tools: string[];
   can_message?: string[];
   scope?: { write?: string[] };
@@ -162,6 +166,8 @@ interface RawTeam {
   defaults?: {
     backend?: RawBackend;
     model?: string;
+    effort?: Effort;
+    thinking?: Thinking;
     isolation?: 'worktree' | 'none';
     limits?: Partial<Limits>;
     max_parallel?: number;
@@ -244,6 +250,8 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
       prompt,
       promptFile,
       model: backend.model ?? a.model ?? defaults.model,
+      effort: a.effort ?? defaults.effort,
+      thinking: a.thinking ?? defaults.thinking,
       tools: a.tools,
       canMessage: a.can_message ?? [],
       writeScope: a.scope?.write,

@@ -6,6 +6,7 @@ import { ProjectPage } from './pages/ProjectPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { NewProjectWizard } from './components/NewProjectWizard';
 import { QuestionPopup } from './components/Notifications';
+import { SidebarUsage } from './components/Usage';
 import { Modal } from './components/ui';
 import { go, href, useData, useRoute } from './data';
 import { Home } from './pages/Home';
@@ -85,12 +86,13 @@ export function App() {
             <div className="nav-section">Working now</div>
             {running.slice(0, 6).map((r) => (
               <a key={r.id} className="nav-item" href={href('runs', r.projectId, r.id)} title={r.paused ? `${r.goal} (paused: a question waits for you)` : r.goal}>
-                <span className={`dot ${r.paused ? 'asking' : 'working'}`} />
+                <span className={`dot ${r.paused ? 'asking' : r.limit?.waiting ? 'limited' : 'working'}`} />
                 <span className="ellipsis">{r.goal}</span>
               </a>
             ))}
           </>
         )}
+        <SidebarUsage />
         <div className="sidebar-foot">
           <span className={`dot ${connected ? 'done' : 'waiting'}`} />
           {error ? 'Cannot reach covibe' : connected ? 'Live' : 'Connecting…'}

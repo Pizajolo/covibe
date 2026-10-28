@@ -40,6 +40,8 @@ export interface ScriptedTurn {
   /** Messages to teammates via send_message. */
   send?: { to: string; text: string }[];
   fail?: string;
+  /** The plan's usage limit stopped the turn (with fail as the error). */
+  limit?: { resetsAt?: number };
   /** Keep working until this many live messages arrived (or 5 s passed). */
   awaitLive?: number;
   /** Custom (covibe) tools to call, in order. */
@@ -130,7 +132,7 @@ export class ScriptedRunner implements AgentRunner {
     if (turn.text) inv.onEvent({ kind: 'text', text: turn.text });
 
     const base = { sessionId, turns: 1, costUsd: 0.01, durationMs: 5 };
-    if (turn.fail) return { ...base, ok: false, text: '', error: turn.fail };
+    if (turn.fail) return { ...base, ok: false, text: '', error: turn.fail, ...(turn.limit ? { limit: turn.limit } : {}) };
     return { ...base, ok: true, text: turn.text ?? '', structured: turn.structured };
   }
 

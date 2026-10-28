@@ -14,6 +14,10 @@ export interface BackendConfig {
   project?: string;
 }
 
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+/** Extended thinking: Claude decides (adaptive), none, or a fixed token budget. */
+export type Thinking = 'adaptive' | 'off' | number;
+
 export interface Limits {
   max_turns: number;
   timeout_min: number;
@@ -39,6 +43,9 @@ export interface AgentConfig {
   /** File the prompt came from, if any (for error messages and the UI). */
   promptFile?: string;
   model?: string;
+  /** Unset = the model's default. */
+  effort?: Effort;
+  thinking?: Thinking;
   tools: string[];
   canMessage: string[];
   /** Globs relative to the repo root. `undefined` = whole worktree, `[]` = nothing. */

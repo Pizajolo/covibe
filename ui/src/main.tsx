@@ -4,6 +4,7 @@ import { App } from './App';
 import { ToastProvider } from './components/ui';
 import { DataProvider } from './data';
 import { NotifyProvider } from './notify';
+import { UsageProvider } from './components/Usage';
 import '@fontsource/pixelify-sans/600.css';
 import './styles.css';
 
@@ -12,7 +13,9 @@ createRoot(document.getElementById('root')!).render(
     <ToastProvider>
       <DataProvider>
         <NotifyProvider>
-          <App />
+          <UsageProvider>
+            <App />
+          </UsageProvider>
         </NotifyProvider>
       </DataProvider>
     </ToastProvider>

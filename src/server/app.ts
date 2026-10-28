@@ -29,7 +29,7 @@ import {
   writeSkillFile,
 } from '../skills.js';
 import { backendEnv } from '../runner/backend.js';
-import type { EnvironmentInfo } from '../runner/types.js';
+import type { EnvironmentInfo, PlanUsage } from '../runner/types.js';
 import { ARCHITECT, design } from './designer.js';
 import { GitError } from '../engine/workspace.js';
 import { EventStore } from '../events/store.js';
@@ -38,7 +38,8 @@ import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
 import type { MemberInfo, RunDetail, RunSummary, TeamDetail } from './api-types.js';
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
-import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, summarizeRun } from './projections.js';
+import { gitCheckout, gitCommit, gitMerge, gitOverview, gitPull, gitPullRequest, gitPush, gitRevert, gitShow } from './gitops.js';
+import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, summarizeRun, usageReport } from './projections.js';
 
 const exec = promisify(execFile);
 const UI_DIR = new URL('../../dist-ui/', import.meta.url).pathname;
@@ -100,6 +101,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     }
     return environment.info;
   };
+  // Plan usage from Claude Code, read at most once a minute (each read starts a Claude Code process).
+  let planCache: { at: number; value: Promise<PlanUsage | undefined> } | undefined;
+  const planUsage = (fresh = false): Promise<PlanUsage | undefined> => {
+    if (!runner.usage) return Promise.resolve(undefined);
+    if (fresh || !planCache || Date.now() - planCache.at > 60_000) {
+      planCache = { at: Date.now(), value: runner.usage(backendEnv({ type: 'subscription' }).env).catch(() => undefined) };
+    }
+    return planCache.value;
+  };
   /** Skill name → the team members that have it (directly or from team defaults). */
   const skillUsage = () => {
     const used = new Map<string, { team: string; agent: string }[]>();
@@ -160,7 +170,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           const activeAgents = live.reduce((n, r) => n + summary(p, r, undefined, roster).agents.filter((a) => a.status === 'working').length, 0);
           return {
             runs,
-            events: store.eventsOfType(['agent.finished', 'agent.error', 'gate.passed', 'gate.failed', 'usage.limit'], since),
+            events: store.eventsOfType(['agent.finished', 'agent.error', 'agent.limited', 'gate.passed', 'gate.failed', 'usage.limit'], since),
             live: (r: RunRecord) => store.isLive(r),
             activeAgents,
           };
@@ -182,6 +192,61 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       library.settings().notifications,
     );
   };
+
+  /** Start a goal in the background and keep its stop handle. */
+  const launch = async (project: Project, team: TeamConfig, goal: string, base?: string) => {
+    const controller = new AbortController();
+    const onLimit = library.settings().onLimit ?? 'wait';
+    const { runId, done } = await startRun({ team, repo: project.path, goal, store: storeFor(project), runner, signal: controller.signal, base, onLimit });
+    const key = `${project.id}/${runId}`;
+    active.set(key, controller);
+    done.catch(() => undefined).finally(() => active.delete(key));
+    return { runId, projectId: project.id };
+  };
+
+  /**
+   * Run a stopped run's goal again with the same team, starting from its
+   * result branch so the work it committed is kept.
+   */
+  const restartRun = async (project: Project, run: RunRecord) => {
+    const team = teamForRun(run).load();
+    const keep = run.branch && (await exec('git', ['rev-parse', '--verify', '--quiet', `${run.branch}^{commit}`], { cwd: project.path }).then(() => true, () => false));
+    const started = await launch(project, team, run.goal, keep ? run.branch : run.base);
+    storeFor(project).append(run.id, { type: 'run.restarted', data: { run_id: started.runId } });
+    return started;
+  };
+
+  /** When the limit that stopped a run resets: from the run, else from the plan's 5-hour window. */
+  const resetFor = async (project: Project, run: RunRecord): Promise<string | undefined> => {
+    const own = summary(project, run).limit?.resetsAt;
+    if (own && Date.parse(own) > Date.now()) return new Date(Date.parse(own) + 60_000).toISOString();
+    const usage = usageReport(await planUsage(), stats().usage);
+    const blocked = usage.windows.filter((w) => w.resetsAt && (w.status === 'rejected' || (w.utilization ?? 0) >= 1)).map((w) => w.resetsAt!);
+    const next = (blocked.length ? blocked : usage.windows.filter((w) => w.window === 'five_hour').map((w) => w.resetsAt).filter((r): r is string => !!r)).sort().at(-1);
+    return next && Date.parse(next) > Date.now() ? new Date(Date.parse(next) + 60_000).toISOString() : undefined;
+  };
+
+  // Restarts scheduled for when a limit resets. They are events in the run's store, so they survive a restart of the app.
+  const restartDue = async () => {
+    for (const p of library.projects()) {
+      if (!existsSync(p.path)) continue;
+      const store = storeFor(p);
+      const latest = new Map<string, RunEvent>();
+      for (const e of store.eventsOfType(['run.restart_scheduled', 'run.restart_cancelled', 'run.restarted'])) latest.set(e.runId, e);
+      for (const e of latest.values()) {
+        if (e.type !== 'run.restart_scheduled' || Date.parse(String(e.data.at)) > Date.now()) continue;
+        const run = store.getRun(e.runId);
+        if (!run || store.isLive(run)) continue;
+        try {
+          await restartRun(p, run);
+        } catch (err) {
+          store.append(run.id, { type: 'run.restart_cancelled', data: { error: (err as Error).message } });
+        }
+      }
+    }
+  };
+  const restartTimer = setInterval(() => void restartDue().catch((err) => console.error(err)), 30_000);
+  restartTimer.unref();
 
   const findRun = (pid: string, rid: string) => {
     const project = library.project(pid);
@@ -211,6 +276,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       name: a.name,
       description: a.description,
       model: a.model,
+      effort: a.effort,
+      thinking: a.thinking,
       tools: a.tools,
       writeScope: a.writeScope,
       writes: a.writes,
@@ -264,6 +331,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const routes: Route[] = [
     ['GET', '/api/overview', () => ({ projects: library.projects(), teams: library.teams(), runs: allRuns(30), stats: stats(), home: library.home, defaultParent: library.defaultParent() })],
     ['GET', '/api/environment', () => discover()],
+    ['GET', '/api/usage', async (_p, _b, q) => usageReport(await planUsage(q.get('fresh') === '1'), stats().usage)],
 
     // ---- skills
     ['GET', '/api/skills', async () => {
@@ -370,7 +438,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       else library.teamDir(teamId);
       const project = typeof b.project === 'string' && b.project ? library.project(b.project) : undefined;
       const settings = library.settings();
-      const { runId, done } = await design({ library, store: libraryStore, runner, teamId, projectPath: project?.path, message: str(body, 'message'), model: settings.designerModel, builtinSkills: async () => (await discover()).skills });
+      const { runId, done } = await design({ library, store: libraryStore, runner, teamId, projectPath: project?.path, message: str(body, 'message'), model: settings.designerModel, effort: settings.designerEffort, builtinSkills: async () => (await discover()).skills });
       answering.add(`${runId}/${ARCHITECT}`);
       void done.finally(() => answering.delete(`${runId}/${ARCHITECT}`));
       return { runId, teamId };
@@ -380,7 +448,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       if (!run) throw new NotFound('conversation not found');
       if (answering.has(`${run.id}/${ARCHITECT}`)) throw new BadRequest('the architect is still answering');
       const settings = library.settings();
-      const { done } = await design({ library, store: libraryStore, runner, teamId: run.team, runId: run.id, message: str(body, 'message'), model: settings.designerModel, builtinSkills: async () => (await discover()).skills });
+      const { done } = await design({ library, store: libraryStore, runner, teamId: run.team, runId: run.id, message: str(body, 'message'), model: settings.designerModel, effort: settings.designerEffort, builtinSkills: async () => (await discover()).skills });
       answering.add(`${run.id}/${ARCHITECT}`);
       void done.finally(() => answering.delete(`${run.id}/${ARCHITECT}`));
       return { runId: run.id, teamId: run.team };
@@ -416,6 +484,29 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const runIds = Array.isArray(b.runIds) ? b.runIds.filter((x): x is string => typeof x === 'string') : undefined;
       const olderThanDays = typeof b.olderThanDays === 'number' ? b.olderThanDays : undefined;
       return cleanupWorktrees(project.path, storeFor(project), { runIds, olderThanDays });
+    }],
+    // ---- git in the project's own checkout
+    ['GET', '/api/projects/:pid/git', (p) => gitOverview(library.project(p.pid!).path)],
+    ['GET', '/api/projects/:pid/git/commits/:sha', (p) => gitShow(library.project(p.pid!).path, p.sha!)],
+    ['POST', '/api/projects/:pid/git/commit', async (p, body) => {
+      const paths = (body as { paths?: unknown }).paths;
+      return { sha: await gitCommit(library.project(p.pid!).path, str(body, 'message'), Array.isArray(paths) ? paths.map(String) : undefined) };
+    }],
+    ['POST', '/api/projects/:pid/git/checkout', async (p, body) => {
+      const b = body as { create?: unknown; from?: unknown };
+      await gitCheckout(library.project(p.pid!).path, str(body, 'branch'), b.create === true, typeof b.from === 'string' && b.from ? b.from : undefined);
+      return { ok: true };
+    }],
+    ['POST', '/api/projects/:pid/git/push', (p, body) => {
+      const branch = (body as { branch?: unknown }).branch;
+      return gitPush(library.project(p.pid!).path, typeof branch === 'string' && branch ? branch : undefined);
+    }],
+    ['POST', '/api/projects/:pid/git/pull', async (p) => (await gitPull(library.project(p.pid!).path), { ok: true })],
+    ['POST', '/api/projects/:pid/git/merge', async (p, body) => ({ sha: await gitMerge(library.project(p.pid!).path, str(body, 'branch')) })],
+    ['POST', '/api/projects/:pid/git/revert', async (p, body) => ({ sha: await gitRevert(library.project(p.pid!).path, str(body, 'sha')) })],
+    ['POST', '/api/projects/:pid/git/pr', (p, body) => {
+      const b = body as { body?: unknown };
+      return gitPullRequest(library.project(p.pid!).path, { branch: str(body, 'branch'), base: str(body, 'base'), title: str(body, 'title'), body: typeof b.body === 'string' ? b.body : undefined });
     }],
     ['GET', '/api/projects', () => library.projects()],
     ['POST', '/api/projects', (_p, body) => library.addProject(str(body, 'path'), { init: !!(body as { init?: unknown }).init })],
@@ -471,12 +562,24 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const project = library.project(str(body, 'project'));
       const team = library.load(str(body, 'team'));
       const base = typeof (body as { base?: unknown }).base === 'string' && (body as { base: string }).base ? (body as { base: string }).base : undefined;
-      const controller = new AbortController();
-      const { runId, done } = await startRun({ team, repo: project.path, goal: str(body, 'goal'), store: storeFor(project), runner, signal: controller.signal, base });
-      const key = `${project.id}/${runId}`;
-      active.set(key, controller);
-      done.catch(() => undefined).finally(() => active.delete(key));
-      return { runId, projectId: project.id };
+      return launch(project, team, str(body, 'goal'), base);
+    }],
+    ['POST', '/api/runs/:pid/:rid/restart', async (p, body) => {
+      const { project, store, run } = findRun(p.pid!, p.rid!);
+      if (run.kind !== 'workflow') throw new BadRequest('only workflow runs can be restarted');
+      const when = (body as { when?: unknown }).when;
+      if (when === 'cancel') {
+        store.append(run.id, { type: 'run.restart_cancelled', data: {} });
+        return { ok: true };
+      }
+      if (store.isLive(run)) throw new BadRequest('this run is still going');
+      if (when === 'reset') {
+        const at = await resetFor(project, run);
+        if (!at) throw new BadRequest('the reset time is not known; restart it now instead');
+        store.append(run.id, { type: 'run.restart_scheduled', data: { at } });
+        return { at };
+      }
+      return restartRun(project, run);
     }],
     ['POST', '/api/runs/:pid/:rid/stop', (p) => {
       const c = active.get(`${p.pid}/${p.rid}`);
@@ -607,6 +710,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       clearInterval(poll);
       clearInterval(keepAlive);
       clearTimeout(autoCleanFirst);
+      clearInterval(restartTimer);
       clearInterval(autoCleanTimer);
       for (const c of active.values()) c.abort();
       for (const res of sse) res.end();

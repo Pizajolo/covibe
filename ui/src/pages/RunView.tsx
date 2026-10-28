@@ -23,10 +23,11 @@ import {
   IconX,
 } from '../components/icons';
 import { BrowserPreview, viewSrc } from '../components/BrowserView';
+import { askedToShip, markAskedToShip, ShipDialog } from '../components/ShipDialog';
 import { Toolbar } from '../components/Toolbar';
 import { AgentStatus, Avatar, Copy, Empty, LoopBadge, Modal, RunStatusPill, useAction, useToast } from '../components/ui';
-import { go, useData, useLive } from '../data';
-import { clock, duration, money, tokens, toolText } from '../format';
+import { go, href, useData, useLive } from '../data';
+import { clock, countdown, duration, money, resetTime, tokens, toolText } from '../format';
 import { useNotify } from '../notify';
 
 type Tab = 'office' | 'board' | 'activity' | 'chat' | 'changes';
@@ -61,6 +62,14 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
   );
   const [chatWith, setChatWith] = useState<string | undefined>();
   const [continueOpen, setContinueOpen] = useState(false);
+  const [ship, setShip] = useState(false);
+  // Once a run you are watching succeeds, ask what to do with its result (once per run).
+  const summary = detail?.summary;
+  useEffect(() => {
+    if (!summary || summary.kind !== 'workflow' || summary.status !== 'succeeded' || !summary.branch || askedToShip(summary.id)) return;
+    markAskedToShip(summary.id);
+    if (summary.finishedAt && Date.now() - Date.parse(summary.finishedAt) < 15 * 60_000) setShip(true);
+  }, [summary?.id, summary?.status]);
   const toast = useToast();
   const { refresh } = useData();
 
@@ -108,6 +117,11 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
             <IconTrash /> Free disk space
           </button>
         )}
+        {!isAsk && run.status === 'succeeded' && run.branch && (
+          <button className="btn primary" onClick={() => setShip(true)} title="Merge, push or open a pull request for the result">
+            <IconBranch /> Ship result
+          </button>
+        )}
         {!isAsk && run.status !== 'running' && run.branch && (
           <button className="btn" onClick={() => setContinueOpen(true)} title="Start a new goal from this run's result">
             <IconBranch /> New goal on this result
@@ -118,7 +132,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
       <div className="content flush">
         <div style={{ padding: '14px 20px', display: 'flex', flexDirection: 'column', gap: 12, borderBottom: '1px solid var(--border)' }}>
           <div className="row wrap" style={{ gap: 14 }}>
-            <RunStatusPill status={run.status} kind={run.kind} paused={run.paused} />
+            <RunStatusPill status={run.status} kind={run.kind} paused={run.paused} limited={run.limit?.waiting} />
             <LoopBadge loops={run.loops} max={run.maxLoops} />
             <QuestionsWaiting run={run} projectId={projectId} />
             <Fact icon={<IconClock />} label={duration(run.startedAt, run.finishedAt)} />
@@ -133,6 +147,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
               </span>
             )}
           </div>
+          <LimitBanner run={run} projectId={projectId} onChange={reload} />
           <Banner run={run} />
           {!isAsk && tab !== 'office' && (
             <div className="members">
@@ -186,6 +201,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
         {tab === 'changes' && <Changes projectId={projectId} run={run} />}
       </div>
 
+      {ship && <ShipDialog projectId={projectId} run={run} onClose={() => setShip(false)} />}
       {continueOpen && (
         <Modal title="New goal on this result" onClose={() => setContinueOpen(false)} wide>
           <p className="small muted">The team starts from the branch {run.branch}, so it can build on what this run produced.</p>
@@ -220,7 +236,88 @@ function QuestionsWaiting({ run, projectId }: { run: RunSummary; projectId: stri
   );
 }
 
+/** The plan's usage limit: a countdown while members wait for the reset, or restarting a run it stopped. */
+function LimitBanner({ run, projectId, onChange }: { run: RunSummary; projectId: string; onChange: () => Promise<unknown> }) {
+  const toast = useToast();
+  const [restart, restarting] = useAction(async (when: 'now' | 'reset' | 'cancel') => {
+    const res = await post<{ runId?: string; at?: string }>(`/api/runs/${projectId}/${run.id}/restart`, { when });
+    if (res.runId) {
+      toast('Restarted from this run’s result.');
+      go('runs', projectId, res.runId);
+    } else if (res.at) toast(`Restarts at ${resetTime(res.at)}.`);
+    await onChange();
+  });
+  const limit = run.limit;
+  if (!limit) return null;
+  if (limit.waiting)
+    return (
+      <div className="banner warn">
+        <IconClock />
+        <div>
+          <strong>Waiting for your plan's usage limit to reset.</strong> {limit.agents.join(', ')} {limit.agents.length > 1 ? 'continue' : 'continues'} where{' '}
+          {limit.agents.length > 1 ? 'they' : 'it'} stopped
+          {limit.until ? (
+            <>
+              {' '}
+              in <strong className="num">{countdown(limit.until)}</strong> ({resetTime(limit.until)})
+            </>
+          ) : (
+            ' once it resets'
+          )}
+          . Keep covibe open; the run continues on its own.
+        </div>
+      </div>
+    );
+  if (run.status === 'running') return null;
+  return (
+    <div className="banner warn limit-banner">
+      <IconClock />
+      <div className="grow">
+        <strong>Stopped by your plan's usage limit.</strong>{' '}
+        {limit.resetsAt && Date.parse(limit.resetsAt) > Date.now() ? (
+          <>
+            It resets in <strong className="num">{countdown(limit.resetsAt)}</strong> ({resetTime(limit.resetsAt)}).
+          </>
+        ) : (
+          'It has reset by now.'
+        )}{' '}
+        {run.restart?.runId ? (
+          <>
+            Restarted as <a href={href('runs', projectId, run.restart.runId)}>a new run</a>.
+          </>
+        ) : run.restart?.at ? (
+          <>
+            Restarts on its own in <strong className="num">{countdown(run.restart.at)}</strong>, from this run's result.
+          </>
+        ) : (
+          'Restart it to carry on from its result (the branch keeps what the team committed).'
+        )}
+      </div>
+      {!run.restart?.runId && (
+        <div className="row" style={{ gap: 6, flex: 'none' }}>
+          {run.restart?.at ? (
+            <button className="btn sm" disabled={restarting} onClick={() => void restart('cancel')}>
+              Cancel restart
+            </button>
+          ) : (
+            limit.resetsAt &&
+            Date.parse(limit.resetsAt) > Date.now() && (
+              <button className="btn sm" disabled={restarting} onClick={() => void restart('reset')}>
+                Restart when it resets
+              </button>
+            )
+          )}
+          <button className="btn sm primary" disabled={restarting} onClick={() => void restart('now')}>
+            Restart now
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Banner({ run }: { run: RunSummary }) {
+  if (run.limit && run.status === 'failed') return null;
   if (run.status === 'escalated')
     return (
       <div className="banner warn">
@@ -245,7 +342,7 @@ function Banner({ run }: { run: RunSummary }) {
       <div className="banner good">
         <IconCheck />
         <div>
-          <strong>All gates passed.</strong> {run.branch ? `The result is on branch ${run.branch}; review it under Changes and merge it when you are happy.` : ''}
+          <strong>All gates passed.</strong> {run.branch ? `The result is on branch ${run.branch}; review it under Changes, then Ship result to merge, push or open a pull request.` : ''}
         </div>
       </div>
     );
@@ -559,6 +656,10 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'agent.tool': return { cls: 'tool', text: toolText(String(d.tool), d.input, roots) };
     case 'agent.finished': return { cls: 'good', text: `Finished · ${d.turns} turns · ${money(d.cost_usd)} · ${tokens((d.tokens?.input ?? 0) + (d.tokens?.output ?? 0) + (d.tokens?.cacheRead ?? 0) + (d.tokens?.cacheWrite ?? 0))} tokens` };
     case 'agent.error': return { cls: 'error', text: `Failed: ${d.error}` };
+    case 'agent.limited': return { cls: 'warn', text: d.waiting ? `Hit the plan's usage limit; continues ${d.until ? `at ${clock(String(d.until))}` : 'once it resets'}` : "Stopped by the plan's usage limit" };
+    case 'run.restart_scheduled': return { cls: '', text: `Restart scheduled for ${new Date(String(d.at)).toLocaleString()}` };
+    case 'run.restart_cancelled': return { cls: '', text: d.error ? `Restart failed: ${d.error}` : 'Restart cancelled' };
+    case 'run.restarted': return { cls: 'good', text: `Restarted as run ${d.run_id}` };
     case 'agent.view': return { cls: 'tool', text: `Looked at ${d.file ? String(d.file).split('/').pop() : `an image from ${d.tool}`}` };
     case 'scope.denied': return { cls: 'warn', text: `Blocked ${d.tool}: ${d.reason}` };
     case 'scope.violation': return { cls: 'warn', text: `Discarded out-of-scope changes: ${(d.files as string[]).join(', ')}` };

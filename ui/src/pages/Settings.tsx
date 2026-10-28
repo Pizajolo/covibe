@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { desktop, get, put, type AppSettings, type NotificationKind, type NotifyChoice } from '../api';
 import { IconInfo } from '../components/icons';
+import { ModelPicker } from '../components/ModelPicker';
 import { Toolbar } from '../components/Toolbar';
+import { UsageMeters } from '../components/Usage';
 import { useAction, useToast } from '../components/ui';
 import { useData, useLive } from '../data';
 import { askPushPermission, pushState } from '../notify';
@@ -10,8 +12,8 @@ function ClaudeAccount() {
   const toast = useToast();
   const { value: env } = useLive(() => get<{ skills: unknown[]; account?: { email?: string; subscriptionType?: string; apiProvider?: string; organization?: string } }>('/api/environment'), []);
   const { value: settings, setValue } = useLive(() => get<AppSettings>('/api/settings'), []);
-  const [save] = useAction(async (model: string) => {
-    setValue(await put<AppSettings>('/api/settings', { designerModel: model }));
+  const [save] = useAction(async (patch: Partial<AppSettings>) => {
+    setValue(await put<AppSettings>('/api/settings', patch));
     toast('Saved');
   });
   return (
@@ -31,15 +33,49 @@ function ClaudeAccount() {
           )}
         </dl>
         {settings && (
-          <label className="field" style={{ maxWidth: 320 }}>
-            Model for designing teams in chat
-            <select className="input" value={settings.designerModel ?? 'sonnet'} onChange={(e) => void save(e.target.value)}>
-              <option value="opus">Opus: best designs, costs more</option>
-              <option value="sonnet">Sonnet: good and quick (default)</option>
-              <option value="haiku">Haiku: cheapest</option>
-            </select>
-          </label>
+          <section className="form-section">
+            <h3 className="small">Designing teams in chat</h3>
+            <ModelPicker
+              compact
+              value={{ model: settings.designerModel, effort: settings.designerEffort }}
+              inherit="Sonnet (default)"
+              onChange={(k, v) => k !== 'thinking' && void save({ [k === 'model' ? 'designerModel' : 'designerEffort']: v } as Partial<AppSettings>)}
+            />
+            <span className="help tiny faint">Models and thinking for team members are set per team (Team → Settings) and per member (Members).</span>
+          </section>
         )}
+      </div>
+    </div>
+  );
+}
+
+function UsageLimits() {
+  const toast = useToast();
+  const { value, setValue } = useLive(() => get<AppSettings>('/api/settings'), []);
+  const [save] = useAction(async (onLimit: 'wait' | 'stop') => {
+    setValue(await put<AppSettings>('/api/settings', { onLimit }));
+    toast(onLimit === 'wait' ? 'Runs wait for the limit to reset and continue' : 'Runs stop at the limit; restart them from the run');
+  });
+  if (!value) return null;
+  const mode = value.onLimit ?? 'wait';
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Usage limits</h2>
+      </div>
+      <div className="card-pad col" style={{ gap: 10 }}>
+        <UsageMeters />
+        <span className="small" style={{ marginTop: 6 }}>
+          When a member hits your plan's 5-hour or weekly limit:
+        </span>
+        <label className="check">
+          <input type="radio" name="on-limit" checked={mode === 'wait'} onChange={() => void save('wait')} />
+          Wait for the limit to reset, then continue where it stopped (the run shows a countdown)
+        </label>
+        <label className="check">
+          <input type="radio" name="on-limit" checked={mode === 'stop'} onChange={() => void save('stop')} />
+          Stop the run; restart it from the run page, right away or when the limit resets
+        </label>
       </div>
     </div>
   );
@@ -211,6 +247,8 @@ export function Settings() {
           <Notifications />
 
           <ClaudeAccount />
+
+          <UsageLimits />
 
           <DiskSpace />
 

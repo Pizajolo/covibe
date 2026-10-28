@@ -76,6 +76,7 @@ export class Library {
     const config = this.read();
     const days = patch.autoCleanDays;
     if (days !== undefined && days !== null && (!Number.isFinite(days) || days < 0 || days > 3650)) throw new BadRequest('autoCleanDays must be between 0 and 3650, or null');
+    if (patch.onLimit !== undefined && patch.onLimit !== 'wait' && patch.onLimit !== 'stop') throw new BadRequest('onLimit is "wait" or "stop"');
     const { notifications: notify, ...rest } = patch;
     const next: Partial<AppSettings> = { ...config.settings, ...rest };
     if (notify !== undefined) {
