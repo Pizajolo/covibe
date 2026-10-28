@@ -444,13 +444,20 @@ week: questions, plan usage close to or at its limit, runs that were stopped or 
 failed, and runs that finished with every gate passed. Choose in Settings → Notifications which of these show under
 the bell and which also go out as system notifications (sent while the app is in the background).
 
+## Live spend
+
+Spend and tokens update while members work, not only when a turn ends. Every few seconds a working member reports
+its running total (`agent.usage`: tokens from the responses streamed so far, priced at Claude's list prices or at the
+prices set for a provider's model). Only the latest total per member and run is kept. When the turn ends, Claude
+Code's exact figure replaces the estimate. Home, the sidebar, runs and the Office all show the running figures.
+
 ## Events
 
 All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event types:
 
 `run.started` `run.finished` `step.started` `step.finished` `step.skipped` `gate.passed` `gate.failed` `loop.goto`
 `agent.started` `agent.text` `agent.tool` `agent.view` `agent.limited` `agent.finished` `agent.error` `scope.denied` `scope.violation`
-`git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit`
+`git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit` `agent.usage`
 `workspace.cleaned` `brain.proposed` `brain.decided` `brain.updated` `team.saved` `question.asked`
 `question.escalated` `question.answered` `run.paused` `run.resumed` `run.restart_scheduled` `run.restart_cancelled`
 `run.restarted`

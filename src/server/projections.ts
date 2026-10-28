@@ -61,6 +61,8 @@ export function summarizeRun(
     return s;
   };
 
+  /** member → the running totals of its turn in progress */
+  const liveUsage = new Map<string, { costUsd: number; tokens: number }>();
   let loops = 0;
   let maxLoops: number | undefined;
   let costUsd = 0;
@@ -100,6 +102,7 @@ export function summarizeRun(
         break;
       case 'agent.limited': {
         const a = agent(e.agent!);
+        liveUsage.delete(e.agent!);
         a.status = 'limited';
         a.turns += d.turns ?? 0;
         a.costUsd += d.cost_usd ?? 0;
@@ -158,6 +161,7 @@ export function summarizeRun(
         break;
       case 'agent.started': {
         const a = agent(e.agent!);
+        liveUsage.delete(e.agent!);
         a.status = 'working';
         a.limitedUntil = undefined;
         limited.delete(e.agent!);
@@ -194,9 +198,14 @@ export function summarizeRun(
         if (card) card.summary = String(d.text).slice(0, 200);
         break;
       }
+      case 'agent.usage':
+        // The running total of the turn in progress; counted at the end unless the turn finishes first.
+        liveUsage.set(e.agent!, { costUsd: d.cost_usd ?? 0, tokens: tokensOf(d) });
+        break;
       case 'agent.finished':
       case 'agent.error': {
         const a = agent(e.agent!);
+        liveUsage.delete(e.agent!);
         const failed = e.type === 'agent.error';
         a.status = failed ? 'error' : 'done';
         a.activity = failed ? `failed: ${d.error}` : undefined;
@@ -262,6 +271,17 @@ export function summarizeRun(
     }
     // A chat after cleanup restores the member's worktree.
     if (e.type === 'agent.started' && e.step === 'chat') worktreesRemoved = false;
+  }
+
+  // Turns still running count with their latest running totals.
+  for (const [name, u] of liveUsage) {
+    const a = agent(name);
+    a.costUsd += u.costUsd;
+    a.tokens += u.tokens;
+    costUsd += u.costUsd;
+    tokens += u.tokens;
+    const card = openCards.get(name);
+    if (card) card.costUsd += u.costUsd;
   }
 
   // Members waiting for the limit, or what stopped the run.
@@ -394,9 +414,58 @@ export function computeStats(
   let gates = 0;
   let gatesPassed = 0;
 
+  /** Count one member turn's spend and tokens: a finished one, or the running total of one in progress. */
+  const tally = (e: RunEvent, teamOf: Map<string, string>) => {
+    const d = e.data as D;
+    const t = Date.parse(e.ts);
+    const cost = Number(d.cost_usd ?? 0);
+    const tok = tokensOf(d);
+    stats.costUsd.all += cost;
+    stats.tokens.all += tok;
+    stats.tokens.input += d.tokens?.input ?? 0;
+    stats.tokens.output += d.tokens?.output ?? 0;
+    stats.tokens.cacheRead += d.tokens?.cacheRead ?? 0;
+    if (t >= startOfDay) {
+      stats.costUsd.today += cost;
+      stats.tokens.today += tok;
+    }
+    if (t >= startOfDay - 6 * DAY) {
+      stats.costUsd.week += cost;
+      stats.tokens.week += tok;
+    }
+    if (t >= startOfDay - 29 * DAY) stats.costUsd.month += cost;
+    const day = daily.get(dayKey(t));
+    if (day) {
+      day.costUsd += cost;
+      day.tokens += tok;
+    }
+    const team = teamOf.get(e.runId) ?? '?';
+    const ak = `${team}/${e.agent}`;
+    const a = byAgent.get(ak) ?? { agent: e.agent ?? '?', team, costUsd: 0, tokens: 0, turns: 0 };
+    a.costUsd += cost;
+    a.tokens += tok;
+    a.turns += d.turns ?? 0;
+    byAgent.set(ak, a);
+    const model = String(d.model ?? 'default');
+    const m = byModel.get(model) ?? { model, costUsd: 0, tokens: 0 };
+    m.costUsd += cost;
+    m.tokens += tok;
+    byModel.set(model, m);
+    const tm = byTeam.get(team);
+    if (tm) tm.costUsd += cost;
+    // Turns from before connections existed ran on your login (or what the team file said).
+    const via = typeof d.via === 'string' ? d.via : 'claude';
+    const v = byVia.get(via) ?? { via, label: via, costUsd: 0, tokens: 0, turns: 0 };
+    v.costUsd += cost;
+    v.tokens += tok;
+    v.turns += d.turns ?? 0;
+    byVia.set(via, v);
+  };
+
   for (const src of sources) {
     stats.activeAgents += src.activeAgents;
     const teamOf = new Map(src.runs.map((r) => [r.id, r.team]));
+    const live = new Map<string, RunEvent>();
     for (const r of src.runs) {
       if (r.kind === 'ask') stats.runs.questions += 1;
       else if (r.kind === 'workflow') {
@@ -425,51 +494,17 @@ export function computeStats(
         if (!prev || prev.seenAt <= e.ts) usage.set(key, { window, ...(account ? { account } : {}), status: d.status, utilization: d.utilization, resetsAt: d.resetsAt, seenAt: e.ts });
         continue;
       }
+      // A turn in progress counts with its latest running total until its end event replaces it.
+      const turnKey = `${e.runId}/${e.agent}`;
+      if (e.type === 'agent.usage') {
+        live.set(turnKey, e);
+        continue;
+      }
       if (e.type !== 'agent.finished' && e.type !== 'agent.error' && e.type !== 'agent.limited') continue;
-      const t = Date.parse(e.ts);
-      const cost = Number(d.cost_usd ?? 0);
-      const tok = tokensOf(d);
-      stats.costUsd.all += cost;
-      stats.tokens.all += tok;
-      stats.tokens.input += d.tokens?.input ?? 0;
-      stats.tokens.output += d.tokens?.output ?? 0;
-      stats.tokens.cacheRead += d.tokens?.cacheRead ?? 0;
-      if (t >= startOfDay) {
-        stats.costUsd.today += cost;
-        stats.tokens.today += tok;
-      }
-      if (t >= startOfDay - 6 * DAY) {
-        stats.costUsd.week += cost;
-        stats.tokens.week += tok;
-      }
-      if (t >= startOfDay - 29 * DAY) stats.costUsd.month += cost;
-      const day = daily.get(dayKey(t));
-      if (day) {
-        day.costUsd += cost;
-        day.tokens += tok;
-      }
-      const team = teamOf.get(e.runId) ?? '?';
-      const ak = `${team}/${e.agent}`;
-      const a = byAgent.get(ak) ?? { agent: e.agent ?? '?', team, costUsd: 0, tokens: 0, turns: 0 };
-      a.costUsd += cost;
-      a.tokens += tok;
-      a.turns += d.turns ?? 0;
-      byAgent.set(ak, a);
-      const model = String(d.model ?? 'default');
-      const m = byModel.get(model) ?? { model, costUsd: 0, tokens: 0 };
-      m.costUsd += cost;
-      m.tokens += tok;
-      byModel.set(model, m);
-      const tm = byTeam.get(team);
-      if (tm) tm.costUsd += cost;
-      // Turns from before connections existed ran on your login (or what the team file said).
-      const via = typeof d.via === 'string' ? d.via : 'claude';
-      const v = byVia.get(via) ?? { via, label: via, costUsd: 0, tokens: 0, turns: 0 };
-      v.costUsd += cost;
-      v.tokens += tok;
-      v.turns += d.turns ?? 0;
-      byVia.set(via, v);
+      live.delete(turnKey);
+      tally(e, teamOf);
     }
+    for (const e of live.values()) tally(e, teamOf);
   }
   stats.daily = [...daily.values()];
   stats.byAgent = [...byAgent.values()].sort((a, b) => b.costUsd - a.costUsd);

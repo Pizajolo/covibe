@@ -226,7 +226,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           const activeAgents = live.reduce((n, r) => n + summary(p, r, undefined, roster).agents.filter((a) => a.status === 'working').length, 0);
           return {
             runs,
-            events: store.eventsOfType(['agent.finished', 'agent.error', 'agent.limited', 'gate.passed', 'gate.failed', 'usage.limit'], since),
+            events: store.eventsOfType(['agent.usage', 'agent.finished', 'agent.error', 'agent.limited', 'gate.passed', 'gate.failed', 'usage.limit'], since),
             live: (r: RunRecord) => store.isLive(r),
             activeAgents,
           };

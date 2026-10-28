@@ -247,6 +247,7 @@ ${list}`;
     prompt,
     env: built.env,
     pricing: built.pricing,
+    via: built.via,
     step: 'curate',
     signal: opts.signal ?? AbortSignal.timeout(agent.limits.timeout_min * 60_000),
     repo: opts.repo,

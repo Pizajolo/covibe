@@ -120,6 +120,7 @@ async function converse(p: {
     env: built.env,
     pricing: built.pricing,
     account: accountOf(built),
+    via: built.via,
     step: 'chat',
     signal: AbortSignal.timeout(agent.limits.timeout_min * 60_000),
   });

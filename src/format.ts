@@ -25,6 +25,9 @@ function toolSummary(tool: string, input: unknown): string {
 }
 
 /** One line per event for the plain log view. */
+/** Running totals that would flood the terminal; the turn's end line has the figures. */
+export const QUIET_EVENTS = new Set(['agent.usage']);
+
 export function formatEvent(e: RunEvent): string {
   const time = dim(e.ts.slice(11, 19));
   const who = [e.step, e.agent].filter(Boolean).join('/') || 'run';
@@ -122,7 +125,9 @@ export function formatEvent(e: RunEvent): string {
       break;
     case 'agent.limited':
       text = yellow(
-        d.waiting
+        d.switched_to
+          ? `hit a usage limit; continues on the ${d.switched_to} account`
+          : d.waiting
           ? `⏸ hit the plan's usage limit; continues ${d.until ? `at ${new Date(String(d.until)).toLocaleTimeString()}` : 'once it resets'}`
           : `stopped by the plan's usage limit${d.resets_at ? ` (resets ${new Date(String(d.resets_at)).toLocaleString()})` : ''}`,
       );

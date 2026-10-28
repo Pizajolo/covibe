@@ -110,6 +110,8 @@ export type AgentStreamEvent =
   | { kind: 'denied'; tool: string; input: unknown; reason: string }
   /** Subscription plan usage, as reported by Claude Code. */
   | { kind: 'rate_limit'; info: RateLimitInfo }
+  /** Tokens used so far in this invocation, and their estimated cost (undefined when the model's prices are unknown). */
+  | { kind: 'usage'; tokens: TokenUsage; costUsd?: number }
   /** An image in a tool's result, which the agent sees (a screenshot it read, say); base64 data. */
   | { kind: 'image'; tool: string; input: unknown; mediaType: string; data: string };
 

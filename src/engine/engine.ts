@@ -319,7 +319,7 @@ class Engine {
         data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd, resumed: !!resume, loop: this.context.loop },
       });
       const turn = (p: { prompt: string; resume?: string }) =>
-        this.runAgent(agent, { cwd, ...p, env: built.env, pricing: built.pricing, account: accountOf(built), outputSchema, step: step.id });
+        this.runAgent(agent, { cwd, ...p, env: built.env, pricing: built.pricing, account: accountOf(built), via: built.via, outputSchema, step: step.id });
       /** Move this member to another account. */
       const move = async (account: string) => {
         unclaim();
@@ -412,7 +412,7 @@ class Engine {
 
   private async runAgent(
     agent: AgentConfig,
-    p: { cwd: string; prompt: string; resume?: string; env: Env; pricing?: BackendEnv['pricing']; account?: string; outputSchema?: JsonSchema; step: string },
+    p: { cwd: string; prompt: string; resume?: string; env: Env; pricing?: BackendEnv['pricing']; account?: string; via?: string; outputSchema?: JsonSchema; step: string },
   ): Promise<AgentResult> {
     // The time limit does not count while the member waits for an answer or the run is paused.
     const deadline = new Deadline(agent.limits.timeout_min * 60_000);
@@ -512,6 +512,7 @@ class Engine {
         env: built.env,
         pricing: built.pricing,
         account: accountOf(built),
+        via: built.via,
         outputSchema: LEAD_SCHEMA,
         step: QUESTION_STEP,
         signal: this.opts.signal ? AbortSignal.any([this.opts.signal, timeout]) : timeout,
@@ -585,6 +586,8 @@ export function buildInvocation(
     pricing?: BackendEnv['pricing'];
     /** The Claude account the turn runs on, for its usage reports. */
     account?: string;
+    /** The account or connection it runs on (BackendEnv.via), for live spend. */
+    via?: string;
     outputSchema?: JsonSchema;
     step: string;
     signal: AbortSignal;
@@ -656,7 +659,7 @@ export function buildInvocation(
       const timer = setInterval(deliver, 500);
       stopLive = () => clearInterval(timer);
     },
-    onEvent: eventSink(store, runId, base, p.account),
+    onEvent: eventSink(store, runId, base, { account: p.account, via: p.via, model: agent.model }),
   };
 }
 
@@ -669,8 +672,13 @@ const LIMIT_RESUME =
 /** Larger images are not kept (screenshots are well below this). */
 const MAX_VIEW_BYTES = 10 << 20;
 
-/** Turn an agent's stream into stored events (text, tool calls, denials, plan usage, images it saw). `account`: whose plan usage reports belong to. */
-export function eventSink(store: EventStore, runId: string, base: { step?: string; agent?: string }, account?: string) {
+/**
+ * Turn an agent's stream into stored events (text, tool calls, denials, plan
+ * usage, running spend, images it saw). `account`: whose plan usage reports
+ * belong to; `via` and `model` label the running spend.
+ */
+export function eventSink(store: EventStore, runId: string, base: { step?: string; agent?: string }, meta: { account?: string; via?: string; model?: string } = {}) {
+  const { account } = meta;
   const emit = (e: NewEvent) => store.append(runId, e);
   return (e: AgentStreamEvent) => {
     if (e.kind === 'text') emit({ ...base, type: 'agent.text', data: { text: clip(e.text, 4000) } });
@@ -687,6 +695,8 @@ export function eventSink(store: EventStore, runId: string, base: { step?: strin
     }
     else if (e.kind === 'denied') emit({ ...base, type: 'scope.denied', data: { tool: e.tool, input: summarize(e.input), reason: e.reason } });
     else if (e.kind === 'rate_limit') emit({ ...base, type: 'usage.limit', data: { ...e.info, ...(account ? { account } : {}) } });
+    // Running totals of the turn in progress; its agent.finished (or error, or limited) replaces them.
+    else if (e.kind === 'usage') store.appendLatest(runId, { ...base, type: 'agent.usage', data: { tokens: e.tokens, cost_usd: e.costUsd ?? null, model: meta.model ?? null, ...(meta.via ? { via: meta.via } : {}) } });
   };
 }
 
