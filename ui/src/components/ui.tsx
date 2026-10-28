@@ -75,7 +75,7 @@ export function Avatar({ name, index, status, size }: { name: string; index: num
 
 // ---- modal
 
-export function Modal({ title, children, onClose, footer, wide }: { title: ReactNode; children: ReactNode; onClose: () => void; footer?: ReactNode; wide?: boolean }) {
+export function Modal({ title, children, onClose, footer, wide, huge }: { title: ReactNode; children: ReactNode; onClose: () => void; footer?: ReactNode; wide?: boolean; huge?: boolean }) {
   useEffect(() => {
     const on = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', on);
@@ -83,7 +83,7 @@ export function Modal({ title, children, onClose, footer, wide }: { title: React
   }, [onClose]);
   return (
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal>
+      <div className={`modal ${wide ? 'wide' : ''} ${huge ? 'huge' : ''}`} role="dialog" aria-modal>
         <div className="modal-head">
           <h2>{title}</h2>
         </div>

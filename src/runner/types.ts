@@ -62,13 +62,21 @@ export type CustomParam =
   | { type: 'files'; description: string; optional?: boolean }
   | { type: 'list'; description: string; optional?: boolean };
 
+/** What a custom tool answers: text, or text with images the agent sees (a screenshot; base64 data). */
+export type ToolOutput = string | { text: string; images?: { data: string; mediaType: string }[] };
+
 /** A tool covibe implements in-process and offers to an agent. */
 export interface CustomTool {
   name: string;
   description: string;
   params: Record<string, CustomParam>;
-  /** Returns the text the agent sees. Throwing reports the error to the agent. */
-  run(args: Record<string, unknown>): Promise<string> | string;
+  /** Returns what the agent sees. Throwing reports the error to the agent. */
+  run(args: Record<string, unknown>): Promise<ToolOutput> | ToolOutput;
+}
+
+/** A tool answer as plain text (images dropped). */
+export function outputText(out: ToolOutput): string {
+  return typeof out === 'string' ? out : out.text;
 }
 
 /** What Claude Code offers on this machine, read without running a turn. */

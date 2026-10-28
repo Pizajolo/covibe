@@ -38,12 +38,21 @@ import { EventStore } from '../events/store.js';
 import type { DeliveryMode, RunEvent, RunRecord } from '../events/types.js';
 import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
-import type { AccountInfo, ConnectionsInfo, MemberInfo, RunDetail, RunSummary, Stats, TeamDetail, UsageReport } from './api-types.js';
+import type { AccountInfo, ConnectionsInfo, MemberInfo, PreviewSite, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UsageReport } from './api-types.js';
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
 import { gitCheckout, gitCommit, gitMerge, gitOverview, gitPull, gitPullRequest, gitPush, gitRevert, gitShow } from './gitops.js';
 import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, summarizeRun, usageReport } from './projections.js';
+import { diskSource, gitSource, isText, PREVIEW_BRIDGE, relPath, SiteServer, type SiteSource } from './site.js';
+import { browserHub, type LiveTab } from '../browser/hub.js';
+import type { BrowserProvider } from '../browser/types.js';
 
 const exec = promisify(execFile);
+/** Files listed in the Preview tab, at most. */
+const MAX_LISTED = 5000;
+/** Text shown in the code view, at most. */
+const MAX_TEXT = 1 << 20;
+/** A run's preview site closes after this long without a request. */
+const PREVIEW_IDLE_MS = 30 * 60_000;
 const UI_DIR = new URL('../../dist-ui/', import.meta.url).pathname;
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -64,6 +73,8 @@ export interface ServerOptions {
   /** Fixed token (tests); otherwise random per start. */
   token?: string;
   uiDir?: string;
+  /** The browser members' browser tools use (the Mac app passes its built-in Chromium); default a headless one via Playwright. */
+  browser?: BrowserProvider;
 }
 
 export interface CovibeServer {
@@ -86,9 +97,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   if (runner.usage && !connections.usageReader) connections.usageReader = (env) => runner.usage!(env);
   const token = opts.token ?? randomBytes(24).toString('hex');
   const uiDir = opts.uiDir ?? UI_DIR;
+  if (opts.browser) browserHub.use(opts.browser);
   const stores = new Map<string, EventStore>();
   const active = new Map<string, AbortController>();
   const sse = new Set<ServerResponse>();
+  /** Live browser streams (see streamBrowser). */
+  const streams = new Set<ServerResponse>();
   /** `${runId}/${agent}` for members answering a chat after their run ended. */
   const answering = new Set<string>();
   const busyIn = (runId: string) => new Set([...answering].filter((k) => k.startsWith(`${runId}/`)).map((k) => k.slice(runId.length + 1)));
@@ -321,6 +335,89 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       return { load: () => library.loadFile(run.teamFile) };
     }
     return { load: () => library.load(listing.id) };
+  };
+
+  /** Where a run's files are: its result branch, or your checkout when it worked there. */
+  const filesOf = async (project: Project, run: RunRecord): Promise<{ source: SiteSource; kind: RunFiles['source'] }> => {
+    if (!run.branch) return { source: diskSource(project.path, 'your checkout'), kind: { kind: 'checkout' } };
+    const exists = await exec('git', ['rev-parse', '--verify', '--quiet', `${run.branch}^{commit}`], { cwd: project.path }).then(() => true, () => false);
+    if (!exists) throw new NotFound(`branch ${run.branch} no longer exists, so its files cannot be shown`);
+    return { source: gitSource(project.path, run.branch), kind: { kind: 'branch', ref: run.branch } };
+  };
+
+  // Each run's files served as a website on a port of its own (see site.ts).
+  const previews = new Map<string, Promise<SiteServer>>();
+  const previewFor = (project: Project, run: RunRecord): Promise<SiteServer> => {
+    const key = `${project.id}/${run.id}`;
+    let site = previews.get(key);
+    if (!site) {
+      site = filesOf(project, run).then(({ source }) => SiteServer.start(source, { inject: PREVIEW_BRIDGE }));
+      site.catch(() => previews.delete(key));
+      previews.set(key, site);
+    }
+    return site;
+  };
+  const previewSweep = setInterval(() => {
+    for (const [key, site] of previews) {
+      void site.then((s) => {
+        if (Date.now() - s.lastUsed < PREVIEW_IDLE_MS) return;
+        previews.delete(key);
+        void s.close();
+      }, () => undefined);
+    }
+  }, 60_000);
+  previewSweep.unref();
+
+  /** A member's tab in covibe's browser, open in this process. */
+  const tabOf = async (pid: string, rid: string, agent: string) => {
+    const { project, store, run } = findRun(pid, rid);
+    const live = await browserHub.get(run.id, agent);
+    if (!live) throw new NotFound(`${agent} has no browser open in this app`);
+    return { project, store, run, live };
+  };
+  /** People drive a member's browser once they took control, or while the member is not working. */
+  const mayDrive = (project: Project, run: RunRecord, live: LiveTab) => {
+    if (live.control === 'human') return;
+    const state = summary(project, run).agents.find((a) => a.name === live.agent);
+    if (state?.status === 'working' || busyIn(run.id).has(live.agent)) throw new BadRequest(`${live.agent} is using this browser. Take control first.`);
+  };
+
+  /** A member's tab as live JPEG frames (multipart/x-mixed-replace, so an <img> shows it). */
+  const streamBrowser = async (pid: string, rid: string, agent: string, req: IncomingMessage, res: ServerResponse) => {
+    const { live } = await tabOf(pid, rid, agent);
+    res.writeHead(200, { 'content-type': 'multipart/x-mixed-replace; boundary=covibeframe', 'cache-control': 'no-store', connection: 'keep-alive', 'x-content-type-options': 'nosniff' });
+    // Each frame is followed at once by the next part's boundary and headers: browsers show a part
+    // only once the next one has begun.
+    const next = '\r\n--covibeframe\r\ncontent-type: image/jpeg\r\n\r\n';
+    res.write(next.slice(2));
+    streams.add(res);
+    // A slow reader gets the newest frame when it catches up, not a backlog.
+    let draining = false;
+    let pending: Buffer | undefined;
+    const write = (jpeg: Buffer) => {
+      if (draining) {
+        pending = jpeg;
+        return;
+      }
+      if (!res.write(Buffer.concat([jpeg, Buffer.from(next)]))) {
+        draining = true;
+        res.once('drain', () => {
+          draining = false;
+          const next = pending;
+          pending = undefined;
+          if (next) write(next);
+        });
+      }
+    };
+    const end = () => {
+      streams.delete(res);
+      if (!res.writableEnded) res.end();
+    };
+    const stop = live.watch(write, end);
+    req.on('close', () => {
+      stop();
+      streams.delete(res);
+    });
   };
 
   const membersOf = (run: RunRecord): MemberInfo[] => {
@@ -643,10 +740,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     ['DELETE', '/api/teams/:tid/file', (p, _b, q) => (library.deleteFile(p.tid!, q.get('path') ?? ''), { files: library.files(p.tid!) })],
 
     ['GET', '/api/runs', (_p, _b, q) => allRuns(Number(q.get('limit') ?? 100), q.get('project') ?? undefined)],
-    ['GET', '/api/runs/:pid/:rid', (p): RunDetail => {
+    ['GET', '/api/runs/:pid/:rid', async (p): Promise<RunDetail> => {
       const { project, store, run } = findRun(p.pid!, p.rid!);
       const events = store.events(run.id);
+      const browsers = await Promise.all((await browserHub.list(run.id)).map((t) => t.state()));
       return {
+        browsers,
         summary: summary(project, run, events),
         members: membersOf(run),
         events,
@@ -732,6 +831,76 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       done.catch(() => undefined);
       return { runId, projectId: project.id };
     }],
+    ['GET', '/api/runs/:pid/:rid/files', async (p): Promise<RunFiles> => {
+      const { project, run } = findRun(p.pid!, p.rid!);
+      const { source, kind } = await filesOf(project, run);
+      const all = (await source.list()).sort((a, b) => a.path.localeCompare(b.path));
+      let changed: Set<string>;
+      if (run.branch) {
+        const names = await exec('git', ['diff', '--name-only', '-z', `${run.base ?? 'HEAD'}...${run.branch}`], { cwd: project.path, maxBuffer: 32 << 20 }).then(
+          (r) => r.stdout.split('\0').filter(Boolean),
+          () => [] as string[],
+        );
+        changed = new Set(names);
+      } else changed = new Set(summary(project, run).filesChanged);
+      // Changed files first, so a cut-off list still has them.
+      const ordered = [...all.filter((f) => changed.has(f.path)), ...all.filter((f) => !changed.has(f.path))];
+      const files = ordered.slice(0, MAX_LISTED).map((f) => ({ ...f, changed: changed.has(f.path) }));
+      return { source: kind, files: files.sort((a, b) => a.path.localeCompare(b.path)), ...(all.length > MAX_LISTED ? { truncated: true } : {}) };
+    }],
+    ['GET', '/api/runs/:pid/:rid/file', async (p, _b, q): Promise<RunFile> => {
+      const { project, run } = findRun(p.pid!, p.rid!);
+      const path = relPath(q.get('path') ?? '');
+      if (!path) throw new BadRequest('"path" names a file of the run');
+      const { source } = await filesOf(project, run);
+      const data = await source.read(path);
+      if (!data) throw new NotFound(`there is no ${path} in ${source.label}`);
+      if (!isText(data)) return { path, size: data.length, binary: true };
+      const truncated = data.length > MAX_TEXT;
+      return { path, size: data.length, binary: false, content: data.subarray(0, MAX_TEXT).toString('utf8'), ...(truncated ? { truncated } : {}) };
+    }],
+    ['POST', '/api/runs/:pid/:rid/preview', async (p): Promise<PreviewSite> => {
+      const { project, run } = findRun(p.pid!, p.rid!);
+      const site = await previewFor(project, run);
+      site.lastUsed = Date.now();
+      return { port: site.port, key: site.key, label: site.source.label };
+    }],
+    // ---- members' live browsers
+    ['GET', '/api/runs/:pid/:rid/browser/:agent', async (p) => (await tabOf(p.pid!, p.rid!, p.agent!)).live.state()],
+    ['POST', '/api/runs/:pid/:rid/browser/:agent/control', async (p, body) => {
+      const { live } = await tabOf(p.pid!, p.rid!, p.agent!);
+      const by = (body as { by?: unknown }).by;
+      if (by !== 'human' && by !== 'member') throw new BadRequest('"by" is human or member');
+      live.setControl(by);
+      return live.state();
+    }],
+    ['POST', '/api/runs/:pid/:rid/browser/:agent/navigate', async (p, body) => {
+      const { project, run, live } = await tabOf(p.pid!, p.rid!, p.agent!);
+      mayDrive(project, run, live);
+      live.touch();
+      const b = body as { url?: unknown; action?: unknown };
+      if (b.action === 'back' || b.action === 'forward' || b.action === 'reload') await live.tab.history(b.action);
+      else if (typeof b.url === 'string') {
+        try {
+          await live.tab.goto(await live.resolve(b.url));
+        } catch (err) {
+          throw new BadRequest((err as Error).message);
+        }
+      } else throw new BadRequest('give "url", or "action": back, forward or reload');
+      return live.state();
+    }],
+    ['POST', '/api/runs/:pid/:rid/browser/:agent/input', async (p, body) => {
+      const { project, run, live } = await tabOf(p.pid!, p.rid!, p.agent!);
+      mayDrive(project, run, live);
+      live.touch();
+      await browserInput(live, body as Record<string, unknown>);
+      return { ok: true };
+    }],
+    ['DELETE', '/api/runs/:pid/:rid/browser/:agent', async (p) => {
+      const { run } = await tabOf(p.pid!, p.rid!, p.agent!);
+      await browserHub.close(run.id, p.agent!, 'closed by you');
+      return { ok: true };
+    }],
     ['GET', '/api/runs/:pid/:rid/diff', async (p) => {
       const { project, run } = findRun(p.pid!, p.rid!);
       if (!run.branch) return { files: [], patch: '', note: 'This run worked directly in your checkout, so there is no separate branch to compare.' };
@@ -762,6 +931,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
 
       const auth = req.headers.authorization === `Bearer ${token}` || url.searchParams.get('token') === token;
       if (!auth) return send(res, 401, { error: 'missing or wrong token' });
+
+      const liveBrowser = /^\/api\/runs\/([^/]+)\/([^/]+)\/browser\/([^/]+)\/live$/.exec(url.pathname);
+      if (liveBrowser && req.method === 'GET') {
+        const [, pid, rid, agent] = liveBrowser.map((x) => decodeURIComponent(x));
+        return await streamBrowser(pid!, rid!, agent!, req, res);
+      }
 
       if (url.pathname === '/api/events' && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
@@ -811,8 +986,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       clearTimeout(autoCleanFirst);
       clearInterval(restartTimer);
       clearInterval(autoCleanTimer);
+      clearInterval(previewSweep);
+      await Promise.all([...previews.values()].map((s) => s.then((x) => x.close(), () => undefined)));
       for (const c of active.values()) c.abort();
       for (const res of sse) res.end();
+      for (const res of streams) res.end();
+      await browserHub.shutdown();
       await new Promise<void>((r) => server.close(() => r()));
       // Give aborted runs a moment to record their end.
       await new Promise((r) => setTimeout(r, 200));
@@ -836,6 +1015,41 @@ function match(pattern: string, path: string): Record<string, string> | undefine
     else if (a[i] !== b[i]) return undefined;
   }
   return params;
+}
+
+/** A person's mouse and keyboard in a member's browser (from the live view). Coordinates are in the page's window. */
+async function browserInput(live: LiveTab, b: Record<string, unknown>) {
+  const tab = live.tab;
+  const coord = (k: string, max: number) => {
+    const v = Number(b[k]);
+    if (!Number.isFinite(v)) throw new BadRequest(`"${k}" must be a number`);
+    return Math.max(0, Math.min(max - 1, v));
+  };
+  const button = b.button === 'right' || b.button === 'middle' ? b.button : 'left';
+  const clickCount = Math.max(1, Math.min(3, Number(b.clickCount) || 1));
+  const { width, height } = tab.viewport;
+  switch (b.type) {
+    case 'click':
+      return tab.click(coord('x', width), coord('y', height), { button, clickCount });
+    case 'down':
+    case 'up':
+    case 'move':
+      return tab.mouse(b.type, coord('x', width), coord('y', height), { button, clickCount });
+    case 'wheel':
+      return tab.wheel(coord('x', width), coord('y', height), Number(b.deltaX) || 0, Number(b.deltaY) || 0);
+    case 'text':
+      if (typeof b.text !== 'string' || !b.text) throw new BadRequest('"text" is required');
+      return tab.insertText(b.text.slice(0, 10_000));
+    case 'key':
+      if (typeof b.key !== 'string' || !b.key) throw new BadRequest('"key" is required');
+      try {
+        return await tab.press(b.key);
+      } catch (err) {
+        throw new BadRequest((err as Error).message);
+      }
+    default:
+      throw new BadRequest('"type" is click, down, up, move, wheel, text or key');
+  }
 }
 
 function str(body: unknown, key: string, allowEmpty = false): string {

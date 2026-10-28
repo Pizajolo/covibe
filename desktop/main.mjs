@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, session, shell } from 'electron';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let server;
@@ -30,7 +30,9 @@ async function start() {
   loadLoginPath();
   // The engine is ESM compiled to dist/; the UI is served by the same server.
   const { startServer } = await import(join(here, '..', 'dist', 'server', 'app.js'));
-  server = await startServer({ uiDir: join(here, '..', 'dist-ui') });
+  // Members' browsers run in Electron's own Chromium (offscreen windows), so nothing needs installing.
+  const { electronProvider } = await import(join(here, '..', 'dist', 'browser', 'electron.js'));
+  server = await startServer({ uiDir: join(here, '..', 'dist-ui'), browser: electronProvider({ BrowserWindow, session }) });
   createWindow();
 }
 

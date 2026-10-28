@@ -44,7 +44,11 @@ export type EventType =
   | 'run.resumed'
   | 'run.restart_scheduled'
   | 'run.restart_cancelled'
-  | 'run.restarted';
+  | 'run.restarted'
+  | 'browser.opened'
+  | 'browser.page'
+  | 'browser.control'
+  | 'browser.closed';
 
 export interface RunEvent {
   id: number;

@@ -102,6 +102,33 @@ export interface Template {
   description?: string;
 }
 
+/** A run's files, as the Preview tab lists them. */
+export interface RunFiles {
+  /** Where they come from: the run's result branch, or your checkout when the run worked there. */
+  source: { kind: 'branch'; ref: string } | { kind: 'checkout' };
+  files: { path: string; size: number; changed: boolean }[];
+  /** Set when the listing was cut short. */
+  truncated?: boolean;
+}
+
+/** One file of a run, for the code view. */
+export interface RunFile {
+  path: string;
+  size: number;
+  binary: boolean;
+  /** Text content (binary files have none). */
+  content?: string;
+  truncated?: boolean;
+}
+
+/** A run's files served as a website on a port of its own (see server/site.ts). */
+export interface PreviewSite {
+  port: number;
+  /** Traded for a cookie on the first request: open `/?covibe_key=<key>` on the port. */
+  key: string;
+  label: string;
+}
+
 export interface DiffResult {
   files: { path: string; additions: number; deletions: number }[];
   patch: string;
@@ -131,8 +158,12 @@ export interface AgentState {
   waitingOn?: string;
   /** While limited: when it continues. */
   limitedUntil?: string;
-  /** Set when its latest turn drives a browser (Playwright, Chromium…): the page it last named, if any. */
-  browser?: { url?: string; since: string };
+  /**
+   * Set when its latest turn drives a browser (Playwright, Chromium…): the page it last named, if any.
+   * live: it has an open tab in covibe's browser (see browser.* events), which people can watch;
+   * control: who acts in it.
+   */
+  browser?: { url?: string; since: string; live?: boolean; control?: 'member' | 'human' };
   /** The newest image it saw this run (a screenshot it read; see agent.view), and how many it saw. */
   lastView?: number;
   views?: number;
@@ -255,6 +286,20 @@ export interface RunDetail {
   answering: string[];
   /** Absolute paths the UI shows relative (the project folder). */
   roots: string[];
+  /** Members with a tab open in covibe's browser in this app (watch and control them live). */
+  browsers: LiveBrowser[];
+}
+
+/** A member's tab in covibe's browser, as the live view shows it. */
+export interface LiveBrowser {
+  agent: string;
+  url: string;
+  title: string;
+  viewport: { width: number; height: number };
+  /** Who acts in the tab: the member, or a person who took control. */
+  control: 'member' | 'human';
+  /** Which browser runs it ("covibe’s built-in Chromium", "Chromium (Playwright)"). */
+  provider: string;
 }
 
 export interface UsageWindow {

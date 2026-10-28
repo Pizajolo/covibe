@@ -132,8 +132,9 @@ export function OfficeStage({
   const desks = run.agents.map((a, i) => {
     const state = deskState(a, run, answering.includes(a.name));
     const busy = answering.includes(a.name);
-    // The browser button shows while the member's latest turn uses a browser and the run (or a chat) is live.
-    const browsing = !!a.browser && (busy || (run.status === 'running' && state !== 'sleeping'));
+    // The browser button shows while the member's latest turn uses a browser and the run (or a chat) is live,
+    // and for as long as its tab in covibe's browser is open.
+    const browsing = !!a.browser && (!!a.browser.live || busy || (run.status === 'running' && state !== 'sleeping'));
     return { agent: a, state, note: deskNote(a, state, run), question: deskQuestion(a, run), browsing, ...spots[i]! };
   });
   const scene: Scene = {
@@ -176,9 +177,9 @@ export function OfficeStage({
               d.browsing && (
                 <button
                   key={`web-${d.agent.name}`}
-                  className={`office-web ${d.agent.lastView ? 'seen' : ''}`}
-                  aria-label={`${d.agent.name} is using a browser${d.agent.browser?.url ? ` on ${d.agent.browser.url}` : ''}. See what it sees`}
-                  title={`What ${d.agent.name} sees${d.agent.browser?.url ? ` · ${d.agent.browser.url}` : ''}`}
+                  className={`office-web ${d.agent.browser?.live ? 'live' : d.agent.lastView ? 'seen' : ''}`}
+                  aria-label={`${d.agent.name} is using a browser${d.agent.browser?.url ? ` on ${d.agent.browser.url}` : ''}. ${d.agent.browser?.live ? 'Watch it live' : 'See what it sees'}`}
+                  title={`${d.agent.browser?.live ? `Watch ${d.agent.name}’s browser live` : `What ${d.agent.name} sees`}${d.agent.browser?.url ? ` · ${d.agent.browser.url}` : ''}`}
                   // Right of the head, opposite the thought bubble.
                   style={{ left: `${((d.cx + 19) / W) * 100}%`, top: `${((d.by - 23) / h) * 100}%` }}
                   onClick={() => onBrowser(d.agent.name)}

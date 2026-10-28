@@ -281,7 +281,7 @@ function Members({ teamId, doc, edit, files, onFiles }: { teamId: string; doc: D
       </div>
       <div className="split-main">
         {current ? (
-          <MemberForm key={current} teamId={teamId} name={current} index={names.indexOf(current)} agent={agents[current]!} names={names} edit={edit} files={files} onFiles={onFiles} onDeleted={() => setSelected(undefined)} teamSkills={doc.defaults?.skills} teamBackend={doc.defaults?.backend} />
+          <MemberForm key={current} teamId={teamId} name={current} index={names.indexOf(current)} agent={agents[current]!} names={names} edit={edit} files={files} onFiles={onFiles} onDeleted={() => setSelected(undefined)} teamSkills={doc.defaults?.skills} teamBackend={doc.defaults?.backend} teamBrowser={doc.defaults?.browser === true} />
         ) : (
           <Empty icon={<IconTeam />} title="No members" action={<button className="btn primary" onClick={() => setAdding(true)}><IconPlus /> Add member</button>} />
         )}
@@ -298,7 +298,7 @@ function roleLine(a: Doc): string {
   return `${model}${a.effort ? ` (${a.effort})` : ''}${a.backend?.account ? ` · ${a.backend.account} account` : ''} · ${writes ? (a.scope?.write ? `writes ${a.scope.write.join(', ') || 'nothing'}` : 'writes anywhere') : 'read-only'}`;
 }
 
-function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, onDeleted, teamSkills, teamBackend }: { teamId: string; name: string; index: number; agent: Doc; names: string[]; edit: Edit; files: string[]; onFiles: () => void; onDeleted: () => void; teamSkills?: string[]; teamBackend?: Doc }) {
+function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, onDeleted, teamSkills, teamBackend, teamBrowser }: { teamId: string; name: string; index: number; agent: Doc; names: string[]; edit: Edit; files: string[]; onFiles: () => void; onDeleted: () => void; teamSkills?: string[]; teamBackend?: Doc; teamBrowser?: boolean }) {
   const p = (...k: (string | number)[]) => ['agents', name, ...k];
   const tools: string[] = Array.isArray(agent.tools) ? agent.tools : [];
   const writes = tools.some((t) => WRITE_TOOLS.has(t));
@@ -379,6 +379,24 @@ function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, o
             );
           })}
         </div>
+      </section>
+
+      <section className="form-section">
+        <h3>Browser</h3>
+        <div className="seg">
+          <button className={agent.browser === undefined ? 'on' : ''} onClick={() => void edit([{ op: 'delete', path: p('browser') }])}>
+            Team default ({teamBrowser ? 'on' : 'off'})
+          </button>
+          <button className={agent.browser === true ? 'on' : ''} onClick={() => void edit([{ op: 'set', path: p('browser'), value: true }])}>
+            On
+          </button>
+          <button className={agent.browser === false ? 'on' : ''} onClick={() => void edit([{ op: 'set', path: p('browser'), value: false }])}>
+            Off
+          </button>
+        </div>
+        <span className="tiny faint">
+          covibe's browser: it can open its dev server or the pages it builds, click through them, take screenshots and read the console. You watch it live from its desk and can take control.
+        </span>
       </section>
 
       <section className="form-section">
@@ -1288,6 +1306,13 @@ function TeamSettings({ doc, edit }: { doc: Doc; edit: Edit }) {
               ? 'Members change your working copy directly. Only use this for read-only teams: shell commands are not limited to allowed paths in this mode.'
               : 'Each member that writes code gets its own git worktree; covibe merges their work into a branch per run. Your checkout is never touched.'}
           </span>
+        </section>
+        <section className="form-section">
+          <h3>Browser</h3>
+          <label className="check">
+            <input type="checkbox" checked={d.browser === true} onChange={(e) => void edit([{ op: 'set', path: ['defaults', 'browser'], value: e.target.checked ? true : null }])} />
+            Give every member covibe's browser (members can still turn it off)
+          </label>
         </section>
         <section className="form-section">
           <h3>Skills for every member</h3>

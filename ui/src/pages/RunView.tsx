@@ -9,6 +9,7 @@ import {
   IconChat,
   IconCheck,
   IconClock,
+  IconEye,
   IconFlow,
   IconFolder,
   IconHome,
@@ -23,6 +24,7 @@ import {
   IconX,
 } from '../components/icons';
 import { BrowserPreview, viewSrc } from '../components/BrowserView';
+import { Preview } from '../components/Preview';
 import { askedToShip, markAskedToShip, ShipDialog } from '../components/ShipDialog';
 import { Toolbar } from '../components/Toolbar';
 import { AgentStatus, Avatar, Copy, Empty, LoopBadge, Modal, RunStatusPill, useAction, useToast } from '../components/ui';
@@ -30,7 +32,7 @@ import { go, href, useData, useLive } from '../data';
 import { clock, countdown, duration, money, resetTime, tokens, toolText } from '../format';
 import { useNotify } from '../notify';
 
-type Tab = 'office' | 'board' | 'activity' | 'chat' | 'changes';
+type Tab = 'office' | 'board' | 'activity' | 'chat' | 'changes' | 'preview';
 type Delivery = 'queue' | 'steer' | 'interrupt';
 
 const DELIVERY: Record<Delivery, { label: string; pending: string; help: (a: string) => string; toast: (a: string) => string }> = {
@@ -97,7 +99,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
   if (!detail) return <Toolbar title="Loading…" />;
   const run = detail.summary;
   const isAsk = run.kind === 'ask';
-  const tab: Tab = (['office', 'board', 'activity', 'chat', 'changes'].includes(tabParam ?? '') ? tabParam : isAsk ? 'chat' : 'office') as Tab;
+  const tab: Tab = (['office', 'board', 'activity', 'chat', 'changes', 'preview'].includes(tabParam ?? '') ? tabParam : isAsk ? 'chat' : 'office') as Tab;
   const setTab = (t: Tab) => go('runs', projectId, runId, t);
   const openChat = (agent: string) => {
     setChatWith(agent);
@@ -192,6 +194,11 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
               <IconBranch width={14} height={14} /> Changes <span className="badge">{run.filesChanged.length}</span>
             </button>
           )}
+          {!isAsk && (
+            <button className={tab === 'preview' ? 'on' : ''} onClick={() => setTab('preview')}>
+              <IconEye width={14} height={14} /> Preview
+            </button>
+          )}
         </nav>
 
         {tab === 'office' && <OfficeTab detail={detail} projectId={projectId} selected={chatWith} onSelect={setChatWith} onSent={reload} />}
@@ -199,6 +206,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
         {tab === 'activity' && <Activity events={detail.events} run={run} roots={detail.roots} />}
         {tab === 'chat' && <Chat detail={detail} projectId={projectId} selected={chatWith} onSelect={setChatWith} onSent={reload} />}
         {tab === 'changes' && <Changes projectId={projectId} run={run} />}
+        {tab === 'preview' && <Preview projectId={projectId} run={run} />}
       </div>
 
       {ship && <ShipDialog projectId={projectId} run={run} onClose={() => setShip(false)} />}
@@ -584,8 +592,8 @@ function MemberPanel({
               )}
               <div className="row small" style={{ gap: 8 }}>
                 <span className="grow ellipsis mono tiny">{a.browser?.url ?? (a.browser ? 'a page it did not name' : '')}</span>
-                <button className="btn sm" onClick={onBrowser}>
-                  <IconBrowser /> {a.views ? `${a.views} screenshot${a.views > 1 ? 's' : ''}` : 'Preview'}
+                <button className={`btn sm ${a.browser?.live ? 'primary' : ''}`} onClick={onBrowser}>
+                  <IconBrowser /> {a.browser?.live ? 'Watch live' : a.views ? `${a.views} screenshot${a.views > 1 ? 's' : ''}` : 'Preview'}
                 </button>
               </div>
             </div>
@@ -680,6 +688,10 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'question.answered': return { cls: 'good', text: `${d.by === 'human' ? 'You' : d.by} answered #${d.id}: ${d.answer}` };
     case 'run.paused': return { cls: 'warn', text: 'Run paused until you answer' };
     case 'run.resumed': return { cls: 'good', text: 'Run resumed' };
+    case 'browser.opened': return { cls: 'tool', text: `Opened its browser (${d.provider})` };
+    case 'browser.page': return { cls: 'tool', text: `Browser on ${d.url}` };
+    case 'browser.control': return { cls: d.by === 'human' ? 'warn' : '', text: d.by === 'human' ? 'You took control of its browser' : 'Browser handed back' };
+    case 'browser.closed': return { cls: '', text: `Browser closed (${d.reason})` };
     default: return { cls: '', text: JSON.stringify(d) };
   }
 }

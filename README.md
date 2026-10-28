@@ -51,7 +51,7 @@ To try the UI in a browser instead, run `covibe app`.
 | Screen | What it shows and does |
 |---|---|
 | **Home** | Today's and this week's estimated spend, tokens, members working now, run outcomes, gate pass rate; your plan's 5-hour and weekly usage as Claude Code reports it, with reset countdowns (also at the bottom of the sidebar); spend per day and per team member; live runs and recent ones. Give a new goal or ask a question right there (⌘N anywhere). |
-| **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; a member driving a browser gets a browser button above its desk that shows what it sees (see [Browser preview](#browser-preview)); click a desk for the member's details, chat and activity), **Board** (a column per workflow step, a card per member and fix round, gate results), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch). Stop a run, or start a **new goal on this result**. When a run succeeds, covibe asks what to do with its result: **merge** it into your branch (and push), **open a pull request**, or just **push** the branch (**Ship result** brings that back later). |
+| **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; a member driving a browser gets a browser button above its desk that opens its browser live, or what it saw (see [Preview and live browser](#preview-and-live-browser)); click a desk for the member's details, chat and activity), **Board** (a column per workflow step, a card per member and fix round, gate results), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch), **Preview** (the result's files: web pages open as a site you can click through, Markdown is rendered, everything else shows as text). Stop a run, or start a **new goal on this result**. When a run succeeds, covibe asks what to do with its result: **merge** it into your branch (and push), **open a pull request**, or just **push** the branch (**Ship result** brings that back later). |
 | **Chat** | While a member is working, choose **Now** (it reads your message between tool calls and adjusts), **Stop and redirect** (it ends its current turn and answers you first) or **Next turn**. After the run, the member resumes its session and answers right away; anything it changes is scope-checked and merged into the run's branch. |
 | **Ask a question** | A read-only session with one member in your project: it can read the code but not change it. Follow-up questions continue the same session. |
 | **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, report format, connection, limits), **Workflow** (a drag-and-drop graph: drag steps to reorder, drag members onto a step or between steps, drag a gate's ↺ handle onto an earlier step to set where failed work goes back; plus forms for gates and the fix loop), **Team settings** (connection, sandbox, limits), **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
@@ -166,6 +166,7 @@ agents:
   qa:
     prompt: prompts/qa.md
     tools: [Read, Grep, Glob]
+    browser: true                   # covibe's browser: open, click through and screenshot pages (also under defaults)
     output_schema: schemas/review.json
   # …
 
@@ -258,6 +259,7 @@ The rules in the team file are enforced in code, not left to prompts:
 | Gates | JSONata, evaluated by the engine against schema-validated reports |
 | Bounded loops | `max_loops`, `max_turns`, `timeout_min`, optional `max_budget_usd`, `max_parallel` |
 | Messaging | `send_message` only accepts the agent's `can_message` targets |
+| Browser | `browser_*` tools only for members with `browser: true`. A sandboxed member's browser reaches its `network` domains plus local addresses; `file://` pages are refused (its working folder is served over http instead) |
 
 **Worktrees.** With `isolation: worktree` (the default), the run gets an integration branch `covibe/<run-id>`, and
 each writing agent gets its own worktree and branch, brought up to date with the integration branch before each
@@ -431,14 +433,45 @@ instead; its page then offers **Restart now** or **Restart when it resets** (a s
 the app). A restart runs the same goal with the same team, starting from the stopped run's branch so its committed
 work is kept.
 
-## Browser preview
+## Preview and live browser
 
-When a member builds or tests a website with a browser (a Bash command running Playwright, Puppeteer, headless
-Chromium and the like, or a browser MCP tool), the Office shows a browser button above its desk. It opens what the
-member sees: the screenshots it looked at, newest first and following new ones live, and the address it went to,
-which you can open in your own browser. Claude sees a page only when it takes a screenshot and reads it (or a
-browser tool returns one), so that is what the preview shows; a test run that takes no screenshot shows the address
-only. covibe keeps the newest 40 images per member and run in the project's `.covibe/covibe.db`.
+**Preview tab.** Every run has a Preview tab with its files: the result branch as merged so far (or your checkout,
+for a run that worked there), changed files marked. A web page opens as a site you can click through: links,
+styles, scripts and images load, the address bar and the file list follow your clicks, and back, forward and
+reload work. Markdown is rendered (or shown as source), other text files show read-only, and **Open** opens the
+page in your own browser. The site is served from a port of its own on 127.0.0.1 (its own origin, so the page's
+scripts cannot reach the app), behind a key that only the app hands out, and closes after 30 minutes unused.
+
+**covibe's browser.** Give a member `browser: true` (per member, or under `defaults`; the team editor has a switch)
+and it gets a browser of its own and these tools:
+
+| Tool | What it does |
+|---|---|
+| `browser_open` | Open an address (`http://localhost:5173`) or a file of its working folder (`index.html`, `dist/`), served over http so links and scripts work |
+| `browser_snapshot` | Read the page as text: headings, text, tables and every control numbered, like `[12] button "Sign in"` or `[7] textbox "Email" value=""`; `find` keeps only matching lines |
+| `browser_click`, `browser_type`, `browser_select`, `browser_press` | Act on a numbered element (or a point), type into fields, pick options, press keys; each answers with the page afterwards |
+| `browser_scroll`, `browser_navigate`, `browser_resize` | Scroll, go back, forward or reload, try other window sizes (a phone at 390×844) |
+| `browser_screenshot` | See the window as an image (it also lands in the member's screenshot history) |
+| `browser_wait`, `browser_console`, `browser_evaluate` | Wait for text, read console logs, errors and failed requests, run JavaScript in the page |
+
+The member's tab is live in the app: its desk gets a blue browser button that opens it. You watch it as it works
+and can **take control**: click, scroll and type in the page and use its address bar while the member waits at its
+next browser step, then **hand it back** (closing the window or leaving it for 30 seconds hands it back too). While
+the member is not working you can use its tab right away, so after a run you can click through what it left open.
+Dialogs (`alert`, `confirm`) answer themselves and show up in the console; new-tab links open in the same tab.
+Each member has its own private session (cookies, storage), kept until 20 minutes after its last use.
+
+In the Mac app the browser is the app's own Chromium (Electron, offscreen), so nothing needs installing. The CLI
+and `covibe app` start a headless Chromium through Playwright: Playwright's Chromium when installed
+(`npx playwright install chromium`), else Google Chrome or Microsoft Edge, or the browser at `COVIBE_BROWSER`.
+A run started in the terminal keeps its tab in that process, so the app shows its screenshots instead of the live
+tab.
+
+**Other browsers.** A member that drives a browser on its own (Playwright, Puppeteer or headless Chromium in a Bash
+command, or a browser MCP tool) also gets the browser button: it shows the screenshots it looked at, newest first
+and following new ones, and the address it went to, which you can open in your own browser. Claude sees a page
+only when it takes a screenshot and reads it (or a browser tool returns one), so that is what the preview shows.
+covibe keeps the newest 40 images per member and run in the project's `.covibe/covibe.db`.
 
 ## Notifications
 
@@ -476,7 +509,7 @@ All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event t
 `git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit` `agent.usage`
 `workspace.cleaned` `brain.proposed` `brain.decided` `brain.updated` `team.saved` `question.asked`
 `question.escalated` `question.answered` `run.paused` `run.resumed` `run.restart_scheduled` `run.restart_cancelled`
-`run.restarted`
+`run.restarted` `browser.opened` `browser.page` `browser.control` `browser.closed`
 
 `agent.finished` carries turns, estimated cost, duration, model and token counts; `usage.limit` carries the plan
 usage Claude Code reports (window, status, utilization, reset time). `message.queued` and `message.delivered` carry
@@ -493,6 +526,9 @@ src/engine/scope.ts        pre-tool-use write-scope checks
 src/engine/chat.ts         queue-or-resume chat
 src/engine/questions.ts    members' questions: the lead first, then you; pausing the run
 src/engine/browser.ts      spotting members that drive a browser, and the page they go to
+src/browser/               covibe's browser: tabs over the DevTools protocol (tab.ts), page snapshots (page-script.ts),
+                           members' tools (tools.ts), live tabs and taking control (hub.ts), Playwright and Electron
+src/server/site.ts         a run's files (or a member's folder) served as a website on a port of its own
 src/events/store.ts        SQLite runs, events, sessions, inbox, questions, images members saw (node:sqlite, WAL)
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
 src/runner/backend.ts      per-agent environment for each backend
@@ -504,7 +540,7 @@ src/server/gitops.ts       git in the project's checkout: status, branches, grap
 ui/src/components/Office.tsx    the run as a pixel office (office-art.ts draws it, office-state.ts maps member states)
 src/main.ts                CLI
 ui/                        the app UI (React, Vite, CodeMirror)
-desktop/                   the macOS shell (Electron): window, menus, folder picker, quit guard
+desktop/                   the macOS shell (Electron): window, menus, folder picker, quit guard, members' browser
 ```
 
 The SDK is pinned to an exact version. An SDK upgrade or API change touches `src/runner/claude-sdk.ts` only.
@@ -512,7 +548,8 @@ The SDK is pinned to an exact version. An SDK upgrade or API change touches `src
 ## Development
 
 ```sh
-npm test            # vitest: config, scope, backends, engine, chat, server API and projections (scripted runner, real git repos)
+npm test            # vitest: config, scope, backends, engine, chat, server API and projections (scripted runner, real git repos);
+                    # the browser tests drive a real headless Chromium and are skipped where none can start
 npm run typecheck   # engine and UI
 npm run dev -- validate examples/feature-team/team.yaml
 

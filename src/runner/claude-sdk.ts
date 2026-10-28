@@ -533,7 +533,9 @@ function customServer(tools: CustomTool[]) {
     tools: tools.map((t) =>
       tool(t.name, t.description, shape(t), async (args: Record<string, unknown>) => {
         try {
-          return { content: [{ type: 'text', text: await t.run(args) }] };
+          const out = await t.run(args);
+          if (typeof out === 'string') return { content: [{ type: 'text' as const, text: out }] };
+          return { content: [{ type: 'text' as const, text: out.text }, ...(out.images ?? []).map((i) => ({ type: 'image' as const, data: i.data, mimeType: i.mediaType }))] };
         } catch (err) {
           return { content: [{ type: 'text', text: `Error: ${(err as Error).message}` }], isError: true };
         }

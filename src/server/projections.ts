@@ -24,9 +24,9 @@ export function shortenPaths(text: string, roots: string[] = []): string {
 export function toolLabel(tool: string, input: unknown, roots: string[] = []): string {
   const i = (input ?? {}) as D;
   const pick = i.file_path ?? i.notebook_path ?? i.command ?? i.pattern ?? i.path ?? i.url ?? i.query ?? i.to;
-  if (pick === undefined) return tool.replace(/^mcp__team__/, '');
+  if (pick === undefined) return tool.replace(/^mcp__(team|covibe)__/, '');
   const shown = shortenPaths(String(pick), roots).replace(/\s+/g, ' ').trim();
-  return `${tool.replace(/^mcp__team__/, '')} ${shown.length > 90 ? shown.slice(0, 89) + '…' : shown}`;
+  return `${tool.replace(/^mcp__(team|covibe)__/, '')} ${shown.length > 90 ? shown.slice(0, 89) + '…' : shown}`;
 }
 
 export function summarizeRun(
@@ -169,7 +169,8 @@ export function summarizeRun(
         a.activity = e.step === QUESTION_STEP && answeringFor.has(e.agent!) ? `answering ${answeringFor.get(e.agent!)}'s question` : d.resumed ? 'resuming…' : 'starting…';
         a.invocations += 1;
         a.updatedAt = e.ts;
-        a.browser = undefined;
+        // A live tab outlasts the turn; a browser it drove some other way does not.
+        if (!a.browser?.live) a.browser = undefined;
         if (e.step && e.step !== 'chat' && e.step !== QUESTION_STEP) {
           const card: BoardCard = { agent: e.agent!, round: loops, status: 'working', costUsd: 0 };
           step(e.step).cards.push(card);
@@ -182,6 +183,22 @@ export function summarizeRun(
         a.activity = toolLabel(String(d.tool), d.input, [run.repo]);
         a.updatedAt = e.ts;
         if (d.browser) a.browser = { url: d.browser.url ?? a.browser?.url, since: a.browser?.since ?? e.ts };
+        break;
+      }
+      case 'browser.opened':
+      case 'browser.page': {
+        const a = agent(e.agent!);
+        a.browser = { url: d.url ?? a.browser?.url, since: a.browser?.since ?? e.ts, live: true, control: a.browser?.control ?? 'member' };
+        break;
+      }
+      case 'browser.control': {
+        const a = agent(e.agent!);
+        if (a.browser?.live) a.browser.control = d.by === 'human' ? 'human' : 'member';
+        break;
+      }
+      case 'browser.closed': {
+        const a = agent(e.agent!);
+        if (a.browser) a.browser = { url: a.browser.url, since: a.browser.since };
         break;
       }
       case 'agent.view': {
