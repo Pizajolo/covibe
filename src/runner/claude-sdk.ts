@@ -1,6 +1,8 @@
 // The only module that imports the Claude Agent SDK. SDK upgrades and API
 // changes should touch this file and nothing else.
 import { randomUUID } from 'node:crypto';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   createSdkMcpServer,
   query,
@@ -13,6 +15,7 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import { claudeConfigDirs, mainConfigDir, priceOf } from '../connections/store.js';
 import type { Env } from './backend.js';
 import type { AgentInvocation, AgentResult, AgentRunner, CustomTool, EnvironmentInfo, LivePriority, PlanUsage, TokenUsage } from './types.js';
 
@@ -66,7 +69,17 @@ export class ClaudeSdkRunner implements AgentRunner {
   }
 
   async run(inv: AgentInvocation): Promise<AgentResult> {
+    const result = await this.turn(inv);
+    // Claude Code prices every model as Claude; another provider's model gets its own prices.
+    if (inv.pricing && result.tokens) result.costUsd = priceOf(inv.pricing, result.tokens);
+    return result;
+  }
+
+  private async turn(inv: AgentInvocation): Promise<AgentResult> {
     const started = Date.now();
+    // A session started on another Claude account lives in that account's
+    // config folder; bring it over so this account can pick it up.
+    if (inv.resumeSessionId) carrySession(inv.resumeSessionId, mainConfigDir(inv.env), claudeConfigDirs());
     const abortController = new AbortController();
     const onAbort = () => abortController.abort();
     inv.signal.addEventListener('abort', onAbort, { once: true });
@@ -314,6 +327,38 @@ export function limitOf(error: string, rejected: AgentResult['limit']): AgentRes
   const epoch = /\|(\d{10,13})\b/.exec(error)?.[1];
   const resetsAt = rejected?.resetsAt ?? (epoch ? Math.round(Number(epoch) / (epoch.length > 10 ? 1000 : 1)) : undefined);
   return { resetsAt, window: rejected?.window };
+}
+
+/**
+ * Make a session's transcript available in `target` (a Claude Code config
+ * folder), copying it from whichever of `dirs` has it. Claude Code keeps
+ * sessions under <config>/projects/<folder for the working directory>/<id>.jsonl.
+ */
+export function carrySession(sessionId: string, target: string, dirs: string[]): boolean {
+  const find = (dir: string) => {
+    const projects = join(dir, 'projects');
+    if (!existsSync(projects)) return undefined;
+    for (const p of readdirSync(projects)) if (existsSync(join(projects, p, `${sessionId}.jsonl`))) return p;
+    return undefined;
+  };
+  if (find(target)) return true;
+  for (const dir of dirs) {
+    if (dir === target) continue;
+    const project = find(dir);
+    if (!project) continue;
+    try {
+      const from = join(dir, 'projects', project);
+      const to = join(target, 'projects', project);
+      mkdirSync(to, { recursive: true });
+      copyFileSync(join(from, `${sessionId}.jsonl`), join(to, `${sessionId}.jsonl`));
+      // Subagent transcripts and tool output files sit in a folder named after the session.
+      if (existsSync(join(from, sessionId))) cpSync(join(from, sessionId), join(to, sessionId), { recursive: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 /** Base64 images inside tool results: what the agent sees of a screenshot it read or a browser tool returned. */

@@ -23,6 +23,7 @@ A team is one team.yaml (YAML 1.2) plus Markdown prompt files and optional JSON 
 - workflow.steps run in order. A step is { id, agent } or { id, parallel: [{ agent, task }] }. task is a JSONata expression over earlier reports, e.g. "plan.tasks[owner = 'frontend']". A step's output is its member's structured report (or {text}) under the step id.
 - gate is a JSONata expression that must be literally true, e.g. "review.blocking_count = 0". When it fails, on_gate_fail { goto, max_loops, feed: [expressions], then: escalate_to_human | fail } loops back (workflow.on_gate_fail is the default for all gated steps). goto must be this or an earlier step.
 - defaults: backend ({ type: subscription } by default), model, isolation (worktree), max_parallel (2–3 to save plan limits), limits { max_turns, timeout_min }, sandbox { network: [domains], allow_write: [folders] }, skills (for every member).
+- backend: { type: subscription } is the user's own Claude login; { type: subscription, account: <id> } is another of their Claude accounts; { type: connection, connection: <id>, model: <model id> } runs the member on another provider's model (the model goes inside backend, and Claude Code's tools still work). Use only the accounts and providers listed under "Accounts and providers" below; other models are less reliable than Claude on long tool-heavy work, so suggest them for simpler roles (reviewing, testing) unless the user asks otherwise.
 - brain: { curator: <member> } makes that member maintain the project brain (shared notes everyone reads; others propose additions). The curator needs Write or Edit.
 - lead: <member> answers members' questions first (they ask with an ask_question tool); if the lead cannot answer, the question goes to the user and the run pauses. Defaults to a member named manager; null sends questions straight to the user. Make the planner the lead.
 - Reserved step ids: goal, loop, feedback, question.
@@ -73,6 +74,8 @@ export interface DesignStart {
   effort?: Effort;
   env?: Env;
   builtinSkills?: () => Promise<EnvironmentInfo['skills']>;
+  /** The Claude accounts and providers set up in Settings → Advanced, described for the architect. */
+  connections?: () => string;
 }
 
 /** Start a design conversation (or continue one) and send a message. Returns at once; the reply streams as events. */
@@ -116,7 +119,7 @@ export async function design(opts: DesignStart & { runId?: string; message: stri
     .run({
       agentName: ARCHITECT,
       prompt,
-      systemPrompt: GUIDE,
+      systemPrompt: opts.connections ? `${GUIDE}\n\n${opts.connections()}` : GUIDE,
       cwd,
       resumeSessionId: session?.sessionId,
       model: agent.model,

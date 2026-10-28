@@ -1,9 +1,10 @@
 import type { AgentConfig, TeamConfig } from '../config/types.js';
 import type { EventStore } from '../events/store.js';
 import type { DeliveryMode, RunRecord } from '../events/types.js';
-import { backendEnv, type Env } from '../runner/backend.js';
+import type { Connections } from '../connections/store.js';
+import type { Env } from '../runner/backend.js';
 import type { AgentRunner } from '../runner/types.js';
-import { buildInvocation, finishedData, newRunId } from './engine.js';
+import { accountOf, buildInvocation, finishedData, isBalanced, newRunId, resolverOf } from './engine.js';
 import { readOnly } from './scope.js';
 import { Workspace } from './workspace.js';
 
@@ -27,6 +28,7 @@ export async function chat(opts: {
   agent: string;
   message: string;
   env?: Env;
+  connections?: Connections;
   /** For a live run: wait for its next turn (default), steer it while it works, or interrupt it. */
   delivery?: DeliveryMode;
 }): Promise<ChatOutcome> {
@@ -57,7 +59,7 @@ export async function chat(opts: {
   const isolation = run.branch ? 'worktree' : 'none';
   const workspace = await Workspace.attach(run.repo, runId, isolation, run.branch);
   await workspace.restore(session.cwd);
-  return converse({ store, runner: opts.runner, team, run, agent, prompt, cwd: session.cwd, resume: session.sessionId, env: opts.env, workspace });
+  return converse({ store, runner: opts.runner, team, run, agent, prompt, cwd: session.cwd, resume: session.sessionId, env: opts.env, connections: opts.connections, workspace });
 }
 
 /**
@@ -73,6 +75,7 @@ export async function ask(opts: {
   agent: string;
   question: string;
   env?: Env;
+  connections?: Connections;
 }): Promise<{ runId: string; done: Promise<ChatOutcome> }> {
   const configured = opts.team.agents[opts.agent];
   if (!configured) throw new Error(`team ${opts.team.name} has no agent "${opts.agent}"`);
@@ -81,7 +84,7 @@ export async function ask(opts: {
   opts.store.append(run.id, { type: 'run.started', data: { team: opts.team.name, goal: opts.question, kind: 'ask', agent: agent.name, isolation: 'none', steps: [] } });
   opts.store.append(run.id, { type: 'chat.message', agent: agent.name, step: 'chat', data: { from: 'human', to: agent.name, text: opts.question } });
   const prompt = `${opts.question}\n\n(You are answering a question about this repository. You can read but not change anything.)`;
-  const done = converse({ store: opts.store, runner: opts.runner, team: opts.team, run, agent, prompt, cwd: opts.repo, env: opts.env }).finally(() => {
+  const done = converse({ store: opts.store, runner: opts.runner, team: opts.team, run, agent, prompt, cwd: opts.repo, env: opts.env, connections: opts.connections }).finally(() => {
     const status = opts.store.events(run.id).some((e) => e.type === 'agent.error') ? 'failed' : 'succeeded';
     opts.store.finishRun(run.id, status);
     opts.store.append(run.id, { type: 'run.finished', data: { status, loops: 0, cost_usd: null } });
@@ -99,12 +102,14 @@ async function converse(p: {
   cwd: string;
   resume?: string;
   env?: Env;
+  connections?: Connections;
   workspace?: Workspace;
 }): Promise<ChatOutcome> {
   const { store, run, agent } = p;
-  const { env } = backendEnv(agent.backend, p.env ?? process.env);
+  const account = isBalanced(agent, p.connections) ? await p.connections!.pick() : undefined;
+  const built = await resolverOf(p.connections).resolve(account ? { ...agent.backend, account } : agent.backend, p.env ?? process.env);
   const base = { step: 'chat', agent: agent.name };
-  store.append(run.id, { ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, cwd: p.cwd, resumed: !!p.resume, chat: true } });
+  store.append(run.id, { ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd: p.cwd, resumed: !!p.resume, chat: true } });
 
   const inv = buildInvocation(p.team, store, run.id, agent, {
     repo: run.repo,
@@ -112,13 +117,15 @@ async function converse(p: {
     root: run.branch ? p.cwd : run.repo,
     prompt: p.prompt,
     resume: p.resume,
-    env,
+    env: built.env,
+    pricing: built.pricing,
+    account: accountOf(built),
     step: 'chat',
     signal: AbortSignal.timeout(agent.limits.timeout_min * 60_000),
   });
   const result = await p.runner.run(inv).finally(() => inv.onControl?.(null));
   if (result.sessionId) store.saveSession(run.id, agent.name, result.sessionId, p.cwd);
-  store.append(run.id, { ...base, type: result.ok ? 'agent.finished' : 'agent.error', data: finishedData(agent, result) });
+  store.append(run.id, { ...base, type: result.ok ? 'agent.finished' : 'agent.error', data: finishedData(agent, result, built.via) });
 
   if (result.ok && agent.writes && p.workspace) {
     const c = await p.workspace.collect(agent.name, agent.writeScope, `chat: ${agent.name}`);

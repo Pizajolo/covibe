@@ -106,6 +106,15 @@ export function summarizeRun(
         a.tokens += tokensOf(d);
         costUsd += d.cost_usd ?? 0;
         tokens += tokensOf(d);
+        if (d.switched_to) {
+          // Sharing accounts: it moves on to another one right away.
+          a.status = 'working';
+          a.activity = `limit reached; continuing on the ${d.switched_to === 'main' ? 'main' : d.switched_to} account`;
+          a.updatedAt = e.ts;
+          const open = openCards.get(e.agent!);
+          if (open) open.costUsd += d.cost_usd ?? 0;
+          break;
+        }
         a.limitedUntil = d.until ?? undefined;
         a.activity = d.waiting ? "waiting for the plan's limit to reset" : "stopped by the plan's limit";
         a.updatedAt = e.ts;
@@ -374,11 +383,13 @@ export function computeStats(
     byAgent: [],
     byModel: [],
     byTeam: [],
+    byVia: [],
     usage: [],
   };
   const byAgent = new Map<string, Stats['byAgent'][number]>();
   const byModel = new Map<string, Stats['byModel'][number]>();
   const byTeam = new Map<string, Stats['byTeam'][number]>();
+  const byVia = new Map<string, Stats['byVia'][number]>();
   const usage = new Map<string, UsageWindow>();
   let gates = 0;
   let gatesPassed = 0;
@@ -407,9 +418,11 @@ export function computeStats(
         continue;
       }
       if (e.type === 'usage.limit') {
-        const key = String(d.window ?? 'plan');
+        const window = String(d.window ?? 'plan');
+        const account = typeof d.account === 'string' && d.account !== 'main' ? d.account : undefined;
+        const key = `${account ?? 'main'}/${window}`;
         const prev = usage.get(key);
-        if (!prev || prev.seenAt <= e.ts) usage.set(key, { window: key, status: d.status, utilization: d.utilization, resetsAt: d.resetsAt, seenAt: e.ts });
+        if (!prev || prev.seenAt <= e.ts) usage.set(key, { window, ...(account ? { account } : {}), status: d.status, utilization: d.utilization, resetsAt: d.resetsAt, seenAt: e.ts });
         continue;
       }
       if (e.type !== 'agent.finished' && e.type !== 'agent.error' && e.type !== 'agent.limited') continue;
@@ -449,13 +462,21 @@ export function computeStats(
       byModel.set(model, m);
       const tm = byTeam.get(team);
       if (tm) tm.costUsd += cost;
+      // Turns from before connections existed ran on your login (or what the team file said).
+      const via = typeof d.via === 'string' ? d.via : 'claude';
+      const v = byVia.get(via) ?? { via, label: via, costUsd: 0, tokens: 0, turns: 0 };
+      v.costUsd += cost;
+      v.tokens += tok;
+      v.turns += d.turns ?? 0;
+      byVia.set(via, v);
     }
   }
   stats.daily = [...daily.values()];
   stats.byAgent = [...byAgent.values()].sort((a, b) => b.costUsd - a.costUsd);
   stats.byModel = [...byModel.values()].sort((a, b) => b.costUsd - a.costUsd);
   stats.byTeam = [...byTeam.values()].sort((a, b) => b.costUsd - a.costUsd);
-  stats.usage = [...usage.values()].sort((a, b) => a.window.localeCompare(b.window));
+  stats.byVia = [...byVia.values()].sort((a, b) => b.costUsd - a.costUsd || b.tokens - a.tokens);
+  stats.usage = [...usage.values()].sort((a, b) => (a.account ?? '').localeCompare(b.account ?? '') || a.window.localeCompare(b.window));
   stats.gatePassRate = gates ? gatesPassed / gates : undefined;
   return stats;
 }
@@ -500,14 +521,15 @@ export function collectNotifications(
         add('question', { title: `${from} asks you`, body: String(d.question), questionId: id, open: !answered.has(id) && !!run && src.live(run) });
       } else if (e.type === 'usage.limit' && (d.status === 'allowed_warning' || d.status === 'rejected')) {
         // Every member reports the same window; one notification per window, state and reset.
-        const key = `${d.window}/${d.status}/${d.resetsAt}`;
+        const account = typeof d.account === 'string' && d.account !== 'main' ? d.account : undefined;
+        const key = `${account ?? 'main'}/${d.window}/${d.status}/${d.resetsAt}`;
         if (limits.has(key)) continue;
         limits.add(key);
-        const name = LIMIT_WINDOWS[String(d.window)] ?? 'plan';
+        const name = `${account ? `${account} account's ` : ''}${LIMIT_WINDOWS[String(d.window)] ?? 'plan'}`;
         const used = typeof d.utilization === 'number' ? Math.round(d.utilization > 1 ? d.utilization : d.utilization * 100) : undefined;
         add('limit', {
           title: d.status === 'rejected' ? `Reached your ${name} limit` : `Close to your ${name} limit`,
-          body: d.status === 'rejected' ? 'Members on your subscription wait until it resets.' : used !== undefined ? `${used}% used.` : undefined,
+          body: d.status === 'rejected' ? `Members on ${account ? 'this account' : 'your subscription'} wait until it resets, or move to another account when you share them.` : used !== undefined ? `${used}% used.` : undefined,
         });
       } else if (e.type === 'agent.limited' && d.waiting) {
         // One per run and reset: every member that hits the limit reports it.
@@ -548,7 +570,8 @@ export function resetIso(v: unknown): string | undefined {
  * otherwise the last values members' turns reported. A window whose reset
  * time has passed counts as fresh.
  */
-export function usageReport(plan: PlanUsage | undefined, fromRuns: UsageWindow[], now = new Date()): UsageReport {
+export function usageReport(plan: PlanUsage | undefined, allFromRuns: UsageWindow[], now = new Date(), account = 'main'): UsageReport {
+  const fromRuns = allFromRuns.filter((u) => (u.account ?? 'main') === account);
   const status = new Map(fromRuns.map((u) => [u.window, u]));
   const fresh = (resetsAt: string | undefined) => !resetsAt || Date.parse(resetsAt) > now.getTime();
   if (plan?.available) {

@@ -3,18 +3,23 @@ import { Composer } from '../components/Composer';
 import { IconBolt, IconCheck, IconCoin, IconFolder, IconGauge, IconInfo, IconPlus, IconTeam } from '../components/icons';
 import { RunCard, RunRow } from '../components/RunCard';
 import { Toolbar } from '../components/Toolbar';
-import { UsageMeters } from '../components/Usage';
+import { UsageMeters, useUsage } from '../components/Usage';
 import { Empty } from '../components/ui';
 import { href, openNewProject, useData } from '../data';
 import { dayLabel, greeting, money, tokens } from '../format';
 
 export function Home({ onNewGoal }: { onNewGoal: () => void }) {
   const { overview } = useData();
+  const { usage } = useUsage();
   if (!overview) return <Toolbar title="covibe" />;
   const { stats, runs, projects, teams } = overview;
   const live = runs.filter((r) => r.status === 'running');
   const recent = runs.filter((r) => r.status !== 'running').slice(0, 8);
   const needsSetup = !projects.length || !teams.some((t) => t.valid);
+  const accounts = usage?.accounts?.length ?? 0;
+  // Spend per account or provider is worth a table once there is more than your own login.
+  const vias = stats.byVia.filter((v) => v.costUsd > 0 || v.tokens > 0);
+  const showVias = vias.length > 1 || vias.some((v) => v.via !== 'claude');
 
   return (
     <>
@@ -75,7 +80,7 @@ export function Home({ onNewGoal }: { onNewGoal: () => void }) {
             <div className="card">
               <div className="card-head">
                 <h2>Plan usage</h2>
-                <span className="hint">your Claude subscription</span>
+                <span className="hint">{accounts ? `${accounts + 1} Claude accounts${usage?.balance ? ', shared' : ''}` : 'your Claude subscription'}</span>
               </div>
               <div className="card-pad col" style={{ gap: 16 }}>
                 <UsageMeters />
@@ -83,7 +88,7 @@ export function Home({ onNewGoal }: { onNewGoal: () => void }) {
                   <IconInfo />
                   <span>
                     Dollar amounts are estimates of what the same usage would cost on the API. On a subscription you are not billed per token; it counts
-                    against your plan's limits instead.
+                    against your plan's limits instead. Models from other providers are priced at the rates you set in Settings → Advanced.
                   </span>
                 </div>
               </div>
@@ -143,6 +148,30 @@ export function Home({ onNewGoal }: { onNewGoal: () => void }) {
                   />
                 ) : (
                   <p className="small muted">Nothing yet.</p>
+                )}
+                {showVias && (
+                  <table className="table" style={{ marginTop: 14 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ paddingLeft: 0 }}>Account or provider</th>
+                        <th className="r">Tokens</th>
+                        <th className="r" style={{ paddingRight: 0 }}>
+                          Est. spend
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {vias.map((v) => (
+                        <tr key={v.via}>
+                          <td style={{ paddingLeft: 0 }}>{v.label}</td>
+                          <td className="r num">{tokens(v.tokens)}</td>
+                          <td className="r num" style={{ paddingRight: 0 }}>
+                            {money(v.costUsd)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 )}
                 {stats.byModel.length > 0 && (
                   <table className="table" style={{ marginTop: 14 }}>

@@ -10,6 +10,8 @@ export function tempDir(prefix = 'covibe-test-') {
 
 // Keep run worktrees (and any library) out of the real ~/.covibe during tests.
 process.env.COVIBE_HOME ??= tempDir('covibe-home-');
+// Keys go to a private file, never the developer's Keychain.
+process.env.COVIBE_SECRETS ??= 'file';
 
 /** A git repo with one commit, ready for worktree isolation. */
 export function tempRepo(): string {

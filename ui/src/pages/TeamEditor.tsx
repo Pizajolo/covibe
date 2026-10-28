@@ -4,7 +4,8 @@ import { CodeEditor } from '../components/CodeEditor';
 import { Composer } from '../components/Composer';
 import { DesignChat } from '../components/DesignChat';
 import { IconAlert, IconArrowLeft, IconChat, IconArrowRight, IconCheck, IconCode, IconCopy, IconFile, IconFlow, IconGear, IconLoop, IconPlay, IconPlus, IconTeam, IconTrash } from '../components/icons';
-import { ModelPicker } from '../components/ModelPicker';
+import { useConnections } from '../components/Connections';
+import { ModelPicker, type ProviderChoice } from '../components/ModelPicker';
 import { Toolbar } from '../components/Toolbar';
 import { SkillPicker } from './Skills';
 import { Avatar, Empty, Modal, useAction, useToast } from '../components/ui';
@@ -280,7 +281,7 @@ function Members({ teamId, doc, edit, files, onFiles }: { teamId: string; doc: D
       </div>
       <div className="split-main">
         {current ? (
-          <MemberForm key={current} teamId={teamId} name={current} index={names.indexOf(current)} agent={agents[current]!} names={names} edit={edit} files={files} onFiles={onFiles} onDeleted={() => setSelected(undefined)} teamSkills={doc.defaults?.skills} />
+          <MemberForm key={current} teamId={teamId} name={current} index={names.indexOf(current)} agent={agents[current]!} names={names} edit={edit} files={files} onFiles={onFiles} onDeleted={() => setSelected(undefined)} teamSkills={doc.defaults?.skills} teamBackend={doc.defaults?.backend} />
         ) : (
           <Empty icon={<IconTeam />} title="No members" action={<button className="btn primary" onClick={() => setAdding(true)}><IconPlus /> Add member</button>} />
         )}
@@ -293,10 +294,11 @@ function Members({ teamId, doc, edit, files, onFiles }: { teamId: string; doc: D
 function roleLine(a: Doc): string {
   const tools: string[] = Array.isArray(a.tools) ? a.tools : [];
   const writes = tools.some((t) => WRITE_TOOLS.has(t));
-  return `${a.model ?? 'default model'}${a.effort ? ` (${a.effort})` : ''} · ${writes ? (a.scope?.write ? `writes ${a.scope.write.join(', ') || 'nothing'}` : 'writes anywhere') : 'read-only'}`;
+  const model = a.backend?.type === 'connection' ? `${a.backend.model ?? '?'} on ${a.backend.connection}` : (a.model ?? 'default model');
+  return `${model}${a.effort ? ` (${a.effort})` : ''}${a.backend?.account ? ` · ${a.backend.account} account` : ''} · ${writes ? (a.scope?.write ? `writes ${a.scope.write.join(', ') || 'nothing'}` : 'writes anywhere') : 'read-only'}`;
 }
 
-function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, onDeleted, teamSkills }: { teamId: string; name: string; index: number; agent: Doc; names: string[]; edit: Edit; files: string[]; onFiles: () => void; onDeleted: () => void; teamSkills?: string[] }) {
+function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, onDeleted, teamSkills, teamBackend }: { teamId: string; name: string; index: number; agent: Doc; names: string[]; edit: Edit; files: string[]; onFiles: () => void; onDeleted: () => void; teamSkills?: string[]; teamBackend?: Doc }) {
   const p = (...k: (string | number)[]) => ['agents', name, ...k];
   const tools: string[] = Array.isArray(agent.tools) ? agent.tools : [];
   const writes = tools.some((t) => WRITE_TOOLS.has(t));
@@ -336,7 +338,16 @@ function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, o
         <ModelPicker
           value={{ model: agent.model, effort: agent.effort, thinking: agent.thinking }}
           inherit="Team default"
-          onChange={(k, v) => void edit([{ op: 'set', path: p(k), value: v }])}
+          provider={providerOf(backend ?? teamBackend)}
+          onProvider={(c) => void edit([{ op: 'set', path: p('backend'), value: providerBackend(c) }])}
+          onChange={(k, v) => {
+            const ops: EditOp[] = [{ op: 'set', path: p(k), value: v }];
+            // Back to a Claude model: leave the provider (the team's, too, if it uses one).
+            if (k === 'model' && providerOf(backend ?? teamBackend)) {
+              ops.push({ op: 'set', path: p('backend'), value: v !== null && providerOf(teamBackend) ? { type: 'subscription' } : null });
+            }
+            void edit(ops);
+          }}
         />
       </section>
 
@@ -561,18 +572,85 @@ function PromptEditor({ teamId, agent, name, edit, onFiles }: { teamId: string; 
   );
 }
 
+/** The provider model a backend uses, if it is a connection. */
+function providerOf(backend: Doc | undefined): { id: string; model?: string } | undefined {
+  return backend?.type === 'connection' && backend.connection ? { id: backend.connection, model: backend.model } : undefined;
+}
+
+const providerBackend = (c: ProviderChoice) => ({ type: 'connection', connection: c.id, model: c.model });
+
 function BackendFields({ backend, onChange, allowDefault }: { backend: Doc | undefined; onChange: (v: Doc | null) => void; allowDefault?: boolean }) {
   const type = backend?.type ?? '';
+  const info = useConnections();
+  const accounts = info?.connections.filter((c) => c.kind === 'claude') ?? [];
+  const providers = info?.connections.filter((c) => c.kind !== 'claude') ?? [];
+  const provider = providers.find((c) => c.id === backend?.connection);
   return (
     <div className="col" style={{ gap: 8 }}>
-      <select className="input" value={type} onChange={(e) => onChange(e.target.value ? { type: e.target.value } : null)}>
+      <select
+        className="input"
+        value={type}
+        onChange={(e) => {
+          const t = e.target.value;
+          const first = providers.find((c) => c.models?.length);
+          onChange(!t ? null : t === 'connection' && first ? providerBackend({ id: first.id, model: first.models![0]!.id }) : { type: t });
+        }}
+      >
         {allowDefault && <option value="">Team default</option>}
-        <option value="subscription">Claude subscription (claude login)</option>
+        <option value="subscription">Claude subscription</option>
+        {(providers.length > 0 || type === 'connection') && <option value="connection">Another provider (Settings → Advanced)</option>}
         <option value="api_key">API key</option>
         <option value="gateway">Gateway (LiteLLM / proxy)</option>
         <option value="bedrock">Amazon Bedrock</option>
         <option value="vertex">Google Vertex AI</option>
       </select>
+      {type === 'subscription' && (accounts.length > 0 || backend?.account) && (
+        <label className="field">
+          Account
+          <select className="input" value={backend?.account ?? ''} onChange={(e) => onChange({ ...backend, account: e.target.value || undefined })}>
+            <option value="">{info?.balance ? 'Any (shared across accounts)' : 'Your login'}</option>
+            {info?.balance && <option value="main">Your login only</option>}
+            {accounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.label}
+                {a.account?.email ? ` (${a.account.email})` : ''}
+              </option>
+            ))}
+            {backend?.account && backend.account !== 'main' && !accounts.some((a) => a.id === backend.account) && <option value={backend.account}>{backend.account} (not set up)</option>}
+          </select>
+          <span className="help">{info?.balance ? 'Sharing is on: "Any" uses whichever account has the most room.' : 'Add accounts in Settings → Advanced.'}</span>
+        </label>
+      )}
+      {type === 'connection' && (
+        <>
+          <label className="field">
+            Provider
+            <select className="input" value={backend?.connection ?? ''} onChange={(e) => {
+              const c = providers.find((x) => x.id === e.target.value);
+              onChange({ type: 'connection', connection: e.target.value, model: c?.models?.[0]?.id });
+            }}>
+              {!provider && <option value={backend?.connection ?? ''}>{backend?.connection ? `${backend.connection} (not set up)` : 'Choose…'}</option>}
+              {providers.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            Model
+            <select className="input mono" value={backend?.model ?? ''} onChange={(e) => onChange({ ...backend, model: e.target.value })}>
+              {!provider?.models?.some((m) => m.id === backend?.model) && <option value={backend?.model ?? ''}>{backend?.model ?? 'Choose…'}</option>}
+              {(provider?.models ?? []).map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name ?? m.id}
+                </option>
+              ))}
+            </select>
+            <span className="help">Also chosen with the model field above. Add models in Settings → Advanced.</span>
+          </label>
+        </>
+      )}
       {type === 'gateway' && (
         <>
           <label className="field">
@@ -1155,7 +1233,13 @@ function TeamSettings({ doc, edit }: { doc: Doc; edit: Edit }) {
           <ModelPicker
             value={{ model: d.model, effort: d.effort, thinking: d.thinking }}
             inherit="Claude Code default"
-            onChange={(k, v) => void edit([{ op: 'set', path: ['defaults', k], value: v }])}
+            provider={providerOf(d.backend)}
+            onProvider={(c) => void edit([{ op: 'set', path: ['defaults', 'backend'], value: providerBackend(c) }])}
+            onChange={(k, v) => {
+              const ops: EditOp[] = [{ op: 'set', path: ['defaults', k], value: v }];
+              if (k === 'model' && providerOf(d.backend)) ops.push({ op: 'set', path: ['defaults', 'backend'], value: null });
+              void edit(ops);
+            }}
           />
           <span className="tiny faint">Members can override these under Members.</span>
         </section>

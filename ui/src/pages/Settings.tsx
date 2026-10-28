@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { desktop, get, put, type AppSettings, type NotificationKind, type NotifyChoice } from '../api';
+import { AdvancedSettings, useConnections } from '../components/Connections';
 import { IconInfo } from '../components/icons';
 import { ModelPicker } from '../components/ModelPicker';
 import { Toolbar } from '../components/Toolbar';
@@ -52,6 +53,7 @@ function ClaudeAccount() {
 function UsageLimits() {
   const toast = useToast();
   const { value, setValue } = useLive(() => get<AppSettings>('/api/settings'), []);
+  const sharing = !!useConnections()?.balance;
   const [save] = useAction(async (onLimit: 'wait' | 'stop') => {
     setValue(await put<AppSettings>('/api/settings', { onLimit }));
     toast(onLimit === 'wait' ? 'Runs wait for the limit to reset and continue' : 'Runs stop at the limit; restart them from the run');
@@ -66,7 +68,7 @@ function UsageLimits() {
       <div className="card-pad col" style={{ gap: 10 }}>
         <UsageMeters />
         <span className="small" style={{ marginTop: 6 }}>
-          When a member hits your plan's 5-hour or weekly limit:
+          When a member hits your plan's 5-hour or weekly limit{value && sharing ? ' and no other account has room' : ''}:
         </span>
         <label className="check">
           <input type="radio" name="on-limit" checked={mode === 'wait'} onChange={() => void save('wait')} />
@@ -227,6 +229,10 @@ export function Settings() {
                   Uses your <span className="mono">claude login</span> on this Mac. Usage counts against your plan's 5-hour and weekly limits, shown on Home. An{' '}
                   <span className="mono">ANTHROPIC_API_KEY</span> in your environment is ignored so it cannot quietly bill the API.
                 </dd>
+                <dt>Other Claude accounts</dt>
+                <dd>Signed in under Advanced below, and chosen per team or member. Members can also share work across them.</dd>
+                <dt>Other providers</dt>
+                <dd>DeepSeek, OpenAI, OpenRouter, a local Ollama and others with an API key, set up under Advanced below; their models show up in every team's model list.</dd>
                 <dt>API key</dt>
                 <dd>Pay as you go, read from an environment variable.</dd>
                 <dt>Gateway</dt>
@@ -251,6 +257,9 @@ export function Settings() {
           <UsageLimits />
 
           <DiskSpace />
+
+          <h2 className="settings-group">Advanced</h2>
+          <AdvancedSettings />
 
           <div className="card">
             <div className="card-head">

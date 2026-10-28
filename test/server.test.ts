@@ -274,6 +274,30 @@ describe('server', () => {
     await expect(api('POST', `/api/teams/${team.id}/edit`, { ops: [{ op: 'move', path: ['workflow', 'steps'], from: 0, to: 99 }] })).rejects.toThrow(/out of range/);
   });
 
+  it('manages Claude accounts and providers (Settings → Advanced)', async () => {
+    const { api } = await setup();
+    expect(await api('GET', '/api/connections')).toMatchObject({ connections: [], balance: false, secretStore: 'file' });
+
+    const ds = await api('POST', '/api/connections', { kind: 'anthropic', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/anthropic', apiKey: 'sk-secret', models: [{ id: 'deepseek-chat' }] });
+    expect(ds).toMatchObject({ id: 'deepseek', hasKey: true });
+    expect(JSON.stringify(await api('GET', '/api/connections'))).not.toContain('sk-secret');
+    const updated = await api('PUT', '/api/connections/deepseek', { models: [{ id: 'deepseek-chat', price: { input: 0.3, output: 1.2 } }, { id: 'deepseek-reasoner' }] });
+    expect(updated.models).toHaveLength(2);
+    await expect(api('POST', '/api/connections', { kind: 'openai', label: 'x', baseUrl: 'not a url' })).rejects.toThrow(/base URL/);
+
+    const work = await api('POST', '/api/connections', { kind: 'claude', label: 'Work' });
+    expect(work).toMatchObject({ id: 'work', kind: 'claude', hasKey: false });
+    const listed = await api('GET', '/api/connections');
+    expect(listed.connections.find((c: { id: string }) => c.id === 'work').account).toHaveProperty('loggedIn');
+    expect((await api('PUT', '/api/connections', { balance: true })).balance).toBe(true);
+    const usage = await api('GET', '/api/usage');
+    expect(usage).toMatchObject({ balance: true, accounts: [{ id: 'work', label: 'Work', usage: { source: 'none', windows: [] } }] });
+
+    await api('DELETE', '/api/connections/deepseek');
+    expect((await api('GET', '/api/connections')).connections.map((c: { id: string }) => c.id)).toEqual(['work']);
+    await expect(api('DELETE', '/api/connections/deepseek')).rejects.toThrow(/no connection/);
+  });
+
   it('lists and cleans up worktrees, and stores settings', async () => {
     const { api } = await setup();
     const on = { bell: true, push: true };

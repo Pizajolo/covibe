@@ -1,4 +1,5 @@
 import type { Effort, JsonSchema, SandboxConfig, SettingSource, Thinking } from '../config/types.js';
+import type { Pricing } from '../connections/types.js';
 import type { Env } from './backend.js';
 
 /** What the engine asks a runner to do: one turn of one agent. */
@@ -19,6 +20,8 @@ export interface AgentInvocation {
   tools: string[];
   outputSchema?: JsonSchema;
   env: Env;
+  /** Prices for the spend estimate when the model is not Claude (Claude Code prices everything as Claude). */
+  pricing?: Pricing;
   maxTurns: number;
   maxBudgetUsd?: number;
   settingSources: SettingSource[];

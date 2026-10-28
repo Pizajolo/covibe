@@ -93,8 +93,17 @@
             "api_key",
             "gateway",
             "bedrock",
-            "vertex"
+            "vertex",
+            "connection"
           ]
+        },
+        "account": {
+          "$ref": "#/$defs/identifier",
+          "description": "subscription: a Claude account from Settings → Advanced. Unset (or main) = your own claude login."
+        },
+        "connection": {
+          "$ref": "#/$defs/identifier",
+          "description": "connection: a provider from Settings → Advanced (Anthropic-compatible, or OpenAI-compatible through covibe's translator)."
         },
         "base_url": {
           "type": "string",
@@ -133,6 +142,23 @@
             "type": "object",
             "required": [
               "base_url"
+            ]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "connection"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "required": [
+              "connection",
+              "model"
             ]
           }
         }

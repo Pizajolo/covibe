@@ -9,7 +9,8 @@ import type { AgentConfig, TeamConfig } from '../config/types.js';
 import type { EventStore } from '../events/store.js';
 import type { BrainProposal } from '../events/types.js';
 import { brainRoot } from '../home.js';
-import { backendEnv, type Env } from '../runner/backend.js';
+import type { Connections } from '../connections/store.js';
+import { plainBackends, type Env } from '../runner/backend.js';
 import type { AgentRunner, CustomTool } from '../runner/types.js';
 
 const exec = promisify(execFile);
@@ -200,6 +201,7 @@ export async function curate(opts: {
   runId: string;
   buildInvocation: typeof import('./engine.js').buildInvocation;
   env?: Env;
+  connections?: Connections;
   signal?: AbortSignal;
 }): Promise<{ decided: number; commit?: string }> {
   const { team, store, runId } = opts;
@@ -236,14 +238,15 @@ export async function curate(opts: {
 For each one: if it is accurate, durable and useful, merge it into the right note (create a note if none fits; prefer updating over duplicating; keep README.md as an index of the notes). Otherwise reject it. Then call decide_proposal for it. Decide every proposal.
 
 ${list}`;
-  const { env } = backendEnv(agent.backend, opts.env ?? process.env);
+  const built = await (opts.connections ?? plainBackends).resolve(agent.backend, opts.env ?? process.env);
   store.append(runId, { type: 'step.started', step: 'curate', data: { loop: 0, proposals: pending.length } });
-  store.append(runId, { type: 'agent.started', step: 'curate', agent: name, data: { model: agent.model ?? null, backend: agent.backend.type, cwd: dir, resumed: false } });
+  store.append(runId, { type: 'agent.started', step: 'curate', agent: name, data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd: dir, resumed: false } });
   const inv = opts.buildInvocation(team, store, runId, agent, {
     cwd: dir,
     root: dir,
     prompt,
-    env,
+    env: built.env,
+    pricing: built.pricing,
     step: 'curate',
     signal: opts.signal ?? AbortSignal.timeout(agent.limits.timeout_min * 60_000),
     repo: opts.repo,
@@ -255,7 +258,7 @@ ${list}`;
     type: result.ok ? 'agent.finished' : 'agent.error',
     step: 'curate',
     agent: name,
-    data: { ok: result.ok, model: agent.model ?? null, turns: result.turns, cost_usd: result.costUsd, duration_ms: result.durationMs, tokens: result.tokens ?? null, ...(result.ok ? {} : { error: result.error }) },
+    data: { ok: result.ok, model: agent.model ?? null, via: built.via, turns: result.turns, cost_usd: result.costUsd, duration_ms: result.durationMs, tokens: result.tokens ?? null, ...(result.ok ? {} : { error: result.error }) },
   });
   const commit = await commitBrain(opts.repo, `Curated ${decided} proposal(s)`, name);
   if (commit) store.append(runId, { type: 'brain.updated', step: 'curate', agent: name, data: { commit } });

@@ -2,10 +2,14 @@
 // validates them against schemas/team.schema.json and resolves them into these
 // shapes (prompt text loaded, output schemas parsed, defaults applied).
 
-export type BackendType = 'subscription' | 'api_key' | 'gateway' | 'bedrock' | 'vertex';
+export type BackendType = 'subscription' | 'api_key' | 'gateway' | 'bedrock' | 'vertex' | 'connection';
 
 export interface BackendConfig {
   type: BackendType;
+  /** subscription: one of the Claude accounts in Settings → Advanced (unset = your own claude login). */
+  account?: string;
+  /** connection: a provider set up in Settings → Advanced. */
+  connection?: string;
   base_url?: string;
   model?: string;
   api_key_env?: string;

@@ -4,6 +4,8 @@ import type { Effort, Thinking } from '../config/types.js';
 
 export type { Effort, Thinking } from '../config/types.js';
 export type { EnvironmentInfo, ModelChoice, PlanUsage } from '../runner/types.js';
+export type { Connection, ConnectionKind, ConnectionView, Pricing, ProviderModel } from '../connections/types.js';
+import type { ConnectionView } from '../connections/types.js';
 
 export type { RunEvent, RunKind, RunStatus };
 
@@ -257,6 +259,8 @@ export interface RunDetail {
 
 export interface UsageWindow {
   window: string;
+  /** The Claude account the report came from ("main" or unset: your own login). */
+  account?: string;
   status: string;
   utilization?: number;
   resetsAt?: number;
@@ -280,6 +284,35 @@ export interface UsageReport {
   }[];
   extra?: { enabled: boolean; limit: number | null; used: number | null; utilization: number | null; currency?: string };
   checkedAt: string;
+  /** Your other Claude accounts (Settings → Advanced); the fields above are your own login's. */
+  accounts?: AccountUsage[];
+  /** Members share work across the accounts. */
+  balance?: boolean;
+}
+
+export interface AccountUsage {
+  id: string;
+  label: string;
+  email?: string;
+  usage: Omit<UsageReport, 'accounts' | 'balance'>;
+}
+
+/** A Claude account's sign-in, as Claude Code reports it. */
+export interface AccountInfo {
+  loggedIn: boolean;
+  email?: string;
+  subscriptionType?: string;
+  organization?: string;
+}
+
+/** Settings → Advanced. */
+export interface ConnectionsInfo {
+  connections: (ConnectionView & { account?: AccountInfo })[];
+  /** Your own claude login. */
+  main?: AccountInfo;
+  balance: boolean;
+  /** Where keys are kept: the macOS Keychain, or a private file. */
+  secretStore: 'keychain' | 'file';
 }
 
 export interface Stats {
@@ -292,6 +325,8 @@ export interface Stats {
   byAgent: { agent: string; team: string; costUsd: number; tokens: number; turns: number }[];
   byModel: { model: string; costUsd: number; tokens: number }[];
   byTeam: { team: string; costUsd: number; runs: number }[];
+  /** Spend per account or provider: "claude" (your login), "claude:<account>", a connection id, or a backend type. */
+  byVia: { via: string; label: string; costUsd: number; tokens: number; turns: number }[];
   /** Plan usage windows reported by Claude Code (subscription). */
   usage: UsageWindow[];
   gatePassRate?: number;
