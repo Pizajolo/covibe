@@ -186,6 +186,75 @@ describe('server', () => {
     expect(runner.toolResults).toContainEqual({ agent: 'builder', tool: 'ask_question', result: 'Answer from the human:\nES modules.' });
   });
 
+  it('shows what a member sees in its browser', async () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    const { api, base } = await setup({
+      builder: () => ({
+        stream: [
+          { kind: 'tool', tool: 'Bash', input: { command: `npx playwright screenshot http://localhost:5173/ shot.png ${'x'.repeat(400)}` } },
+          { kind: 'tool', tool: 'Read', input: { file_path: 'shot.png' } },
+          { kind: 'image', tool: 'Read', input: { file_path: 'shot.png' }, mediaType: 'image/png', data: png.toString('base64') },
+        ],
+        write: { 'src/a.js': 'export const a = 1;' },
+        text: 'Built.',
+      }),
+    });
+    const project = await api('POST', '/api/projects', { path: tempRepo() });
+    const team = await api('POST', '/api/teams', { name: 'duo', template: 'build-and-review' });
+    const { runId } = await api('POST', '/api/runs', { project: project.id, team: team.id, goal: 'Add module a' });
+    const done = await until(
+      () => api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`),
+      (d) => d.summary.status !== 'running',
+    );
+    const builder = done.summary.agents.find((a) => a.name === 'builder')!;
+    // The reviewer sends it back once, so it browsed in both of its turns.
+    expect(builder).toMatchObject({ browser: { url: 'http://localhost:5173/' }, lastView: 2, views: 2 });
+    expect(done.events.find((e) => e.type === 'agent.view')).toMatchObject({ agent: 'builder', data: { id: 1, file: 'shot.png' } });
+
+    // An <img> sends the token in the query.
+    const res = await fetch(`${base}/api/runs/${project.id}/${runId}/views/1?token=test-token`);
+    expect(res.headers.get('content-type')).toBe('image/png');
+    expect(Buffer.from(await res.arrayBuffer())).toEqual(png);
+    expect((await fetch(`${base}/api/runs/${project.id}/${runId}/views/1`)).status).toBe(401);
+    await expect(api('GET', `/api/runs/${project.id}/${runId}/views/9`)).rejects.toThrow(/not kept/);
+  });
+
+  it('restarts a run the plan limit stopped: now, or when the limit resets', async () => {
+    const later = Math.floor(Date.now() / 1000) + 3600;
+    const { api } = await setup({
+      builder: (inv) =>
+        inv.prompt.includes('Add module b') ? { fail: 'Claude AI usage limit reached', limit: { resetsAt: later } } : { write: { 'src/a.js': 'export const a = 1;' }, text: 'Built.' },
+      reviewer: () => ({ structured: { blocking_count: 0, findings: [] } }),
+    });
+    await api('PUT', '/api/settings', { onLimit: 'stop' });
+    await expect(api('PUT', '/api/settings', { onLimit: 'never' })).rejects.toThrow(/onLimit/);
+    const project = await api('POST', '/api/projects', { path: tempRepo() });
+    const team = await api('POST', '/api/teams', { name: 'duo', template: 'build-and-review' });
+    const { runId } = await api('POST', '/api/runs', { project: project.id, team: team.id, goal: 'Add module b' });
+    const stopped = await until(
+      () => api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`),
+      (d) => d.summary.status !== 'running',
+    );
+    expect(stopped.summary).toMatchObject({ status: 'failed', limit: { waiting: false, resetsAt: new Date(later * 1000).toISOString(), agents: ['builder'] } });
+
+    // At the reset (a minute past it), then cancelled.
+    const { at } = await api('POST', `/api/runs/${project.id}/${runId}/restart`, { when: 'reset' });
+    expect(at).toBe(new Date((later + 60) * 1000).toISOString());
+    expect((await api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`)).summary.restart).toEqual({ at });
+    await api('POST', `/api/runs/${project.id}/${runId}/restart`, { when: 'cancel' });
+    expect((await api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`)).summary.restart).toBeUndefined();
+
+    // Now: the same goal and team, from the stopped run's branch.
+    const restarted = await api('POST', `/api/runs/${project.id}/${runId}/restart`, { when: 'now' });
+    const again = await api<RunDetail>('GET', `/api/runs/${project.id}/${restarted.runId}`);
+    expect(again.summary).toMatchObject({ goal: 'Add module b', team: 'duo', base: stopped.summary.branch });
+    expect((await api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`)).summary.restart).toEqual({ runId: restarted.runId });
+    await until(
+      () => api<RunDetail>('GET', `/api/runs/${project.id}/${restarted.runId}`),
+      (d) => d.summary.status !== 'running',
+    );
+  });
+
   it('reorders and inserts workflow steps without losing comments', async () => {
     const { api } = await setup();
     const team = await api('POST', '/api/teams', { name: 'flow', template: 'feature-team' });
@@ -207,9 +276,16 @@ describe('server', () => {
 
   it('lists and cleans up worktrees, and stores settings', async () => {
     const { api } = await setup();
-    expect(await api('GET', '/api/settings')).toEqual({ autoCleanDays: null });
-    expect(await api('PUT', '/api/settings', { autoCleanDays: 7 })).toEqual({ autoCleanDays: 7 });
+    const on = { bell: true, push: true };
+    const notifications = { question: on, limit: on, stopped: on, error: on, done: on };
+    expect(await api('GET', '/api/settings')).toEqual({ autoCleanDays: null, notifications });
+    expect(await api('PUT', '/api/settings', { autoCleanDays: 7 })).toEqual({ autoCleanDays: 7, notifications });
     await expect(api('PUT', '/api/settings', { autoCleanDays: -1 })).rejects.toThrow(/between/);
+    // Notification choices change one kind and one channel at a time.
+    expect((await api('PUT', '/api/settings', { notifications: { done: { push: false } } })).notifications).toEqual({ ...notifications, done: { bell: true, push: false } });
+    expect((await api('GET', '/api/settings')).notifications.done).toEqual({ bell: true, push: false });
+    await expect(api('PUT', '/api/settings', { notifications: { lunch: { push: false } } })).rejects.toThrow(/unknown notification kind/);
+    await expect(api('PUT', '/api/settings', { notifications: { done: { push: 'yes' } } })).rejects.toThrow(/true or false/);
 
     const project = await api('POST', '/api/projects', { path: tempRepo() });
     const team = await api('POST', '/api/teams', { name: 'duo', template: 'build-and-review' });
@@ -222,6 +298,11 @@ describe('server', () => {
     expect(await api('GET', `/api/projects/${project.id}/worktrees`)).toEqual([]);
     const detail = await api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`);
     expect(detail.summary.worktreesRemoved).toBe(true);
+
+    // The finished run is under the bell, but not pushed: done notifications were switched off for push above.
+    expect(await api('GET', '/api/notifications')).toEqual([expect.objectContaining({ kind: 'done', title: 'Job done', body: 'g', projectId: project.id, runId, bell: true, push: false })]);
+    await api('PUT', '/api/settings', { notifications: { done: { bell: false } } });
+    expect(await api('GET', '/api/notifications')).toEqual([]);
   });
 
   it('sets up projects: open (initialising git if asked), create empty, or clone', async () => {

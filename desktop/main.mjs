@@ -90,6 +90,14 @@ ipcMain.handle('covibe:reveal', (_e, p) => {
 ipcMain.handle('covibe:open-path', async (_e, p) => {
   if (typeof p === 'string' && existsSync(p)) await shell.openPath(p);
 });
+// Clicking a system notification brings the window back to the front.
+ipcMain.handle('covibe:focus', () => {
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+  app.focus({ steal: true });
+});
 ipcMain.handle('covibe:open-external', async (_e, url) => {
   if (typeof url === 'string' && /^https?:\/\//.test(url)) await shell.openExternal(url);
 });

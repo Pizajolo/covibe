@@ -120,6 +120,25 @@ export function formatEvent(e: RunEvent): string {
     case 'run.resumed':
       text = green('▶ run resumed');
       break;
+    case 'agent.limited':
+      text = yellow(
+        d.waiting
+          ? `⏸ hit the plan's usage limit; continues ${d.until ? `at ${new Date(String(d.until)).toLocaleTimeString()}` : 'once it resets'}`
+          : `stopped by the plan's usage limit${d.resets_at ? ` (resets ${new Date(String(d.resets_at)).toLocaleString()})` : ''}`,
+      );
+      break;
+    case 'agent.view':
+      text = dim(`👁 looked at ${d.file ?? `an image from ${d.tool}`}`);
+      break;
+    case 'run.restarted':
+      text = green(`↻ restarted as run ${d.run_id}`);
+      break;
+    case 'run.restart_scheduled':
+      text = dim(`↻ restart scheduled for ${new Date(String(d.at)).toLocaleString()}`);
+      break;
+    case 'run.restart_cancelled':
+      text = dim('restart cancelled');
+      break;
     default:
       text = JSON.stringify(d);
   }

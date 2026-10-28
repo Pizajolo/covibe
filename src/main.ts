@@ -189,12 +189,13 @@ function questionPrompter(store: EventStore, onSigint: () => void) {
     console.log(bold(yellow(`? ${q.from} asks you (#${id}):`)) + ` ${q.forHuman ?? q.text}`);
     if (q.context) console.log(dim(`  ${q.from}'s context: ${q.context}`));
     if (q.leadNote) console.log(dim(`  why it comes to you: ${q.leadNote}`));
-    console.log(dim(`  Type your answer and press Enter, or answer in the app or with: covibe answer ${q.runId} ${id} "<answer>"`));
+    q.options?.forEach((o, i) => console.log(`  ${bold(String(i + 1))}. ${o}`));
+    console.log(dim(`  Type your answer${q.options ? ' (or an option\'s number)' : ''} and press Enter, or answer in the app or with: covibe answer ${q.runId} ${id} "<answer>"`));
     try {
       for (;;) {
         const text = (await rl.question(bold(`answer #${id}> `), { signal: current.abort.signal })).trim();
         if (!text) continue;
-        answerQuestion(store, q.runId, id, text);
+        answerQuestion(store, q.runId, id, pickOption(q.options, text));
         break;
       }
     } catch {
@@ -221,6 +222,12 @@ function questionPrompter(store: EventStore, onSigint: () => void) {
   };
 }
 
+/** An option's number stands for the option. */
+function pickOption(options: string[] | undefined, text: string): string {
+  const n = /^\d+$/.test(text) ? Number(text) : 0;
+  return options && n >= 1 && n <= options.length ? options[n - 1]! : text;
+}
+
 function answerCommand(args: string[], repo: string | undefined): number {
   const [id, qid, ...words] = args;
   if (!id) throw new Error('usage: covibe answer <run> [<question> <answer...>]');
@@ -235,12 +242,14 @@ function answerCommand(args: string[], repo: string | undefined): number {
         console.log(`${bold(`#${q.id}`)} from ${q.from}: ${q.forHuman ?? q.text}`);
         if (q.context) console.log(dim(`    context: ${q.context}`));
         if (q.leadNote) console.log(dim(`    why it comes to you: ${q.leadNote}`));
+        q.options?.forEach((o, i) => console.log(`    ${i + 1}. ${o}`));
       }
       return 0;
     }
     if (!words.length) throw new Error('usage: covibe answer <run> <question> <answer...>');
     if (!store.isLive(run)) throw new Error(`run ${run.id} has ended, so nobody is waiting for the answer`);
-    const q = answerQuestion(store, run.id, Number(qid.replace(/^#/, '')), words.join(' '));
+    const qnum = Number(qid.replace(/^#/, ''));
+    const q = answerQuestion(store, run.id, qnum, pickOption(store.getQuestion(qnum)?.options, words.join(' ')));
     const others = store.questions(run.id, 'open').length;
     console.log(`answered #${q.id}; ${q.from} carries on${others ? `, and the run resumes once you answer the ${others} other open question${others > 1 ? 's' : ''}` : ' and the run resumes'}.`);
     return 0;

@@ -1,3 +1,5 @@
+import { NotificationBell } from './Notifications';
+
 // The window's title bar area: draggable, with the page title and actions.
 export function Toolbar({ title, sub, children }: { title: React.ReactNode; sub?: React.ReactNode; children?: React.ReactNode }) {
   return (
@@ -8,6 +10,7 @@ export function Toolbar({ title, sub, children }: { title: React.ReactNode; sub?
       </div>
       <div className="spacer" />
       {children}
+      <NotificationBell />
     </header>
   );
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentState, RunSummary } from '../src/server/api-types.js';
-import { deskNote, deskState } from '../ui/src/components/office-state.js';
+import { deskNote, deskState, questionDesk } from '../ui/src/components/office-state.js';
 import { boardText, kindOf, layout } from '../ui/src/components/office-art.js';
 
 const agent = (a: Partial<AgentState>): AgentState => ({ name: 'dev', status: 'idle', invocations: 0, turns: 0, costUsd: 0, tokens: 0, inbox: 0, ...a });
@@ -20,6 +20,17 @@ describe('office', () => {
     // Once the run ends, the office goes to sleep; a member answering a chat wakes up.
     expect(deskState(agent({ status: 'done' }), run({ status: 'succeeded' }), false)).toBe('sleeping');
     expect(deskState(agent({ status: 'done' }), run({ status: 'succeeded' }), true)).toBe('working');
+
+    // The question the lead passed on to you sits on the lead's desk; without a lead, on the asker's.
+    const question = { id: 1, from: 'dev', status: 'open', question: 'Formal?', askedAt: '' } as const;
+    const team = [agent({ name: 'manager', status: 'done' }), agent({ status: 'asking', waitingOn: 'human' })];
+    const paused = run({ paused: true, agents: team, questions: [{ ...question, lead: 'manager' }] });
+    expect(questionDesk(paused, paused.questions[0]!)).toBe('manager');
+    expect(deskState(team[0]!, paused, false)).toBe('needs');
+    expect(deskNote(team[0]!, 'needs', paused)).toBe('question for you');
+    expect(deskNote(team[1]!, 'needs', paused)).toBe('needs you');
+    expect(questionDesk(paused, question)).toBe('dev');
+    expect(deskState(team[0]!, { ...paused, status: 'failed' }, false)).toBe('sleeping');
 
     expect(deskNote(agent({ status: 'working', activity: 'Edit web/a.tsx' }), 'working', live)).toBe('Edit web/a.tsx');
     expect(deskNote(agent({ waitingOn: 'manager' }), 'asking', live)).toBe('asking manager');

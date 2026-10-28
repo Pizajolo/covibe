@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { AgentInvocation, AgentResult, AgentRunner } from '../src/runner/types.js';
+import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent } from '../src/runner/types.js';
 
 export function tempDir(prefix = 'covibe-test-') {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -40,10 +40,14 @@ export interface ScriptedTurn {
   /** Messages to teammates via send_message. */
   send?: { to: string; text: string }[];
   fail?: string;
+  /** The plan's usage limit stopped the turn (with fail as the error). */
+  limit?: { resetsAt?: number };
   /** Keep working until this many live messages arrived (or 5 s passed). */
   awaitLive?: number;
   /** Custom (covibe) tools to call, in order. */
   call?: { tool: string; args: Record<string, unknown> }[];
+  /** Stream events to send as is (tool calls, images it saw…). */
+  stream?: AgentStreamEvent[];
 }
 
 export type Script = (inv: AgentInvocation, call: number) => ScriptedTurn;
@@ -92,6 +96,7 @@ export class ScriptedRunner implements AgentRunner {
       inv.onEvent({ kind: 'tool', tool: 'Bash', input: { command: 'generate files' } });
       writeFiles(inv.cwd, turn.bashWrite);
     }
+    for (const e of turn.stream ?? []) inv.onEvent(e);
     for (const m of turn.send ?? []) inv.sendMessage(m.to, m.text);
     for (const c of turn.call ?? []) {
       const tool = inv.customTools?.find((t) => t.name === c.tool);
@@ -127,7 +132,7 @@ export class ScriptedRunner implements AgentRunner {
     if (turn.text) inv.onEvent({ kind: 'text', text: turn.text });
 
     const base = { sessionId, turns: 1, costUsd: 0.01, durationMs: 5 };
-    if (turn.fail) return { ...base, ok: false, text: '', error: turn.fail };
+    if (turn.fail) return { ...base, ok: false, text: '', error: turn.fail, ...(turn.limit ? { limit: turn.limit } : {}) };
     return { ...base, ok: true, text: turn.text ?? '', structured: turn.structured };
   }
 

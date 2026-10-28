@@ -8,6 +8,8 @@ export interface DesktopBridge {
   openPath(path: string): Promise<void>;
   reveal(path: string): Promise<void>;
   openExternal(url: string): Promise<void>;
+  /** Bring the window to the front. */
+  focus(): Promise<void>;
   platform: string;
 }
 
@@ -59,6 +61,11 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError((json as { error?: string }).error ?? `${res.status} ${res.statusText}`, res.status);
   return json as T;
+}
+
+/** A URL for an element that cannot send headers (an <img>): the token goes in the query. */
+export function authedUrl(path: string): string {
+  return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
 }
 
 export const get = <T>(path: string) => api<T>('GET', path);

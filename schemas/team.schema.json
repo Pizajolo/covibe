@@ -169,6 +169,12 @@
           "type": "string",
           "minLength": 1
         },
+        "effort": {
+          "$ref": "#/$defs/effort"
+        },
+        "thinking": {
+          "$ref": "#/$defs/thinking"
+        },
         "isolation": {
           "enum": [
             "worktree",
@@ -227,6 +233,12 @@
         "model": {
           "type": "string",
           "minLength": 1
+        },
+        "effort": {
+          "$ref": "#/$defs/effort"
+        },
+        "thinking": {
+          "$ref": "#/$defs/thinking"
         },
         "tools": {
           "type": "array",
@@ -448,6 +460,32 @@
           "description": "Extra folders shell commands may write, e.g. ~/.npm. Absolute or starting with ~."
         }
       }
+    },
+    "effort": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "description": "How much effort Claude puts into each answer (thinking, care, length). Models support different levels; an unsupported level falls back to the closest one."
+    },
+    "thinking": {
+      "anyOf": [
+        {
+          "enum": [
+            "adaptive",
+            "off"
+          ]
+        },
+        {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 128000
+        }
+      ],
+      "description": "Extended thinking: adaptive (Claude decides when and how much), off, or a fixed token budget (older models)."
     }
   }
 }

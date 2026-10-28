@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { desktop, get, post, type ChatItem, type DiffResult, type RunDetail, type RunEvent, type RunSummary } from '../api';
 import { Composer } from '../components/Composer';
-import { deskNote, DeskPill, deskState, OfficeLegend, OfficeStage, Portrait, useFigures, type DeskState } from '../components/Office';
+import { deskNote, DeskPill, deskState, OfficeLegend, OfficeStage, Portrait, questionDesk, useFigures, type DeskState } from '../components/Office';
 import {
   IconAlert,
   IconBranch,
+  IconBrowser,
   IconChat,
   IconCheck,
   IconClock,
@@ -13,6 +14,7 @@ import {
   IconHome,
   IconInfo,
   IconLoop,
+  IconQuestion,
   IconRuns,
   IconSend,
   IconSpinner,
@@ -20,10 +22,13 @@ import {
   IconTrash,
   IconX,
 } from '../components/icons';
+import { BrowserPreview, viewSrc } from '../components/BrowserView';
+import { askedToShip, markAskedToShip, ShipDialog } from '../components/ShipDialog';
 import { Toolbar } from '../components/Toolbar';
 import { AgentStatus, Avatar, Copy, Empty, LoopBadge, Modal, RunStatusPill, useAction, useToast } from '../components/ui';
-import { go, useData, useLive } from '../data';
-import { clock, duration, money, tokens, toolText } from '../format';
+import { go, href, useData, useLive } from '../data';
+import { clock, countdown, duration, money, resetTime, tokens, toolText } from '../format';
+import { useNotify } from '../notify';
 
 type Tab = 'office' | 'board' | 'activity' | 'chat' | 'changes';
 type Delivery = 'queue' | 'steer' | 'interrupt';
@@ -57,6 +62,14 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
   );
   const [chatWith, setChatWith] = useState<string | undefined>();
   const [continueOpen, setContinueOpen] = useState(false);
+  const [ship, setShip] = useState(false);
+  // Once a run you are watching succeeds, ask what to do with its result (once per run).
+  const summary = detail?.summary;
+  useEffect(() => {
+    if (!summary || summary.kind !== 'workflow' || summary.status !== 'succeeded' || !summary.branch || askedToShip(summary.id)) return;
+    markAskedToShip(summary.id);
+    if (summary.finishedAt && Date.now() - Date.parse(summary.finishedAt) < 15 * 60_000) setShip(true);
+  }, [summary?.id, summary?.status]);
   const toast = useToast();
   const { refresh } = useData();
 
@@ -104,6 +117,11 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
             <IconTrash /> Free disk space
           </button>
         )}
+        {!isAsk && run.status === 'succeeded' && run.branch && (
+          <button className="btn primary" onClick={() => setShip(true)} title="Merge, push or open a pull request for the result">
+            <IconBranch /> Ship result
+          </button>
+        )}
         {!isAsk && run.status !== 'running' && run.branch && (
           <button className="btn" onClick={() => setContinueOpen(true)} title="Start a new goal from this run's result">
             <IconBranch /> New goal on this result
@@ -114,8 +132,9 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
       <div className="content flush">
         <div style={{ padding: '14px 20px', display: 'flex', flexDirection: 'column', gap: 12, borderBottom: '1px solid var(--border)' }}>
           <div className="row wrap" style={{ gap: 14 }}>
-            <RunStatusPill status={run.status} kind={run.kind} paused={run.paused} />
+            <RunStatusPill status={run.status} kind={run.kind} paused={run.paused} limited={run.limit?.waiting} />
             <LoopBadge loops={run.loops} max={run.maxLoops} />
+            <QuestionsWaiting run={run} projectId={projectId} />
             <Fact icon={<IconClock />} label={duration(run.startedAt, run.finishedAt)} />
             <Fact label={`${money(run.costUsd)} est.`} title="Estimated API-equivalent cost" />
             <Fact label={`${tokens(run.tokens)} tokens`} />
@@ -128,8 +147,8 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
               </span>
             )}
           </div>
+          <LimitBanner run={run} projectId={projectId} onChange={reload} />
           <Banner run={run} />
-          <Questions run={run} projectId={projectId} onAnswered={reload} />
           {!isAsk && tab !== 'office' && (
             <div className="members">
               {run.agents.map((a, i) => (
@@ -182,6 +201,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
         {tab === 'changes' && <Changes projectId={projectId} run={run} />}
       </div>
 
+      {ship && <ShipDialog projectId={projectId} run={run} onClose={() => setShip(false)} />}
       {continueOpen && (
         <Modal title="New goal on this result" onClose={() => setContinueOpen(false)} wide>
           <p className="small muted">The team starts from the branch {run.branch}, so it can build on what this run produced.</p>
@@ -203,72 +223,101 @@ function Fact({ icon, label, title }: { icon?: React.ReactNode; label: string; t
   );
 }
 
-/** Questions from members: the ones waiting for you, with a box to answer, and the ones the lead is answering. */
-function Questions({ run, projectId, onAnswered }: { run: RunSummary; projectId: string; onAnswered: () => Promise<unknown> }) {
-  const live = run.questions.filter((q) => q.status === 'open' || q.status === 'lead');
-  if (!live.length) return null;
+/** Questions for you open in a popup; this brings a dismissed one back. */
+function QuestionsWaiting({ run, projectId }: { run: RunSummary; projectId: string }) {
+  const { showQuestion } = useNotify();
+  const open = run.status === 'running' ? run.questions.filter((q) => q.status === 'open') : [];
+  if (!open.length) return null;
   return (
-    <>
-      {live.map((q) =>
-        q.status === 'lead' ? (
-          <div key={q.id} className="banner info">
-            <IconInfo />
-            <div>
-              <strong>{q.from} asked {q.lead}:</strong> {q.question} <span className="faint">{q.lead} is answering; it comes to you only if {q.lead} cannot.</span>
-            </div>
-          </div>
-        ) : (
-          <QuestionForYou key={q.id} q={q} runId={run.id} projectId={projectId} onAnswered={onAnswered} />
-        ),
-      )}
-    </>
+    <button className="btn sm ask-btn" onClick={() => showQuestion(projectId, run.id, open[0]!.id)}>
+      <IconQuestion />
+      {open.length === 1 ? `${open[0]!.from} asks you` : `${open.length} questions for you`}
+    </button>
   );
 }
 
-function QuestionForYou({ q, runId, projectId, onAnswered }: { q: RunSummary['questions'][number]; runId: string; projectId: string; onAnswered: () => Promise<unknown> }) {
-  const [text, setText] = useState('');
+/** The plan's usage limit: a countdown while members wait for the reset, or restarting a run it stopped. */
+function LimitBanner({ run, projectId, onChange }: { run: RunSummary; projectId: string; onChange: () => Promise<unknown> }) {
   const toast = useToast();
-  const [answer, answering] = useAction(async () => {
-    await post(`/api/runs/${projectId}/${runId}/questions/${q.id}/answer`, { answer: text });
-    setText('');
-    toast(`Answered. ${q.from} carries on.`);
-    await onAnswered();
+  const [restart, restarting] = useAction(async (when: 'now' | 'reset' | 'cancel') => {
+    const res = await post<{ runId?: string; at?: string }>(`/api/runs/${projectId}/${run.id}/restart`, { when });
+    if (res.runId) {
+      toast('Restarted from this run’s result.');
+      go('runs', projectId, res.runId);
+    } else if (res.at) toast(`Restarts at ${resetTime(res.at)}.`);
+    await onChange();
   });
-  return (
-    <div className="banner warn question">
-      <div className="row">
-        <IconAlert />
+  const limit = run.limit;
+  if (!limit) return null;
+  if (limit.waiting)
+    return (
+      <div className="banner warn">
+        <IconClock />
         <div>
-          <strong>{q.from} asks you:</strong> {q.forHuman ?? q.question}
-          {q.context && <div className="why">{q.from}'s context: {q.context}</div>}
-          {q.leadNote && <div className="why">Why it comes to you: {q.leadNote}</div>}
-          <div className="why">The team is paused until you answer.</div>
+          <strong>Waiting for your plan's usage limit to reset.</strong> {limit.agents.join(', ')} {limit.agents.length > 1 ? 'continue' : 'continues'} where{' '}
+          {limit.agents.length > 1 ? 'they' : 'it'} stopped
+          {limit.until ? (
+            <>
+              {' '}
+              in <strong className="num">{countdown(limit.until)}</strong> ({resetTime(limit.until)})
+            </>
+          ) : (
+            ' once it resets'
+          )}
+          . Keep covibe open; the run continues on its own.
         </div>
       </div>
-      <div className="answer">
-        <textarea
-          className="input"
-          rows={2}
-          value={text}
-          placeholder="Your answer"
-          aria-label={`Answer to ${q.from}`}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && text.trim()) {
-              e.preventDefault();
-              void answer();
-            }
-          }}
-        />
-        <button className="btn primary" disabled={!text.trim() || answering} onClick={() => void answer()}>
-          Answer
-        </button>
+    );
+  if (run.status === 'running') return null;
+  return (
+    <div className="banner warn limit-banner">
+      <IconClock />
+      <div className="grow">
+        <strong>Stopped by your plan's usage limit.</strong>{' '}
+        {limit.resetsAt && Date.parse(limit.resetsAt) > Date.now() ? (
+          <>
+            It resets in <strong className="num">{countdown(limit.resetsAt)}</strong> ({resetTime(limit.resetsAt)}).
+          </>
+        ) : (
+          'It has reset by now.'
+        )}{' '}
+        {run.restart?.runId ? (
+          <>
+            Restarted as <a href={href('runs', projectId, run.restart.runId)}>a new run</a>.
+          </>
+        ) : run.restart?.at ? (
+          <>
+            Restarts on its own in <strong className="num">{countdown(run.restart.at)}</strong>, from this run's result.
+          </>
+        ) : (
+          'Restart it to carry on from its result (the branch keeps what the team committed).'
+        )}
       </div>
+      {!run.restart?.runId && (
+        <div className="row" style={{ gap: 6, flex: 'none' }}>
+          {run.restart?.at ? (
+            <button className="btn sm" disabled={restarting} onClick={() => void restart('cancel')}>
+              Cancel restart
+            </button>
+          ) : (
+            limit.resetsAt &&
+            Date.parse(limit.resetsAt) > Date.now() && (
+              <button className="btn sm" disabled={restarting} onClick={() => void restart('reset')}>
+                Restart when it resets
+              </button>
+            )
+          )}
+          <button className="btn sm primary" disabled={restarting} onClick={() => void restart('now')}>
+            Restart now
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 function Banner({ run }: { run: RunSummary }) {
+  if (run.limit && run.status === 'failed') return null;
   if (run.status === 'escalated')
     return (
       <div className="banner warn">
@@ -293,7 +342,7 @@ function Banner({ run }: { run: RunSummary }) {
       <div className="banner good">
         <IconCheck />
         <div>
-          <strong>All gates passed.</strong> {run.branch ? `The result is on branch ${run.branch}; review it under Changes and merge it when you are happy.` : ''}
+          <strong>All gates passed.</strong> {run.branch ? `The result is on branch ${run.branch}; review it under Changes, then Ship result to merge, push or open a pull request.` : ''}
         </div>
       </div>
     );
@@ -369,6 +418,8 @@ function OfficeTab({ detail, projectId, selected, onSelect, onSent }: { detail: 
   const agent = run.agents.find((a) => a.name === selected);
   const [pane, setPane] = useState<Pane>('overview');
   const [legendOpen, setLegendOpen] = useState(false);
+  const [browserOf, setBrowserOf] = useState<string | undefined>();
+  const { showQuestion } = useNotify();
   useEffect(() => {
     const on = (e: KeyboardEvent) => e.key === 'Escape' && !(e.target as HTMLElement).matches('textarea, input') && onSelect(undefined);
     window.addEventListener('keydown', on);
@@ -387,7 +438,15 @@ function OfficeTab({ detail, projectId, selected, onSelect, onSent }: { detail: 
   return (
     <div className="office">
       <div className="office-floor">
-        <OfficeStage run={run} members={detail.members} answering={detail.answering} selected={agent?.name} onSelect={pick}>
+        <OfficeStage
+          run={run}
+          members={detail.members}
+          answering={detail.answering}
+          selected={agent?.name}
+          onSelect={pick}
+          onQuestion={(id) => showQuestion(projectId, run.id, id)}
+          onBrowser={setBrowserOf}
+        >
           <div className="row tiny faint" style={{ gap: 8 }}>
             <span className="grow">Click a desk to see what a member is doing and to talk to it.</span>
             <button className="btn sm ghost" onClick={() => setLegendOpen((o) => !o)} aria-expanded={legendOpen}>
@@ -399,9 +458,20 @@ function OfficeTab({ detail, projectId, selected, onSelect, onSent }: { detail: 
       </div>
       {agent && (
         <aside className="office-panel" aria-label={`${agent.name} details`}>
-          <MemberPanel detail={detail} projectId={projectId} agent={agent.name} pane={pane} setPane={setPane} onClose={() => onSelect(undefined)} onSent={onSent} figure={figures.get(agent.name)!} />
+          <MemberPanel
+            detail={detail}
+            projectId={projectId}
+            agent={agent.name}
+            pane={pane}
+            setPane={setPane}
+            onClose={() => onSelect(undefined)}
+            onSent={onSent}
+            onBrowser={() => setBrowserOf(agent.name)}
+            figure={figures.get(agent.name)!}
+          />
         </aside>
       )}
+      {browserOf && <BrowserPreview detail={detail} projectId={projectId} agent={browserOf} onClose={() => setBrowserOf(undefined)} />}
     </div>
   );
 }
@@ -414,6 +484,7 @@ function MemberPanel({
   setPane,
   onClose,
   onSent,
+  onBrowser,
   figure,
 }: {
   detail: RunDetail;
@@ -423,6 +494,7 @@ function MemberPanel({
   setPane: (p: Pane) => void;
   onClose: () => void;
   onSent: () => void;
+  onBrowser: () => void;
   figure: Parameters<typeof Portrait>[0]['figure'];
 }) {
   const run = detail.summary;
@@ -430,7 +502,8 @@ function MemberPanel({
   const member = detail.members.find((m) => m.name === agent);
   const state = deskState(a, run, detail.answering.includes(agent));
   const events = useMemo(() => detail.events.filter((e) => e.agent === agent), [detail.events, agent]);
-  const question = run.questions.find((q) => q.from === agent && (q.status === 'open' || q.status === 'lead'));
+  const question = run.questions.find((q) => (q.from === agent || (q.status === 'open' && questionDesk(run, q) === agent)) && (q.status === 'open' || q.status === 'lead'));
+  const { showQuestion } = useNotify();
   const answered = run.questions.filter((q) => q.from === agent && q.status === 'answered').slice(-3);
 
   return (
@@ -486,7 +559,12 @@ function MemberPanel({
             {question ? (
               <div>
                 {question.status === 'open' ? (
-                  <><strong>Waiting for your answer:</strong> {question.forHuman ?? question.question} <span className="faint">Answer it in the box at the top of the run.</span></>
+                  <>
+                    <strong>{question.from === agent ? 'Waiting for your answer:' : `Has ${question.from}'s question for you:`}</strong> {question.forHuman ?? question.question}{' '}
+                    <button className="btn sm" style={{ marginTop: 6 }} onClick={() => showQuestion(projectId, run.id, question.id)}>
+                      <IconQuestion /> Answer
+                    </button>
+                  </>
                 ) : (
                   <><strong>Asked {question.lead}:</strong> {question.question}</>
                 )}
@@ -496,6 +574,22 @@ function MemberPanel({
             )}
             {a.lastText && state !== 'sleeping' && <div className="small muted office-said">“{a.lastText}”</div>}
           </div>
+          {(a.browser || a.lastView !== undefined) && (
+            <div className="col" style={{ gap: 6 }}>
+              <span className="label">{a.browser ? 'In its browser' : 'Last thing it looked at'}</span>
+              {a.lastView !== undefined && (
+                <button className="office-view" onClick={onBrowser} title={`See what ${agent} sees`}>
+                  <img src={viewSrc(projectId, run.id, a.lastView)} alt={`The last screenshot ${agent} looked at`} />
+                </button>
+              )}
+              <div className="row small" style={{ gap: 8 }}>
+                <span className="grow ellipsis mono tiny">{a.browser?.url ?? (a.browser ? 'a page it did not name' : '')}</span>
+                <button className="btn sm" onClick={onBrowser}>
+                  <IconBrowser /> {a.views ? `${a.views} screenshot${a.views > 1 ? 's' : ''}` : 'Preview'}
+                </button>
+              </div>
+            </div>
+          )}
           <dl className="office-facts">
             <div><dt>Model</dt><dd>{member?.model ?? 'default'}</dd></div>
             <div><dt>Cost this run</dt><dd className="num">{money(a.costUsd)}</dd></div>
@@ -562,6 +656,11 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'agent.tool': return { cls: 'tool', text: toolText(String(d.tool), d.input, roots) };
     case 'agent.finished': return { cls: 'good', text: `Finished · ${d.turns} turns · ${money(d.cost_usd)} · ${tokens((d.tokens?.input ?? 0) + (d.tokens?.output ?? 0) + (d.tokens?.cacheRead ?? 0) + (d.tokens?.cacheWrite ?? 0))} tokens` };
     case 'agent.error': return { cls: 'error', text: `Failed: ${d.error}` };
+    case 'agent.limited': return { cls: 'warn', text: d.waiting ? `Hit the plan's usage limit; continues ${d.until ? `at ${clock(String(d.until))}` : 'once it resets'}` : "Stopped by the plan's usage limit" };
+    case 'run.restart_scheduled': return { cls: '', text: `Restart scheduled for ${new Date(String(d.at)).toLocaleString()}` };
+    case 'run.restart_cancelled': return { cls: '', text: d.error ? `Restart failed: ${d.error}` : 'Restart cancelled' };
+    case 'run.restarted': return { cls: 'good', text: `Restarted as run ${d.run_id}` };
+    case 'agent.view': return { cls: 'tool', text: `Looked at ${d.file ? String(d.file).split('/').pop() : `an image from ${d.tool}`}` };
     case 'scope.denied': return { cls: 'warn', text: `Blocked ${d.tool}: ${d.reason}` };
     case 'scope.violation': return { cls: 'warn', text: `Discarded out-of-scope changes: ${(d.files as string[]).join(', ')}` };
     case 'git.commit': return { cls: '', text: `Committed ${String(d.commit).slice(0, 8)}: ${(d.files as string[]).join(', ')}` };

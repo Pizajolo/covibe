@@ -3,9 +3,10 @@ import { Composer } from '../components/Composer';
 import { IconBolt, IconCheck, IconCoin, IconFolder, IconGauge, IconInfo, IconPlus, IconTeam } from '../components/icons';
 import { RunCard, RunRow } from '../components/RunCard';
 import { Toolbar } from '../components/Toolbar';
+import { UsageMeters } from '../components/Usage';
 import { Empty } from '../components/ui';
 import { href, openNewProject, useData } from '../data';
-import { dayLabel, greeting, money, tokens, utilization, WINDOW_LABELS } from '../format';
+import { dayLabel, greeting, money, tokens } from '../format';
 
 export function Home({ onNewGoal }: { onNewGoal: () => void }) {
   const { overview } = useData();
@@ -74,27 +75,10 @@ export function Home({ onNewGoal }: { onNewGoal: () => void }) {
             <div className="card">
               <div className="card-head">
                 <h2>Plan usage</h2>
-                <span className="hint">as reported by Claude Code</span>
+                <span className="hint">your Claude subscription</span>
               </div>
               <div className="card-pad col" style={{ gap: 16 }}>
-                {stats.usage.length ? (
-                  stats.usage.map((u) => (
-                    <Meter
-                      key={u.window}
-                      label={WINDOW_LABELS[u.window] ?? u.window}
-                      fraction={utilization(u.utilization)}
-                      status={u.status}
-                      caption={[
-                        utilization(u.utilization) !== undefined && u.status === 'rejected' ? 'Limit reached' : '',
-                        u.resetsAt ? `resets ${new Date(u.resetsAt * (u.resetsAt < 1e12 ? 1000 : 1)).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : '',
-                      ]
-                        .filter(Boolean)
-                        .join(' · ')}
-                    />
-                  ))
-                ) : (
-                  <p className="small muted">Your plan's 5-hour and weekly usage shows up here once a team runs on your Claude subscription.</p>
-                )}
+                <UsageMeters />
                 <div className="banner info small">
                   <IconInfo />
                   <span>

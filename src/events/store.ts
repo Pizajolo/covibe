@@ -71,6 +71,15 @@ CREATE TABLE IF NOT EXISTS questions (
   answered_at TEXT
 );
 CREATE INDEX IF NOT EXISTS questions_run ON questions(run_id, status);
+CREATE TABLE IF NOT EXISTS views (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  agent TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  data BLOB NOT NULL,
+  ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS views_run ON views(run_id, agent);
 `;
 
 type Row = Record<string, string | number | null>;
@@ -93,6 +102,8 @@ export class EventStore {
     if (!cols.has('base')) this.db.exec('ALTER TABLE runs ADD COLUMN base TEXT');
     const inboxCols = new Set((this.db.prepare('PRAGMA table_info(inbox)').all() as Row[]).map((r) => String(r.name)));
     if (!inboxCols.has('mode')) this.db.exec("ALTER TABLE inbox ADD COLUMN mode TEXT NOT NULL DEFAULT 'queue'");
+    const questionCols = new Set((this.db.prepare('PRAGMA table_info(questions)').all() as Row[]).map((r) => String(r.name)));
+    if (!questionCols.has('options')) this.db.exec('ALTER TABLE questions ADD COLUMN options TEXT');
   }
 
   close() {
@@ -253,10 +264,10 @@ export class EventStore {
     return this.getProposal(id)!;
   }
 
-  addQuestion(q: { runId: string; from: string; text: string; context?: string; status: 'lead' | 'open' }): Question {
+  addQuestion(q: { runId: string; from: string; text: string; context?: string; options?: string[]; status: 'lead' | 'open' }): Question {
     const r = this.db
-      .prepare('INSERT INTO questions (run_id, from_agent, text, context, status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(q.runId, q.from, q.text, q.context ?? null, q.status, now());
+      .prepare('INSERT INTO questions (run_id, from_agent, text, context, options, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(q.runId, q.from, q.text, q.context ?? null, q.options ? JSON.stringify(q.options) : null, q.status, now());
     return this.getQuestion(Number(r.lastInsertRowid))!;
   }
 
@@ -274,8 +285,10 @@ export class EventStore {
   }
 
   /** The lead could not answer: the question now waits for the human. */
-  escalateQuestion(id: number, forHuman: string, leadNote?: string): Question {
-    this.db.prepare("UPDATE questions SET status = 'open', for_human = ?, lead_note = ? WHERE id = ? AND status = 'lead'").run(forHuman, leadNote ?? null, id);
+  escalateQuestion(id: number, forHuman: string, leadNote?: string, options?: string[]): Question {
+    this.db
+      .prepare("UPDATE questions SET status = 'open', for_human = ?, lead_note = ?, options = ? WHERE id = ? AND status = 'lead'")
+      .run(forHuman, leadNote ?? null, options ? JSON.stringify(options) : null, id);
     return this.getQuestion(id)!;
   }
 
@@ -286,6 +299,24 @@ export class EventStore {
     if (current.status === 'cancelled') throw new Error(`question #${id} was cancelled because its run ended`);
     this.db.prepare("UPDATE questions SET status = 'answered', answer = ?, answered_by = ?, answered_at = ? WHERE id = ?").run(answer, by, now(), id);
     return this.getQuestion(id)!;
+  }
+
+  /**
+   * Keep an image a member saw (a screenshot it read, say). Only the newest
+   * VIEWS_KEPT per member and run are kept, so a long browser session does
+   * not fill the disk.
+   */
+  addView(runId: string, agent: string, mediaType: string, data: Buffer): number {
+    const r = this.db.prepare('INSERT INTO views (run_id, agent, media_type, data, ts) VALUES (?, ?, ?, ?, ?)').run(runId, agent, mediaType, data, now());
+    this.db
+      .prepare('DELETE FROM views WHERE run_id = ? AND agent = ? AND id NOT IN (SELECT id FROM views WHERE run_id = ? AND agent = ? ORDER BY id DESC LIMIT ?)')
+      .run(runId, agent, runId, agent, VIEWS_KEPT);
+    return Number(r.lastInsertRowid);
+  }
+
+  getView(runId: string, id: number): { mediaType: string; data: Buffer } | undefined {
+    const row = this.db.prepare('SELECT media_type, data FROM views WHERE run_id = ? AND id = ?').get(runId, id) as { media_type: string; data: Uint8Array } | undefined;
+    return row ? { mediaType: row.media_type, data: Buffer.from(row.data) } : undefined;
   }
 
   /** Close a run's unanswered questions (the run ended). */
@@ -338,6 +369,7 @@ function toQuestion(r: Row): Question {
     from: String(r.from_agent),
     text: String(r.text),
     context: opt(r.context),
+    options: r.options == null ? undefined : (JSON.parse(String(r.options)) as string[]),
     status: r.status as QuestionStatus,
     forHuman: opt(r.for_human),
     leadNote: opt(r.lead_note),
@@ -351,6 +383,9 @@ function toQuestion(r: Row): Question {
 function toInbox(r: Row, runId: string, to: string): InboxMessage {
   return { id: Number(r.id), runId, to, from: String(r.from_agent), text: String(r.text), ts: String(r.ts), mode: (r.mode ?? 'queue') as DeliveryMode };
 }
+
+/** Images kept per member and run (see addView). */
+export const VIEWS_KEPT = 40;
 
 function now() {
   return new Date().toISOString();

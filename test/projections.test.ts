@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RunEvent, RunRecord } from '../src/events/types.js';
-import { chatThreads, shortenPaths, summarizeRun } from '../src/server/projections.js';
+import type { NotificationKind } from '../src/server/api-types.js';
+import { chatThreads, collectNotifications, shortenPaths, summarizeRun, usageReport } from '../src/server/projections.js';
 
 const run: RunRecord = { id: 'r1', kind: 'workflow', team: 't', teamFile: '/t.yaml', repo: '/code/app', goal: 'g', status: 'succeeded', pid: 1, startedAt: '2026-10-27T10:00:00.000Z' };
 let id = 0;
@@ -22,6 +23,80 @@ describe('projections', () => {
     expect(asking.agents.find((a) => a.name === 'dev')).toMatchObject({ status: 'asking', waitingOn: 'manager' });
     expect(asking.steps.map((s) => s.id)).toEqual(['plan', 'build']);
     expect(asking.steps.find((s) => s.id === 'build')!.cards.map((c) => c.agent)).toEqual(['dev']);
+  });
+
+  it('collects notifications: questions for you, plan limits once each, and how workflow runs ended', () => {
+    const runs: Record<string, RunRecord> = {
+      r1: { ...run, status: 'running', goal: 'Add a greeting' },
+      r2: { ...run, id: 'r2', goal: 'Fix the build', status: 'failed' },
+      r3: { ...run, id: 'r3', goal: 'Rename', status: 'failed' },
+      r4: { ...run, id: 'r4', goal: 'Ship it', status: 'escalated' },
+      r5: { ...run, id: 'r5', kind: 'ask', goal: 'What is this?' },
+    };
+    const at = (n: number) => `2026-10-27T10:00:${String(n).padStart(2, '0')}.000Z`;
+    const events = [
+      ev('question.asked', { id: 1, question: 'Formal?', to: 'manager' }, { agent: 'dev', ts: at(1) }),
+      ev('question.escalated', { id: 1, from: 'dev', question: 'Formal or casual?' }, { agent: 'manager', ts: at(2) }),
+      ev('question.asked', { id: 2, question: 'Which pages?', to: 'human' }, { agent: 'manager', ts: at(3) }),
+      ev('question.answered', { id: 2, by: 'human', answer: 'All' }, { agent: 'manager', ts: at(4) }),
+      ev('usage.limit', { status: 'allowed', window: 'five_hour', utilization: 0.5 }, { runId: 'r2', ts: at(5) }),
+      ev('usage.limit', { status: 'allowed_warning', window: 'five_hour', utilization: 0.82, resetsAt: 1 }, { runId: 'r2', ts: at(6) }),
+      ev('usage.limit', { status: 'allowed_warning', window: 'five_hour', utilization: 0.85, resetsAt: 1 }, { runId: 'r2', ts: at(7) }),
+      ev('run.finished', { status: 'failed', reason: 'tests broke' }, { runId: 'r2', ts: at(8) }),
+      ev('run.finished', { status: 'failed', reason: 'aborted' }, { runId: 'r3', ts: at(9) }),
+      ev('run.finished', { status: 'escalated' }, { runId: 'r4', ts: at(10) }),
+      ev('run.finished', { status: 'succeeded' }, { runId: 'r5', ts: at(11) }),
+      ev('run.finished', { status: 'succeeded' }, { runId: 'r1', ts: at(12) }),
+    ];
+    const all = (bell: boolean, push: boolean) => Object.fromEntries((['question', 'limit', 'stopped', 'error', 'done'] as NotificationKind[]).map((k) => [k, { bell, push }])) as Record<NotificationKind, { bell: boolean; push: boolean }>;
+    const src = { projectId: 'p', events, run: (rid: string) => runs[rid], live: (r: RunRecord) => r.status === 'running' };
+    const list = collectNotifications([src], all(true, true));
+    expect(list.map((n) => [n.kind, n.title, n.body])).toEqual([
+      ['done', 'Job done', 'Add a greeting'],
+      ['stopped', 'Stopped: out of fix rounds', 'Ship it'],
+      ['stopped', 'Run stopped', 'Rename'],
+      ['error', 'Run failed', 'Fix the build: tests broke'],
+      ['limit', 'Close to your 5-hour limit', '82% used.'],
+      ['question', 'manager asks you', 'Which pages?'],
+      ['question', 'dev asks you', 'Formal or casual?'],
+    ]);
+    expect(list.filter((n) => n.kind === 'question').map((n) => [n.questionId, n.open])).toEqual([[2, false], [1, true]]);
+    expect(list[0]).toMatchObject({ id: `p:${events.at(-1)!.id}`, projectId: 'p', runId: 'r1', goal: 'Add a greeting' });
+
+    // Kinds switched off everywhere are left out; the rest carry their choices.
+    const choices = { ...all(false, false), question: { bell: true, push: false } };
+    expect(collectNotifications([src], choices).map((n) => [n.kind, n.bell, n.push])).toEqual([['question', true, false], ['question', true, false]]);
+  });
+
+  it("reports the plan's limits from Claude Code, or else from what turns reported", () => {
+    const now = new Date('2026-10-28T10:00:00.000Z');
+    const later = Date.parse('2026-10-28T12:00:00.000Z') / 1000;
+    const turns = [
+      { window: 'five_hour', status: 'rejected', utilization: 1, resetsAt: later, seenAt: '' },
+      { window: 'seven_day', status: 'allowed', utilization: 0.4, resetsAt: Date.parse('2026-10-27T00:00:00.000Z') / 1000, seenAt: '' },
+    ];
+    const plan = {
+      available: true,
+      subscription: 'max',
+      windows: [
+        { window: 'five_hour', label: '5-hour session', utilization: 100, resetsAt: '2026-10-28T12:00:00.000Z' },
+        { window: 'seven_day', label: 'Weekly (all models)', utilization: 35, resetsAt: '2026-11-01T00:00:00.000Z' },
+      ],
+    };
+    expect(usageReport(plan, turns, now)).toMatchObject({
+      source: 'claude',
+      subscription: 'max',
+      windows: [
+        { window: 'five_hour', utilization: 1, resetsAt: '2026-10-28T12:00:00.000Z', status: 'rejected' },
+        { window: 'seven_day', utilization: 0.35, status: undefined },
+      ],
+    });
+    // Without Claude Code's numbers, what turns reported, minus windows that have reset since.
+    expect(usageReport({ available: false, windows: [] }, turns, now)).toMatchObject({
+      source: 'runs',
+      windows: [{ window: 'five_hour', label: '5-hour session', utilization: 1, status: 'rejected', resetsAt: '2026-10-28T12:00:00.000Z' }],
+    });
+    expect(usageReport(undefined, [], now)).toMatchObject({ source: 'none', windows: [] });
   });
 
   it('shortens worktree and project paths', () => {

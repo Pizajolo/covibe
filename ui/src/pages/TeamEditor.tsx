@@ -4,6 +4,7 @@ import { CodeEditor } from '../components/CodeEditor';
 import { Composer } from '../components/Composer';
 import { DesignChat } from '../components/DesignChat';
 import { IconAlert, IconArrowLeft, IconChat, IconArrowRight, IconCheck, IconCode, IconCopy, IconFile, IconFlow, IconGear, IconLoop, IconPlay, IconPlus, IconTeam, IconTrash } from '../components/icons';
+import { ModelPicker } from '../components/ModelPicker';
 import { Toolbar } from '../components/Toolbar';
 import { SkillPicker } from './Skills';
 import { Avatar, Empty, Modal, useAction, useToast } from '../components/ui';
@@ -25,8 +26,6 @@ const KNOWN_TOOLS: [string, string][] = [
   ['NotebookEdit', 'Edit notebooks'],
 ];
 const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash']);
-const MODELS = ['opus', 'sonnet', 'haiku'];
-
 export function TeamEditor({ teamId, tab: tabParam }: { teamId: string; tab?: string }) {
   const { refresh } = useData();
   const toast = useToast();
@@ -294,7 +293,7 @@ function Members({ teamId, doc, edit, files, onFiles }: { teamId: string; doc: D
 function roleLine(a: Doc): string {
   const tools: string[] = Array.isArray(a.tools) ? a.tools : [];
   const writes = tools.some((t) => WRITE_TOOLS.has(t));
-  return `${a.model ?? 'default model'} · ${writes ? (a.scope?.write ? `writes ${a.scope.write.join(', ') || 'nothing'}` : 'writes anywhere') : 'read-only'}`;
+  return `${a.model ?? 'default model'}${a.effort ? ` (${a.effort})` : ''} · ${writes ? (a.scope?.write ? `writes ${a.scope.write.join(', ') || 'nothing'}` : 'writes anywhere') : 'read-only'}`;
 }
 
 function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, onDeleted, teamSkills }: { teamId: string; name: string; index: number; agent: Doc; names: string[]; edit: Edit; files: string[]; onFiles: () => void; onDeleted: () => void; teamSkills?: string[] }) {
@@ -306,7 +305,6 @@ function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, o
   const schemas = files.filter((f) => f.endsWith('.json') && f !== 'team.yaml');
   const backend: Doc | undefined = agent.backend;
   const [confirm, setConfirm] = useState(false);
-  const customModel = agent.model && !MODELS.includes(agent.model);
 
   const setTools = (next: string[]) => {
     const ops: EditOp[] = [{ op: 'set', path: p('tools'), value: next }];
@@ -333,26 +331,16 @@ function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, o
         <PromptEditor teamId={teamId} agent={agent} name={name} edit={edit} onFiles={onFiles} />
       </section>
 
+      <section className="form-section">
+        <h3>Model and thinking</h3>
+        <ModelPicker
+          value={{ model: agent.model, effort: agent.effort, thinking: agent.thinking }}
+          inherit="Team default"
+          onChange={(k, v) => void edit([{ op: 'set', path: p(k), value: v }])}
+        />
+      </section>
+
       <div className="grid grid-2">
-        <section className="form-section">
-          <h3>Model</h3>
-          <select
-            className="input"
-            value={customModel ? '__custom' : (agent.model ?? '')}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v === '__custom') void edit([{ op: 'set', path: p('model'), value: 'claude-sonnet-5-5' }]);
-              else void edit([{ op: 'set', path: p('model'), value: v || null }]);
-            }}
-          >
-            <option value="">Team default</option>
-            <option value="opus">Opus — strongest, for planning and hard problems</option>
-            <option value="sonnet">Sonnet — balanced, good for building</option>
-            <option value="haiku">Haiku — fast and cheap, for simple checks</option>
-            <option value="__custom">Custom model id…</option>
-          </select>
-          {customModel && <TextField mono value={agent.model} onCommit={(v) => void edit([{ op: 'set', path: p('model'), value: v || null }])} />}
-        </section>
         <section className="form-section">
           <h3>Report format</h3>
           <select className="input" value={agent.output_schema ?? ''} onChange={(e) => void edit([{ op: 'set', path: p('output_schema'), value: e.target.value || null }])}>
@@ -1161,16 +1149,16 @@ function TeamSettings({ doc, edit }: { doc: Doc; edit: Edit }) {
             <TextField mono value={doc.name} onCommit={(v) => void edit([{ op: 'set', path: ['name'], value: v }])} />
             <span className="help">Lowercase letters, digits, - and _.</span>
           </label>
-          <label className="field">
-            Default model
-            <select className="input" value={d.model ?? ''} onChange={(e) => void edit([{ op: 'set', path: ['defaults', 'model'], value: e.target.value || null }])}>
-              <option value="">Claude Code default</option>
-              {MODELS.map((m) => (
-                <option key={m}>{m}</option>
-              ))}
-            </select>
-          </label>
         </div>
+        <section className="form-section">
+          <h3>Model and thinking for every member</h3>
+          <ModelPicker
+            value={{ model: d.model, effort: d.effort, thinking: d.thinking }}
+            inherit="Claude Code default"
+            onChange={(k, v) => void edit([{ op: 'set', path: ['defaults', k], value: v }])}
+          />
+          <span className="tiny faint">Members can override these under Members.</span>
+        </section>
         <label className="field">
           Description
           <TextField value={doc.description} onCommit={(v) => void edit([{ op: 'set', path: ['description'], value: v || null }])} />

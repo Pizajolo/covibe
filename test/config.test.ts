@@ -117,6 +117,29 @@ workflow:
     );
   });
 
+  it('sets effort and thinking per team and per member', () => {
+    const yaml = `
+version: 1
+name: t
+defaults: { model: opus, effort: high, thinking: adaptive }
+agents:
+  a: { prompt: prompts/a.md, tools: [Read] }
+  b: { prompt: prompts/a.md, tools: [Read], model: haiku, effort: low, thinking: 4096 }
+  c: { prompt: prompts/a.md, tools: [Read], thinking: off }
+workflow:
+  steps:
+    - { id: one, agent: a }
+`;
+    const team = loadTeam(teamFile(yaml));
+    expect([team.agents.a, team.agents.b, team.agents.c].map((x) => [x!.model, x!.effort, x!.thinking])).toEqual([
+      ['opus', 'high', 'adaptive'],
+      ['haiku', 'low', 4096],
+      ['opus', 'high', 'off'],
+    ]);
+    expect(problems(teamFile(yaml.replace('effort: low', 'effort: huge')))).toEqual([expect.stringContaining('/agents/b/effort')]);
+    expect(problems(teamFile(yaml.replace('thinking: 4096', 'thinking: 10'))).join('\n')).toContain('/agents/b/thinking');
+  });
+
   it('requires base_url for a gateway backend', () => {
     const p = problems(teamFile(MINIMAL.replace('tools: [Read]', 'tools: [Read], backend: { type: gateway }')));
     expect(p.join('\n')).toMatch(/base_url/);

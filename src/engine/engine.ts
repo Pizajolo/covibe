@@ -10,7 +10,8 @@ import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent, Custo
 import { brainPrompt, commitBrain, curate, ensureBrain, proposeTool } from './brain.js';
 import { evaluate, evaluateGate } from './expr.js';
 import { systemPrompt, turnPrompt } from './prompts.js';
-import { ASK_TOOL, Deadline, LEAD_SCHEMA, leadPrompt, leadVerdict, QUESTION_STEP, RunPause, waitForAnswer, type LeadVerdict } from './questions.js';
+import { browserActivity } from './browser.js';
+import { ASK_TOOL, Deadline, LEAD_SCHEMA, leadPrompt, leadVerdict, QUESTION_STEP, questionOptions, RunPause, waitForAnswer, type LeadVerdict } from './questions.js';
 import { makeToolChecker, readOnly } from './scope.js';
 import { Workspace } from './workspace.js';
 
@@ -25,6 +26,8 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Git ref to start from, e.g. an earlier run's branch to build on its result. Defaults to HEAD. */
   base?: string;
+  /** When the plan's usage limit stops a member: wait for the reset and continue (default), or stop the run. */
+  onLimit?: 'wait' | 'stop';
 }
 
 export interface RunOutcome {
@@ -46,6 +49,41 @@ export interface RunContext {
 }
 
 class StepError extends Error {}
+
+/** The plan's usage limit stopped a member and the run stops (onLimit: stop). */
+class LimitError extends StepError {
+  constructor(
+    message: string,
+    readonly resetsAt: string | undefined,
+  ) {
+    super(message);
+  }
+}
+
+/** Without a reset time, look again after this long. */
+const LIMIT_RETRY_MS = 30 * 60_000;
+/** Wait a little past the reset, so the window has really turned over. */
+const LIMIT_GRACE_MS = 60_000;
+const MAX_LIMIT_WAIT_MS = 7 * 24 * 60 * 60_000;
+
+const resetIso = (epoch: number | undefined) => (epoch ? new Date(epoch < 1e12 ? epoch * 1000 : epoch).toISOString() : undefined);
+
+/** Sleep until `ms` from now, or until the signal aborts. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason ?? new Error('aborted'));
+    const timer = setTimeout(done, ms);
+    function done() {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }
+    function onAbort() {
+      clearTimeout(timer);
+      reject(signal!.reason ?? new Error('aborted'));
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 export function newRunId(date = new Date()): string {
   const p = (n: number) => String(n).padStart(2, '0');
@@ -141,6 +179,7 @@ class Engine {
 
     let status: RunOutcome['status'] = 'succeeded';
     let reason: string | undefined;
+    let limit: { resets_at: string | null } | undefined;
     try {
       let i = 0;
       while (i < steps.length) {
@@ -182,6 +221,7 @@ class Engine {
     } catch (err) {
       status = 'failed';
       reason = this.opts.signal?.aborted ? 'aborted' : (err as Error).message;
+      if (err instanceof LimitError) limit = { resets_at: err.resetsAt ?? null };
     }
     this.store.cancelQuestions(this.runId);
 
@@ -198,7 +238,7 @@ class Engine {
     this.store.finishRun(this.runId, status);
     this.emit({
       type: 'run.finished',
-      data: { status, reason, branch: this.workspace.branch, loops: this.context.loop, cost_usd: this.costUsd, feedback: this.context.feedback },
+      data: { status, reason, branch: this.workspace.branch, loops: this.context.loop, cost_usd: this.costUsd, feedback: this.context.feedback, ...(limit ? { limit } : {}) },
     });
     return { runId: this.runId, status, reason, branch: this.workspace.branch, context: this.context, costUsd: this.costUsd };
   }
@@ -271,7 +311,33 @@ class Engine {
         type: 'agent.started',
         data: { model: agent.model ?? null, backend: agent.backend.type, cwd, resumed: !!resume, loop: this.context.loop },
       });
-      const result = await this.runAgent(agent, { cwd, prompt, resume, env, outputSchema, step: step.id });
+      let result = await this.runAgent(agent, { cwd, prompt, resume, env, outputSchema, step: step.id });
+      // The plan's usage limit stopped the turn: wait for the reset and pick the session up again (or stop the run).
+      const waitedSince = Date.now();
+      while (result.limit) {
+        this.costUsd += result.costUsd;
+        if (result.sessionId) this.store.saveSession(this.runId, agent.name, result.sessionId, cwd);
+        const resetsAt = resetIso(result.limit.resetsAt);
+        const stop = this.opts.onLimit === 'stop' || Date.now() - waitedSince > MAX_LIMIT_WAIT_MS;
+        const until = resetsAt ? Math.max(Date.parse(resetsAt) + LIMIT_GRACE_MS, Date.now() + 2_000) : Date.now() + LIMIT_RETRY_MS;
+        this.emit({
+          ...base,
+          type: 'agent.limited',
+          data: { ...finishedData(agent, result), resets_at: resetsAt ?? null, window: result.limit.window ?? null, waiting: !stop, until: stop ? null : new Date(until).toISOString() },
+        });
+        if (stop) throw new LimitError(`${agent.name} hit the plan's usage limit on step ${step.id}${resetsAt ? `; it resets at ${resetsAt}` : ''}`, resetsAt);
+        await sleep(until - Date.now(), this.opts.signal);
+        this.emit({ ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, cwd, resumed: !!result.sessionId, after_limit: true, loop: this.context.loop } });
+        result = await this.runAgent(agent, {
+          cwd,
+          // A session to pick up continues; without one the turn starts over.
+          prompt: result.sessionId ? LIMIT_RESUME : prompt,
+          resume: result.sessionId ?? resume,
+          env,
+          outputSchema,
+          step: step.id,
+        });
+      }
       this.costUsd += result.costUsd;
       if (result.sessionId) this.store.saveSession(this.runId, agent.name, result.sessionId, cwd);
 
@@ -334,31 +400,34 @@ class Engine {
       params: {
         question: { type: 'string', description: 'What you need decided, with the options you see, so it can be answered without seeing your work.' },
         context: { type: 'string', optional: true, description: 'What you found or tried, the files involved, and what you would do by default.' },
+        options: { type: 'list', optional: true, description: 'When it is a choice: the answers to pick from (2 to 8, short). Any other answer is still possible.' },
       },
       run: (args) => {
         const context = typeof args.context === 'string' && args.context.trim() ? args.context.trim() : undefined;
-        return this.ask(from, step, String(args.question ?? '').trim(), context, deadline);
+        return this.ask(from, step, String(args.question ?? '').trim(), context, questionOptions(args.options), deadline);
       },
     };
   }
 
   /** A member's question: the lead first, then the human (pausing the run). Returns the text the member sees. */
-  private async ask(from: string, step: string, text: string, context: string | undefined, deadline: Deadline): Promise<string> {
+  private async ask(from: string, step: string, text: string, context: string | undefined, options: string[] | undefined, deadline: Deadline): Promise<string> {
     if (!text) throw new Error('the question is empty');
     const lead = this.team.lead && this.team.lead !== from ? this.team.lead : undefined;
     const release = deadline.hold();
     try {
-      const { id } = this.store.addQuestion({ runId: this.runId, from, text, context, status: lead ? 'lead' : 'open' });
-      this.emit({ step, agent: from, type: 'question.asked', data: { id, question: text, context: context ?? null, to: lead ?? 'human' } });
+      const { id } = this.store.addQuestion({ runId: this.runId, from, text, context, options, status: lead ? 'lead' : 'open' });
+      this.emit({ step, agent: from, type: 'question.asked', data: { id, question: text, context: context ?? null, options: options ?? null, to: lead ?? 'human' } });
       if (lead) {
-        const verdict = await this.consultLead(lead, from, step, text, context);
+        const verdict = await this.consultLead(lead, from, step, text, context, options);
         if ('answer' in verdict) {
           this.store.answerQuestion(id, verdict.answer, lead);
           this.emit({ step, agent: from, type: 'question.answered', data: { id, by: lead, answer: verdict.answer } });
           return `Answer from ${lead}:\n${verdict.answer}`;
         }
-        this.store.escalateQuestion(id, verdict.forHuman, verdict.note);
-        this.emit({ step, agent: lead, type: 'question.escalated', data: { id, from, question: verdict.forHuman, reason: verdict.note ?? null } });
+        // A rephrased question comes with the lead's own options; otherwise the member's still fit.
+        const choices = verdict.options ?? (verdict.forHuman === text ? options : undefined);
+        this.store.escalateQuestion(id, verdict.forHuman, verdict.note, choices);
+        this.emit({ step, agent: lead, type: 'question.escalated', data: { id, from, question: verdict.forHuman, reason: verdict.note ?? null, options: choices ?? null } });
       }
       this.pause.add(id);
       try {
@@ -377,10 +446,10 @@ class Engine {
    * knows the plan without its own session being touched. If anything goes
    * wrong, the question goes on to the human.
    */
-  private async consultLead(leadName: string, from: string, step: string, question: string, context: string | undefined): Promise<LeadVerdict> {
+  private async consultLead(leadName: string, from: string, step: string, question: string, context: string | undefined, options: string[] | undefined): Promise<LeadVerdict> {
     const lead = readOnly(this.team.agents[leadName]!);
     const base = { step: QUESTION_STEP, agent: leadName };
-    const passOn = (why: string): LeadVerdict => ({ forHuman: question, note: `${leadName} could not answer: ${why}` });
+    const passOn = (why: string): LeadVerdict => ({ forHuman: question, note: `${leadName} could not answer: ${why}`, options });
     try {
       const { env } = backendEnv(lead.backend, this.opts.env ?? process.env);
       const session = this.store.getSession(this.runId, leadName);
@@ -390,7 +459,7 @@ class Engine {
       const inv = buildInvocation(this.team, this.store, this.runId, lead, {
         cwd,
         root: this.team.isolation === 'none' ? this.workspace.repo : cwd,
-        prompt: leadPrompt({ goal: this.opts.goal, lead: leadName, from, step, question, context }),
+        prompt: leadPrompt({ goal: this.opts.goal, lead: leadName, from, step, question, context, options }),
         resume: session?.sessionId,
         fork: true,
         env,
@@ -472,6 +541,8 @@ export function buildInvocation(
     resumeSessionId: p.resume,
     forkSession: p.fork,
     model: agent.model,
+    effort: agent.effort,
+    thinking: agent.thinking,
     tools: agent.tools,
     outputSchema: p.outputSchema,
     env: p.env,
@@ -513,12 +584,28 @@ export function buildInvocation(
   };
 }
 
-/** Turn an agent's stream into stored events (text, tool calls, denials, plan usage). */
+const LIMIT_RESUME =
+  "Your last turn stopped because the plan's usage limit was reached. The limit has reset: continue where you left off and finish the task as asked.";
+
+/** Larger images are not kept (screenshots are well below this). */
+const MAX_VIEW_BYTES = 10 << 20;
+
+/** Turn an agent's stream into stored events (text, tool calls, denials, plan usage, images it saw). */
 export function eventSink(store: EventStore, runId: string, base: { step?: string; agent?: string }) {
   const emit = (e: NewEvent) => store.append(runId, e);
   return (e: AgentStreamEvent) => {
     if (e.kind === 'text') emit({ ...base, type: 'agent.text', data: { text: clip(e.text, 4000) } });
-    else if (e.kind === 'tool') emit({ ...base, type: 'agent.tool', data: { tool: e.tool, input: summarize(e.input) } });
+    else if (e.kind === 'tool') {
+      // A browser call carries the page it goes to, read from the full input (the stored one is clipped).
+      const browser = browserActivity(e.tool, e.input);
+      emit({ ...base, type: 'agent.tool', data: { tool: e.tool, input: summarize(e.input), ...(browser ? { browser } : {}) } });
+    } else if (e.kind === 'image' && base.agent) {
+      const data = Buffer.from(e.data, 'base64');
+      if (!data.length || data.length > MAX_VIEW_BYTES || !/^image\/(png|jpeg|gif|webp)$/.test(e.mediaType)) return;
+      const id = store.addView(runId, base.agent, e.mediaType, data);
+      const file = typeof (e.input as { file_path?: unknown })?.file_path === 'string' ? (e.input as { file_path: string }).file_path : null;
+      emit({ ...base, type: 'agent.view', data: { id, tool: e.tool, file, media_type: e.mediaType, bytes: data.length } });
+    }
     else if (e.kind === 'denied') emit({ ...base, type: 'scope.denied', data: { tool: e.tool, input: summarize(e.input), reason: e.reason } });
     else if (e.kind === 'rate_limit') emit({ ...base, type: 'usage.limit', data: { ...e.info } });
   };

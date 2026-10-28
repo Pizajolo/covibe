@@ -50,14 +50,14 @@ To try the UI in a browser instead, run `covibe app`.
 
 | Screen | What it shows and does |
 |---|---|
-| **Home** | Today's and this week's estimated spend, tokens, members working now, run outcomes, gate pass rate; your plan's 5-hour and weekly usage as reported by Claude Code; spend per day and per team member; live runs and recent ones. Give a new goal or ask a question right there (⌘N anywhere). |
-| **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; click a desk for the member's details, chat and activity), **Board** (a column per workflow step, a card per member and fix round, gate results), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch). Stop a run, or start a **new goal on this result**. |
+| **Home** | Today's and this week's estimated spend, tokens, members working now, run outcomes, gate pass rate; your plan's 5-hour and weekly usage as Claude Code reports it, with reset countdowns (also at the bottom of the sidebar); spend per day and per team member; live runs and recent ones. Give a new goal or ask a question right there (⌘N anywhere). |
+| **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; a member driving a browser gets a browser button above its desk that shows what it sees (see [Browser preview](#browser-preview)); click a desk for the member's details, chat and activity), **Board** (a column per workflow step, a card per member and fix round, gate results), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch). Stop a run, or start a **new goal on this result**. When a run succeeds, covibe asks what to do with its result: **merge** it into your branch (and push), **open a pull request**, or just **push** the branch (**Ship result** brings that back later). |
 | **Chat** | While a member is working, choose **Now** (it reads your message between tool calls and adjusts), **Stop and redirect** (it ends its current turn and answers you first) or **Next turn**. After the run, the member resumes its session and answers right away; anything it changes is scope-checked and merged into the run's branch. |
 | **Ask a question** | A read-only session with one member in your project: it can read the code but not change it. Follow-up questions continue the same session. |
 | **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, report format, connection, limits), **Workflow** (a drag-and-drop graph: drag steps to reorder, drag members onto a step or between steps, drag a gate's ↺ handle onto an earlier step to set where failed work goes back; plus forms for gates and the fix loop), **Team settings** (connection, sandbox, limits), **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
 | **Team chat** | Describe the team you need and an architect agent sets it up: it reads your project to fit the stack and folders, asks only if something important is unclear, and saves the team through a tool that refuses invalid files and hands the problems back to it. Keep talking to change it ("add a security reviewer", "use haiku for the tester"). Available in New project, New team, and every team's **Chat** tab. |
 | **Skills** | One library of skills for all teams: **write your own**, **add from GitHub** (a repository or a folder; private ones work if git can clone them), or install from **Anthropic's skills**. Claude Code's **built-in skills** are listed too. Give skills to a member, to every member of a team, or mark one **Everyone** to give it to all members of all teams. |
-| **Projects** | Each project has **Runs** and a **Brain** tab. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
+| **Projects** | Each project has **Runs**, **Brain** and **Git** tabs. **Git** shows your checkout: the branch and whether it is pushed, uncommitted changes (commit them all with a message), branches (switch, merge into the current one, push, pull request) and a graph of recent commits on every branch (click one for its diff, and revert it with a new commit). Pull requests are created with the GitHub CLI when it is signed in; otherwise the branch is pushed and the forge's page opens. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
 | **Brain** | The project's shared notes. Every member reads them before working and can **propose** additions; only the team's **curator** (or you) writes. Review proposals yourself (accept into a new or existing note, or reject) or ask the curator. Edit notes directly; every change is in the brain's own git history. |
 
 ![A live run: members, board and gates](docs/screenshots/run-board.png)
@@ -149,7 +149,9 @@ defaults:
 agents:
   manager:
     prompt: prompts/manager.md      # Markdown file, relative to the team file
-    model: opus
+    model: opus                     # an alias (opus | sonnet | haiku) or a model id
+    effort: high                    # low | medium | high | xhigh | max (also under defaults)
+    thinking: adaptive              # adaptive | off | a token budget such as 8000 (older models)
     tools: [Read, Grep, Glob]       # no edit tools: plans, cannot change code
   frontend:
     prompt: prompts/frontend.md
@@ -345,22 +347,57 @@ Every member in a workflow step has an `ask_question` tool, and its turn waits u
    working. The lead's own questions, and every question in a team without a lead, go straight to you.
 2. **If the lead cannot answer, the run pauses.** The question comes to you, and until you answer: no new step or
    member starts, members that are working stop at their next tool call, and their time limits stop counting. The
-   app shows the run as **Paused · needs you** with the question and an answer box; `covibe run` asks you in the
-   terminal; `covibe answer <run> <question> "<answer>"` works from anywhere. Once every question waiting for you
-   is answered, the run continues.
+   app opens the question in a popup wherever you are (and sends a system notification while it is in the
+   background) and shows the run as **Paused · needs you**. Close the popup to answer later: the question stays
+   under the bell in the toolbar, and a **?** on the lead's desk in the Office opens it again. `covibe run` asks you
+   in the terminal; `covibe answer <run> <question> "<answer>"` works from anywhere. Once every question waiting for
+   you is answered, the run continues.
+
+When a question is a choice, the member passes the `options` (and the lead may offer its own when it rephrases the
+question for you). The app shows them to pick from, with **Other** to write your own answer; in the terminal you
+can type an option's number.
 
 A member waits up to 7 days for an answer. Stopping the run cancels open questions; so does quitting the app or
 the terminal that runs it, since runs do not survive their process yet.
+
+## Plan limits
+
+Members on your Claude subscription share its 5-hour and weekly limits. covibe reads them from Claude Code the way
+`/usage` does (without running a model) and shows them on Home, in the sidebar and in Settings; when that is not
+available, it shows what members' turns last reported.
+
+When a member hits a limit, by default the run waits: the member and the run show a countdown to the reset, and
+then the member picks its session up where it stopped. Turn this off in Settings → Usage limits to stop the run
+instead; its page then offers **Restart now** or **Restart when it resets** (a scheduled restart survives quitting
+the app). A restart runs the same goal with the same team, starting from the stopped run's branch so its committed
+work is kept.
+
+## Browser preview
+
+When a member builds or tests a website with a browser (a Bash command running Playwright, Puppeteer, headless
+Chromium and the like, or a browser MCP tool), the Office shows a browser button above its desk. It opens what the
+member sees: the screenshots it looked at, newest first and following new ones live, and the address it went to,
+which you can open in your own browser. Claude sees a page only when it takes a screenshot and reads it (or a
+browser tool returns one), so that is what the preview shows; a test run that takes no screenshot shows the address
+only. covibe keeps the newest 40 images per member and run in the project's `.covibe/covibe.db`.
+
+## Notifications
+
+The bell at the top right of the app lists the questions waiting for you and the latest notifications from the past
+week: questions, plan usage close to or at its limit, runs that were stopped or ran out of fix rounds, runs that
+failed, and runs that finished with every gate passed. Choose in Settings → Notifications which of these show under
+the bell and which also go out as system notifications (sent while the app is in the background).
 
 ## Events
 
 All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event types:
 
 `run.started` `run.finished` `step.started` `step.finished` `step.skipped` `gate.passed` `gate.failed` `loop.goto`
-`agent.started` `agent.text` `agent.tool` `agent.finished` `agent.error` `scope.denied` `scope.violation`
+`agent.started` `agent.text` `agent.tool` `agent.view` `agent.limited` `agent.finished` `agent.error` `scope.denied` `scope.violation`
 `git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit`
 `workspace.cleaned` `brain.proposed` `brain.decided` `brain.updated` `team.saved` `question.asked`
-`question.escalated` `question.answered` `run.paused` `run.resumed`
+`question.escalated` `question.answered` `run.paused` `run.resumed` `run.restart_scheduled` `run.restart_cancelled`
+`run.restarted`
 
 `agent.finished` carries turns, estimated cost, duration, model and token counts; `usage.limit` carries the plan
 usage Claude Code reports (window, status, utilization, reset time). `message.queued` and `message.delivered` carry
@@ -376,12 +413,14 @@ src/engine/workspace.ts    git worktrees, commits, merges, out-of-scope discard
 src/engine/scope.ts        pre-tool-use write-scope checks
 src/engine/chat.ts         queue-or-resume chat
 src/engine/questions.ts    members' questions: the lead first, then you; pausing the run
-src/events/store.ts        SQLite runs, events, sessions, inbox, questions (node:sqlite, WAL)
+src/engine/browser.ts      spotting members that drive a browser, and the page they go to
+src/events/store.ts        SQLite runs, events, sessions, inbox, questions, images members saw (node:sqlite, WAL)
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
 src/runner/backend.ts      per-agent environment for each backend
 src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.0.0.1, token)
 src/server/library.ts      projects and teams library, comment-preserving YAML edits
-src/server/projections.ts  events → run summaries, member status, board, chat threads, stats
+src/server/projections.ts  events → run summaries, member status, board, chat threads, stats, notifications, plan usage
+src/server/gitops.ts       git in the project's checkout: status, branches, graph, commit, merge, push, revert, PRs
 ui/src/components/Office.tsx    the run as a pixel office (office-art.ts draws it, office-state.ts maps member states)
 src/main.ts                CLI
 ui/                        the app UI (React, Vite, CodeMirror)

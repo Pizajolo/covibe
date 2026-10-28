@@ -2,7 +2,7 @@
 // team for you. It can read your project to see the stack, and it edits the
 // team only through save_team, which writes nothing unless team.yaml is valid.
 import { existsSync } from 'node:fs';
-import type { AgentConfig } from '../config/types.js';
+import type { AgentConfig, Effort } from '../config/types.js';
 import { DEFAULT_SANDBOX_NETWORK } from '../config/load.js';
 import { eventSink, finishedData, newRunId } from '../engine/engine.js';
 import type { EventStore } from '../events/store.js';
@@ -18,7 +18,7 @@ const GUIDE = `You are the team architect in covibe, a desktop app where a team 
 
 # How covibe teams work
 A team is one team.yaml (YAML 1.2) plus Markdown prompt files and optional JSON Schema report files, all relative to the team folder. covibe enforces the file in code, not by prompting:
-- Members (agents) each get a role prompt (prompts/<name>.md), a model (opus | sonnet | haiku or a model id), built-in tools (Read, Grep, Glob, Edit, Write, Bash, WebSearch, WebFetch), optional scope.write globs (paths it may change; omit = anything in its worktree, [] = nothing), can_message (teammates it may message), output_schema (a JSON Schema file its structured report must match), skills (skill names), limits, backend.
+- Members (agents) each get a role prompt (prompts/<name>.md), a model (opus | sonnet | haiku or a model id), optionally effort (low | medium | high | xhigh | max; higher for planning and review, lower for simple checks) and thinking (adaptive | off | a token budget), built-in tools (Read, Grep, Glob, Edit, Write, Bash, WebSearch, WebFetch), optional scope.write globs (paths it may change; omit = anything in its worktree, [] = nothing), can_message (teammates it may message), output_schema (a JSON Schema file its structured report must match), skills (skill names), limits, backend.
 - Each member that can write works in its own git worktree; covibe commits and merges. Shell commands are sandboxed (only its worktree, temp, package caches; only allowed domains).
 - workflow.steps run in order. A step is { id, agent } or { id, parallel: [{ agent, task }] }. task is a JSONata expression over earlier reports, e.g. "plan.tasks[owner = 'frontend']". A step's output is its member's structured report (or {text}) under the step id.
 - gate is a JSONata expression that must be literally true, e.g. "review.blocking_count = 0". When it fails, on_gate_fail { goto, max_loops, feed: [expressions], then: escalate_to_human | fail } loops back (workflow.on_gate_fail is the default for all gated steps). goto must be this or an earlier step.
@@ -70,6 +70,7 @@ export interface DesignStart {
   /** Project the team is for: the architect may read it. */
   projectPath?: string;
   model?: string;
+  effort?: Effort;
   env?: Env;
   builtinSkills?: () => Promise<EnvironmentInfo['skills']>;
 }
@@ -91,6 +92,7 @@ export async function design(opts: DesignStart & { runId?: string; message: stri
     name: ARCHITECT,
     prompt: GUIDE,
     model: opts.model ?? 'sonnet',
+    effort: opts.effort,
     tools: ['Read', 'Grep', 'Glob'],
     canMessage: [],
     writeScope: [],
@@ -118,6 +120,7 @@ export async function design(opts: DesignStart & { runId?: string; message: stri
       cwd,
       resumeSessionId: session?.sessionId,
       model: agent.model,
+      effort: agent.effort,
       tools: agent.tools,
       env,
       maxTurns: agent.limits.max_turns,

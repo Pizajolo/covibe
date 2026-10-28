@@ -1,4 +1,4 @@
-import type { JsonSchema, SandboxConfig, SettingSource } from '../config/types.js';
+import type { Effort, JsonSchema, SandboxConfig, SettingSource, Thinking } from '../config/types.js';
 import type { Env } from './backend.js';
 
 /** What the engine asks a runner to do: one turn of one agent. */
@@ -14,6 +14,8 @@ export interface AgentInvocation {
   /** Resume into a copy of the session, leaving the original untouched (the lead answering a question mid-run). */
   forkSession?: boolean;
   model?: string;
+  effort?: Effort;
+  thinking?: Thinking;
   tools: string[];
   outputSchema?: JsonSchema;
   env: Env;
@@ -54,7 +56,8 @@ export type LivePriority = 'next' | 'now';
 
 export type CustomParam =
   | { type: 'string' | 'number' | 'boolean'; description: string; optional?: boolean; enum?: string[] }
-  | { type: 'files'; description: string; optional?: boolean };
+  | { type: 'files'; description: string; optional?: boolean }
+  | { type: 'list'; description: string; optional?: boolean };
 
 /** A tool covibe implements in-process and offers to an agent. */
 export interface CustomTool {
@@ -68,7 +71,28 @@ export interface CustomTool {
 /** What Claude Code offers on this machine, read without running a turn. */
 export interface EnvironmentInfo {
   skills: { name: string; description: string }[];
+  /** The models Claude Code offers this account, with the effort levels each supports. */
+  models?: ModelChoice[];
   account?: { email?: string; organization?: string; subscriptionType?: string; apiProvider?: string };
+}
+
+export interface ModelChoice {
+  /** What goes in the team file (an alias such as "opus", or a model id). */
+  value: string;
+  name: string;
+  description: string;
+  /** The model id the alias stands for right now. */
+  resolved?: string;
+  efforts: Effort[];
+  adaptiveThinking: boolean;
+}
+
+/** Plan usage as Claude Code reports it (the data behind /usage), without running a model. */
+export interface PlanUsage {
+  available: boolean;
+  subscription?: string;
+  windows: { window: string; label: string; utilization: number | null; resetsAt: string | null }[];
+  extra?: { enabled: boolean; limit: number | null; used: number | null; utilization: number | null; currency?: string };
 }
 
 export interface AgentControl {
@@ -82,7 +106,9 @@ export type AgentStreamEvent =
   | { kind: 'tool'; tool: string; input: unknown }
   | { kind: 'denied'; tool: string; input: unknown; reason: string }
   /** Subscription plan usage, as reported by Claude Code. */
-  | { kind: 'rate_limit'; info: RateLimitInfo };
+  | { kind: 'rate_limit'; info: RateLimitInfo }
+  /** An image in a tool's result, which the agent sees (a screenshot it read, say); base64 data. */
+  | { kind: 'image'; tool: string; input: unknown; mediaType: string; data: string };
 
 export interface RateLimitInfo {
   status: string;
@@ -112,6 +138,8 @@ export interface AgentResult {
   costUsd: number;
   durationMs: number;
   tokens?: TokenUsage;
+  /** Set when the plan's usage limit stopped the turn: when it resets (epoch seconds), if known. */
+  limit?: { resetsAt?: number; window?: string };
 }
 
 /**
@@ -122,4 +150,6 @@ export interface AgentRunner {
   run(invocation: AgentInvocation): Promise<AgentResult>;
   /** Built-in skills and account details (optional; the SDK runner implements it). */
   discover?(env: Env): Promise<EnvironmentInfo>;
+  /** The plan's usage windows, when the runner can read them. */
+  usage?(env: Env): Promise<PlanUsage>;
 }

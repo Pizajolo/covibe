@@ -20,6 +20,8 @@ export type EventType =
   | 'agent.tool'
   | 'agent.finished'
   | 'agent.error'
+  | 'agent.view'
+  | 'agent.limited'
   | 'scope.denied'
   | 'scope.violation'
   | 'git.commit'
@@ -38,7 +40,10 @@ export type EventType =
   | 'question.escalated'
   | 'question.answered'
   | 'run.paused'
-  | 'run.resumed';
+  | 'run.resumed'
+  | 'run.restart_scheduled'
+  | 'run.restart_cancelled'
+  | 'run.restarted';
 
 export interface RunEvent {
   id: number;
@@ -118,6 +123,8 @@ export interface Question {
   /** What the member asked. */
   text: string;
   context?: string;
+  /** Answers to pick from, when it is a choice; any other answer is fine too. */
+  options?: string[];
   status: QuestionStatus;
   /** The question as put to the human (the lead may rephrase it), and why the lead passed it on. */
   forHuman?: string;

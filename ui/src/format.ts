@@ -58,17 +58,23 @@ export function greeting(d = new Date()): string {
   return h < 5 ? 'Working late' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
 }
 
-/** Plan utilization may arrive as a fraction (0..1) or a percentage. */
-export function utilization(v: number | undefined): number | undefined {
-  if (v === undefined || v === null || Number.isNaN(v)) return undefined;
-  return v > 1 ? v / 100 : v;
+/** Time left until an ISO time: "2 h 14 min", "9 min", "40 s"; "now" once it passed. */
+export function countdown(iso: string, now = Date.now()): string {
+  const s = Math.round((Date.parse(iso) - now) / 1000);
+  if (s <= 0) return 'now';
+  if (s < 60) return `${s} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h} h ${m % 60} min`;
+  return `${Math.round(h / 24)} days`;
 }
 
-export const WINDOW_LABELS: Record<string, string> = {
-  five_hour: '5-hour session',
-  seven_day: 'Weekly (all models)',
-  seven_day_opus: 'Weekly (Opus)',
-  seven_day_sonnet: 'Weekly (Sonnet)',
-  seven_day_overage_included: 'Weekly (incl. extra usage)',
-  overage: 'Extra usage',
-};
+/** "Tue 14:00" for a reset time within the week, else a date. */
+export function resetTime(iso: string): string {
+  const d = new Date(iso);
+  const days = (d.getTime() - Date.now()) / 86_400_000;
+  return days < 6
+    ? d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
