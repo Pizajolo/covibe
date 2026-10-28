@@ -623,13 +623,13 @@ export function resetIso(v: unknown): string | undefined {
  * otherwise the last values members' turns reported. A window whose reset
  * time has passed counts as fresh.
  */
-export function usageReport(plan: PlanUsage | undefined, allFromRuns: UsageWindow[], now = new Date(), account = 'main'): UsageReport {
+export function usageReport(plan: PlanUsage | undefined, allFromRuns: UsageWindow[], now = new Date(), account = 'main', from: 'claude' | 'codex' = 'claude'): UsageReport {
   const fromRuns = allFromRuns.filter((u) => (u.account ?? 'main') === account);
   const status = new Map(fromRuns.map((u) => [u.window, u]));
   const fresh = (resetsAt: string | undefined) => !resetsAt || Date.parse(resetsAt) > now.getTime();
   if (plan?.available) {
     return {
-      source: 'claude',
+      source: from,
       subscription: plan.subscription,
       windows: plan.windows.map((w) => {
         const turn = status.get(w.window);

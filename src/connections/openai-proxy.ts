@@ -2,22 +2,27 @@
 // API; this local server takes those requests, sends them to an OpenAI-style
 // Chat Completions endpoint (OpenAI, OpenRouter, Groq, Ollama…), and turns the
 // answers, streamed or not and with tool calls, back into Messages responses.
+// A ChatGPT account's Codex API speaks Responses instead (codex-proxy.ts).
 // It listens on 127.0.0.1 only and wants a per-start token, so the provider's
-// key stays in this process and never reaches the agent's environment.
+// key or the account's sign-in stays in this process and never reaches the
+// agent's environment.
 import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { answerCodex, type CodexUpstream } from './codex-proxy.js';
 
 export interface Upstream {
   baseUrl: string;
   key?: string;
   /** The largest output a model accepts, if known. */
   maxOutput(model: string): number | undefined;
+  /** A ChatGPT account: Responses requests with the account's sign-in instead of Chat Completions with a key. */
+  codex?: CodexUpstream;
 }
 
 // ---- Anthropic request and response shapes (the parts that matter here)
 
-type Block =
+export type Block =
   | { type: 'text'; text: string }
   | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string } }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
@@ -35,6 +40,9 @@ export interface MessagesRequest {
   stream?: boolean;
   tools?: { name: string; description?: string; input_schema?: unknown; type?: string }[];
   tool_choice?: { type: 'auto' | 'any' | 'tool' | 'none'; name?: string };
+  /** What Claude Code asks for in thinking and effort; only the Codex translation uses them. */
+  thinking?: { type: 'enabled' | 'adaptive' | 'disabled'; budget_tokens?: number };
+  output_config?: { effort?: string };
 }
 
 // ---- OpenAI shapes
@@ -308,12 +316,13 @@ export class OpenAiTranslator {
     if (s) await new Promise<void>((resolve) => s.close(() => resolve()));
   }
 
-  private fail(res: ServerResponse, status: number, message: string) {
+  /** `retry: false` tells Claude Code not to try again (a usage limit that lasts hours, a sign-in that expired). */
+  private fail(res: ServerResponse, status: number, message: string, retry?: boolean) {
     if (res.headersSent) {
       if (!res.writableEnded) res.end(`event: error\ndata: ${JSON.stringify(apiError(status, message))}\n\n`);
       return;
     }
-    res.writeHead(status, { 'content-type': 'application/json' });
+    res.writeHead(status, { 'content-type': 'application/json', ...(retry === false ? { 'x-should-retry': 'false' } : {}) });
     res.end(JSON.stringify(apiError(status, message)));
   }
 
@@ -337,6 +346,7 @@ export class OpenAiTranslator {
 
     const controller = new AbortController();
     res.on('close', () => controller.abort());
+    if (upstream.codex) return answerCodex(body, req.headers, upstream.baseUrl, upstream.codex, res, controller.signal, (f) => this.fail(res, f.status, f.message, f.retry));
     const base = upstream.baseUrl.replace(/\/+$/, '');
     const chat = toChatRequest(body, { maxOutput: upstream.maxOutput(body.model), openaiHost: /(^|\.)openai\.com$/.test(new URL(base).hostname) });
     const answer = await fetch(`${base}/chat/completions`, {

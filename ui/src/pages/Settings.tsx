@@ -231,6 +231,8 @@ export function Settings() {
                 </dd>
                 <dt>Other Claude accounts</dt>
                 <dd>Signed in under Advanced below, and chosen per team or member. Members can also share work across them.</dd>
+                <dt>ChatGPT accounts</dt>
+                <dd>Signed in with ChatGPT under Advanced below, like Codex; members use OpenAI's models within your ChatGPT plan's limits, with Claude Code's tools.</dd>
                 <dt>Other providers</dt>
                 <dd>DeepSeek, OpenAI, OpenRouter, a local Ollama and others with an API key, set up under Advanced below; their models show up in every team's model list.</dd>
                 <dt>API key</dt>

@@ -16,7 +16,8 @@ export function Home({ onNewGoal }: { onNewGoal: () => void }) {
   const live = runs.filter((r) => r.status === 'running');
   const recent = runs.filter((r) => r.status !== 'running').slice(0, 8);
   const needsSetup = !projects.length || !teams.some((t) => t.valid);
-  const accounts = usage?.accounts?.length ?? 0;
+  const accounts = usage?.accounts?.filter((a) => a.kind === 'claude').length ?? 0;
+  const chatgpt = usage?.accounts?.filter((a) => a.kind === 'codex').length ?? 0;
   // Spend per account or provider is worth a table once there is more than your own login.
   const vias = stats.byVia.filter((v) => v.costUsd > 0 || v.tokens > 0);
   const showVias = vias.length > 1 || vias.some((v) => v.via !== 'claude');
@@ -81,7 +82,10 @@ export function Home({ onNewGoal }: { onNewGoal: () => void }) {
             <div className="card">
               <div className="card-head">
                 <h2>Plan usage</h2>
-                <span className="hint">{accounts ? `${accounts + 1} Claude accounts${usage?.balance ? ', shared' : ''}` : 'your Claude subscription'}</span>
+                <span className="hint">
+                  {accounts ? `${accounts + 1} Claude accounts${usage?.balance ? ', shared' : ''}` : 'your Claude subscription'}
+                  {chatgpt ? ` · ${chatgpt} ChatGPT account${chatgpt === 1 ? '' : 's'}` : ''}
+                </span>
               </div>
               <div className="card-pad col" style={{ gap: 16 }}>
                 <UsageMeters />

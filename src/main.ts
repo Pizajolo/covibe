@@ -13,7 +13,7 @@ import { answerQuestion } from './engine/questions.js';
 import { EventStore } from './events/store.js';
 import { bold, dim, formatEvent, formatRun, green, QUIET_EVENTS, red, yellow } from './format.js';
 import { ClaudeSdkRunner } from './runner/claude-sdk.js';
-import { Connections, loginCommand } from './connections/store.js';
+import { Connections, loginCommand, openInBrowser } from './connections/store.js';
 
 /** Accounts and providers from Settings → Advanced, shared with the app. */
 function openConnections(runner: ClaudeSdkRunner): Connections {
@@ -35,8 +35,8 @@ Usage:
   covibe clean [--older-than <days>] [--run <id>] [--dry-run]
                                                Remove worktrees of finished runs
   covibe app [--port <n>] [--no-open]          Open the covibe app in your browser
-  covibe connections                           List Claude accounts and providers (Settings → Advanced)
-  covibe login <account>                       Sign in one of those Claude accounts
+  covibe connections                           List accounts and providers (Settings → Advanced)
+  covibe login <account>                       Sign in one of those Claude or ChatGPT accounts
 
 Options:
   --repo <dir>   Repository the team works on (default: current directory)
@@ -98,7 +98,7 @@ export async function main(argv: string[]): Promise<number> {
       case 'connections':
         return listConnections();
       case 'login':
-        return login(args[0]);
+        return await login(args[0]);
       default:
         console.error(`unknown command "${command}"\n\n${USAGE}`);
         return 1;
@@ -394,18 +394,38 @@ function listConnections(): number {
     return 0;
   }
   for (const c of all) {
-    const what = c.kind === 'claude' ? 'Claude account' : c.kind === 'anthropic' ? `Anthropic-compatible · ${c.baseUrl}` : `OpenAI-compatible · ${c.baseUrl}`;
-    const extra = c.kind === 'claude' ? '' : ` · ${c.models?.length ?? 0} model(s)${c.hasKey ? '' : yellow(' · no key')}`;
+    const who = c.kind === 'codex' ? connections.codexInfo(c.id) : undefined;
+    const what =
+      c.kind === 'claude'
+        ? 'Claude account'
+        : c.kind === 'codex'
+          ? `ChatGPT account${who?.email ? ` · ${who.email}` : ''}${who?.subscriptionType ? ` · ${who.subscriptionType}` : ''}`
+          : c.kind === 'anthropic'
+            ? `Anthropic-compatible · ${c.baseUrl}`
+            : `OpenAI-compatible · ${c.baseUrl}`;
+    const missing = c.kind === 'codex' ? ' · not signed in' : ' · no key';
+    const extra = c.kind === 'claude' ? '' : ` · ${c.models?.length ?? 0} model(s)${c.hasKey ? '' : yellow(missing)}`;
     console.log(`${bold(c.id.padEnd(16))} ${c.label}  ${dim(what)}${extra}`);
   }
   console.log(dim(`\nSharing work across Claude accounts: ${connections.balance ? 'on' : 'off'}`));
   return 0;
 }
 
-function login(id: string | undefined): number {
+async function login(id: string | undefined): Promise<number> {
   if (!id) throw new Error('usage: covibe login <account>');
-  const account = new Connections().get(id);
-  if (!account || account.kind !== 'claude' || !account.configDir) throw new Error(`no Claude account "${id}" (add it in the app: Settings → Advanced)`);
+  const connections = new Connections();
+  const account = connections.get(id);
+  if (account?.kind === 'codex') {
+    // The browser does the sign-in and comes back to a callback on this machine.
+    const { url, done } = await connections.codexSignIn(id);
+    const opened = await openInBrowser(url);
+    console.log(opened ? 'Finish signing in in your browser. If it did not open, go to:' : 'Open this page in a browser on this machine to sign in:');
+    console.log(dim(url));
+    const who = await done;
+    console.log(`Signed in${who.email ? ` as ${who.email}` : ''}${who.plan ? dim(` (${who.plan})`) : ''}.`);
+    return 0;
+  }
+  if (!account || account.kind !== 'claude' || !account.configDir) throw new Error(`no Claude or ChatGPT account "${id}" (add it in the app: Settings → Advanced)`);
   console.log(dim(loginCommand(account.configDir)));
   const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: account.configDir };
   for (const k of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDECODE']) delete env[k];

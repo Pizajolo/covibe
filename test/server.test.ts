@@ -291,7 +291,16 @@ describe('server', () => {
     expect(listed.connections.find((c: { id: string }) => c.id === 'work').account).toHaveProperty('loggedIn');
     expect((await api('PUT', '/api/connections', { balance: true })).balance).toBe(true);
     const usage = await api('GET', '/api/usage');
-    expect(usage).toMatchObject({ balance: true, accounts: [{ id: 'work', label: 'Work', usage: { source: 'none', windows: [] } }] });
+    expect(usage).toMatchObject({ balance: true, accounts: [{ id: 'work', label: 'Work', kind: 'claude', usage: { source: 'none', windows: [] } }] });
+
+    // A ChatGPT account starts with a list of models and signs in from the browser.
+    const gpt = await api('POST', '/api/connections', { kind: 'codex', label: 'ChatGPT', apiKey: 'ignored' });
+    expect(gpt).toMatchObject({ id: 'chatgpt', kind: 'codex', hasKey: false });
+    expect(gpt.models.length).toBeGreaterThan(0);
+    expect((await api('GET', '/api/connections')).connections.find((c: { id: string }) => c.id === 'chatgpt').account).toEqual({ loggedIn: false });
+    expect(await api('GET', '/api/connections/chatgpt/login')).toEqual({ pending: false, account: { loggedIn: false } });
+    expect((await api('GET', '/api/usage')).accounts[1]).toMatchObject({ id: 'chatgpt', kind: 'codex', usage: { source: 'none', windows: [] } });
+    await api('DELETE', '/api/connections/chatgpt');
 
     await api('DELETE', '/api/connections/deepseek');
     expect((await api('GET', '/api/connections')).connections.map((c: { id: string }) => c.id)).toEqual(['work']);

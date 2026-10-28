@@ -58,7 +58,7 @@ To try the UI in a browser instead, run `covibe app`.
 | **Team chat** | Describe the team you need and an architect agent sets it up: it reads your project to fit the stack and folders, asks only if something important is unclear, and saves the team through a tool that refuses invalid files and hands the problems back to it. Keep talking to change it ("add a security reviewer", "use haiku for the tester"). Available in New project, New team, and every team's **Chat** tab. |
 | **Skills** | One library of skills for all teams: **write your own**, **add from GitHub** (a repository or a folder; private ones work if git can clone them), or install from **Anthropic's skills**. Claude Code's **built-in skills** are listed too. Give skills to a member, to every member of a team, or mark one **Everyone** to give it to all members of all teams. |
 | **Projects** | Each project has **Runs**, **Brain** and **Git** tabs. **Git** shows your checkout: the branch and whether it is pushed, uncommitted changes (commit them all with a message), branches (switch, merge into the current one, push, pull request) and a graph of recent commits on every branch (click one for its diff, and revert it with a new commit). Pull requests are created with the GitHub CLI when it is signed in; otherwise the branch is pushed and the forge's page opens. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
-| **Settings → Advanced** | Sign in more **Claude accounts** (each in its own Claude Code folder), turn on **sharing work across them**, and add **model providers** with an API key (DeepSeek, Moonshot, Z.ai, OpenAI, OpenRouter, Groq, a local Ollama, or any Anthropic- or OpenAI-compatible API). Their models then appear in every team's model list. See [Accounts and providers](#accounts-and-providers). |
+| **Settings → Advanced** | Sign in more **Claude accounts** (each in its own Claude Code folder), turn on **sharing work across them**, sign in **ChatGPT accounts** (the sign-in Codex uses) to put members on OpenAI's models within your ChatGPT plan, and add **model providers** with an API key (DeepSeek, Moonshot, Z.ai, OpenAI, OpenRouter, Groq, a local Ollama, or any Anthropic- or OpenAI-compatible API). Their models then appear in every team's model list. See [Accounts and providers](#accounts-and-providers). |
 | **Brain** | The project's shared notes. Every member reads them before working and can **propose** additions; only the team's **curator** (or you) writes. Review proposals yourself (accept into a new or existing note, or reject) or ask the curator. Edit notes directly; every change is in the brain's own git history. |
 
 ![A live run: members, board and gates](docs/screenshots/run-board.png)
@@ -130,8 +130,8 @@ Your checkout is never touched. The result lands on the branch `covibe/<run-id>`
 | `covibe answer <run> [<question> <answer…>]` | Answer a member's question; without a question id, list the ones waiting for you (see [Questions](#questions)) |
 | `covibe clean [--older-than <days>] [--run <id>] [--dry-run]` | Remove worktrees of finished runs; branches and history stay |
 | `covibe app [--port <n>] [--no-open]` | Serve the app UI in your browser |
-| `covibe connections` | List the Claude accounts and providers set up in Settings → Advanced |
-| `covibe login <account>` | Sign one of those Claude accounts in (runs `claude auth login` in its own config folder) |
+| `covibe connections` | List the Claude accounts, ChatGPT accounts and providers set up in Settings → Advanced |
+| `covibe login <account>` | Sign one of those accounts in: a Claude account runs `claude auth login` in its own config folder; a ChatGPT account opens OpenAI's sign-in in your browser |
 
 Run ids accept a unique prefix. The event store lives in `<repo>/.covibe/covibe.db`; covibe writes its own
 `.gitignore` there. Worktrees live outside the repository, in `~/.covibe/worktrees/`.
@@ -302,7 +302,7 @@ replaces the default one entirely.
 | `type` | Uses | Notes |
 |---|---|---|
 | `subscription` | `claude login`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`; with `account: <id>`, one of the Claude accounts from Settings → Advanced | `ANTHROPIC_API_KEY` is **removed** from the agent environment, so it cannot silently take over and bill the API |
-| `connection` | A provider from Settings → Advanced: `connection: <id>`, `model: <its model id>` | The key comes from the Keychain, never the team file. See [Accounts and providers](#accounts-and-providers) |
+| `connection` | A ChatGPT account or a provider from Settings → Advanced: `connection: <id>`, `model: <its model id>` | The key or sign-in stays with covibe, never in the team file. See [Accounts and providers](#accounts-and-providers) |
 | `api_key` | `ANTHROPIC_API_KEY`, or the variable named in `api_key_env` | Pay as you go |
 | `gateway` | `base_url`, plus a token from `ANTHROPIC_AUTH_TOKEN` (or `auth_token_env`) | LiteLLM or a corporate proxy. `model` is the gateway's model name |
 | `bedrock` / `vertex` | Cloud credentials; `region`, `project` | Sets `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` |
@@ -314,11 +314,13 @@ Example: the tester on a cheaper model behind LiteLLM, everyone else on your sub
     backend: { type: gateway, base_url: "http://localhost:4000", model: cheap-coder }
 ```
 
-Example: the reviewer on DeepSeek, the builder on your work account:
+Example: the reviewer on DeepSeek, the tester on your ChatGPT plan, the builder on your work account:
 
 ```yaml
   reviewer:
     backend: { type: connection, connection: deepseek, model: deepseek-chat }
+  tester:
+    backend: { type: connection, connection: chatgpt, model: gpt-6.1-sol }
   builder:
     backend: { type: subscription, account: work }
 ```
@@ -350,6 +352,22 @@ so it picks up where it stopped. Only when every account is at its limit does th
 that name an account stay on it. Anthropic's terms limit how subscriptions may be used, and using several accounts
 to get around usage limits may not be allowed; check them before you rely on this.
 
+**ChatGPT accounts.** Add an account and covibe opens OpenAI's sign-in page in your browser, the same one `codex
+login` uses: covibe waits for it on 127.0.0.1:1455 (or 1457), with PKCE, and keeps the tokens in the account's
+folder (`~/.covibe/accounts/<id>/auth.json`, readable only by you, shaped like Codex's own `~/.codex/auth.json`). The
+CLI signs in with `covibe login <id>`. Members on the account keep all of Claude Code's tools, hooks, scope checks and
+sessions; covibe's translator sends their requests to the ChatGPT backend's Codex API (Responses) with the account's
+token, refreshing it before it runs out, and the agent only ever gets the translator's per-start token. After signing
+in, the account's own model list replaces the starting one (each model with the reasoning efforts it takes); pick them
+in any model field. A member's effort carries over, lowered to the closest one the model takes. The model's
+reasoning goes back with every turn (encrypted, inside the thinking blocks Claude Code keeps), since the backend
+stores nothing. Home, the sidebar and Settings show the account's 5-hour and weekly usage, read from the account
+without running a model and updated by every answer; a member that reaches a limit waits for the reset (or stops
+the run) like on a Claude plan. A ChatGPT plan is not billed per token, so prices are optional; set OpenAI's API
+prices to see what the work would cost on the API. Requests identify covibe as the client (`originator: covibe`).
+OpenAI's terms decide how a ChatGPT plan may be used outside OpenAI's own apps; check them before you rely on this.
+Removing the account revokes its sign-in.
+
 **Model providers.** Add a provider with its base URL, API key and models. Members on it keep all of Claude Code's
 tools, hooks, scope checks and sessions; only the model changes. Pick its models in any model field (they are
 listed under the provider's name) or under Connection.
@@ -358,10 +376,11 @@ listed under the provider's name) or under Connection.
 |---|---|
 | Anthropic-compatible (DeepSeek, Moonshot, Z.ai, Anthropic's own API) | Claude Code calls the provider directly (`ANTHROPIC_BASE_URL`), with the key as a bearer token (`x-api-key` for api.anthropic.com) |
 | OpenAI-compatible (OpenAI, OpenRouter, Groq, Ollama, vLLM…) | A translator inside covibe, on 127.0.0.1, turns Claude Code's Messages requests into Chat Completions (streaming and tool calls included) and back. The agent only gets a per-start token for the translator; the provider's key stays in covibe |
+| ChatGPT account (above) | The same translator, speaking Responses to the ChatGPT backend's Codex API with the account's sign-in |
 
 For provider members, covibe also points Claude Code's small background requests at the same model and turns off
 its telemetry. A model's *max output* setting caps the answer length for models that accept less than Claude Code
-asks for. Effort and thinking settings do not apply.
+asks for. Effort and thinking settings do not apply, except on ChatGPT accounts.
 
 Keys are stored in the macOS Keychain (through the `security` tool, so the app and the CLI share them), or in
 `~/.covibe/secrets.json`, readable only by you, where there is no Keychain. Spend estimates use the prices per
@@ -422,7 +441,8 @@ the terminal that runs it, since runs do not survive their process yet.
 
 Members on your Claude subscription share its 5-hour and weekly limits. covibe reads them from Claude Code the way
 `/usage` does (without running a model) and shows them on Home, in the sidebar and in Settings; when that is not
-available, it shows what members' turns last reported.
+available, it shows what members' turns last reported. A ChatGPT account's limits show next to them, read from the
+account; what follows applies to them too.
 
 With several Claude accounts and sharing turned on, a member that hits a limit first moves to another account (see
 [Accounts and providers](#accounts-and-providers)); the rest of this section applies when none has room.
@@ -533,6 +553,7 @@ src/events/store.ts        SQLite runs, events, sessions, inbox, questions, imag
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
 src/runner/backend.ts      per-agent environment for each backend
 src/connections/           Settings → Advanced: accounts and providers, Keychain keys, balancing, the OpenAI translator
+                           (Chat Completions; Responses for ChatGPT accounts in codex-proxy.ts, their sign-in in codex-auth.ts)
 src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.0.0.1, token)
 src/server/library.ts      projects and teams library, comment-preserving YAML edits
 src/server/projections.ts  events → run summaries, member status, board, chat threads, stats, notifications, plan usage

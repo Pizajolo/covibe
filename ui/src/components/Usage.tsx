@@ -94,7 +94,7 @@ export function UsageMeters() {
   if (!others.length) return <AccountMeters usage={usage} />;
   return (
     <>
-      {usage.balance && <span className="small muted">Members share work across these {others.length + 1} accounts.</span>}
+      {usage.balance && <span className="small muted">Members share work across your {others.filter((a) => a.kind === 'claude').length + 1} Claude accounts.</span>}
       <section className="usage-account">
         <h3 className="small">
           Your login{usage.subscription ? <span className="faint"> · {usage.subscription}</span> : null}
@@ -105,7 +105,7 @@ export function UsageMeters() {
         <section key={a.id} className="usage-account">
           <h3 className="small">
             {a.label}
-            {a.email || a.usage.subscription ? <span className="faint"> · {[a.email, a.usage.subscription].filter(Boolean).join(' · ')}</span> : null}
+            <span className="faint"> · {[a.kind === 'codex' ? 'ChatGPT' : '', a.email, a.usage.subscription].filter(Boolean).join(' · ') || 'Claude'}</span>
           </h3>
           <AccountMeters usage={a.usage} other />
         </section>
@@ -149,7 +149,12 @@ function AccountMeters({ usage, other }: { usage: Omit<UsageReport, 'accounts' |
         />
       )}
       <span className="tiny faint">
-        {usage.source === 'claude' ? `Read from Claude Code${usage.subscription && !other ? ` (${usage.subscription} plan)` : ''}` : 'As members last reported it'} at{' '}
+        {usage.source === 'claude'
+          ? `Read from Claude Code${usage.subscription && !other ? ` (${usage.subscription} plan)` : ''}`
+          : usage.source === 'codex'
+            ? 'Read from the ChatGPT account'
+            : 'As members last reported it'}{' '}
+        at{' '}
         {new Date(usage.checkedAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}.
       </span>
     </>
