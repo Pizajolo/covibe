@@ -21,6 +21,7 @@ agents:
     description: Reviews the change and runs the tests; never edits.
     prompt: prompts/reviewer.md
     model: sonnet
+    effort: medium                  # checking work needs less thinking than writing it
     tools: [Read, Grep, Glob]
     output_schema: schemas/review.json
 

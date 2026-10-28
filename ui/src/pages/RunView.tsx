@@ -651,12 +651,12 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'gate.passed': return { cls: 'good', text: `Gate passed: ${d.gate}` };
     case 'gate.failed': return { cls: 'error', text: `Gate failed: ${d.gate} → ${JSON.stringify(d.value)}` };
     case 'loop.goto': return { cls: 'warn', text: `Back to ${d.to} (round ${d.loop} of ${d.max_loops}) with feedback: ${JSON.stringify(d.feedback).slice(0, 400)}` };
-    case 'agent.started': return { cls: '', text: `Started${d.resumed ? ' (resumed its session)' : ''} · ${d.model ?? 'default model'} via ${d.backend}` };
+    case 'agent.started': return { cls: '', text: `Started${d.resumed ? ' (resumed its session)' : ''} · ${d.model ?? 'default model'} via ${d.via ?? d.backend}` };
     case 'agent.text': return { cls: '', text: String(d.text) };
     case 'agent.tool': return { cls: 'tool', text: toolText(String(d.tool), d.input, roots) };
     case 'agent.finished': return { cls: 'good', text: `Finished · ${d.turns} turns · ${money(d.cost_usd)} · ${tokens((d.tokens?.input ?? 0) + (d.tokens?.output ?? 0) + (d.tokens?.cacheRead ?? 0) + (d.tokens?.cacheWrite ?? 0))} tokens` };
     case 'agent.error': return { cls: 'error', text: `Failed: ${d.error}` };
-    case 'agent.limited': return { cls: 'warn', text: d.waiting ? `Hit the plan's usage limit; continues ${d.until ? `at ${clock(String(d.until))}` : 'once it resets'}` : "Stopped by the plan's usage limit" };
+    case 'agent.limited': return { cls: 'warn', text: d.switched_to ? `Hit a usage limit; continues on the ${d.switched_to} account` : d.waiting ? `Hit the plan's usage limit; continues ${d.until ? `at ${clock(String(d.until))}` : 'once it resets'}` : "Stopped by the plan's usage limit" };
     case 'run.restart_scheduled': return { cls: '', text: `Restart scheduled for ${new Date(String(d.at)).toLocaleString()}` };
     case 'run.restart_cancelled': return { cls: '', text: d.error ? `Restart failed: ${d.error}` : 'Restart cancelled' };
     case 'run.restarted': return { cls: 'good', text: `Restarted as run ${d.run_id}` };
@@ -670,6 +670,7 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'chat.message': return { cls: '', text: `You: ${d.text}` };
     case 'backend.warning': return { cls: 'warn', text: String(d.message) };
     case 'usage.limit': return null; // shown as plan usage on Home
+    case 'agent.usage': return null; // running totals, shown as the member's cost
     case 'brain.proposed': return { cls: '', text: `Proposed a brain note #${d.id}: ${d.title}` };
     case 'brain.decided': return { cls: d.status === 'accepted' ? 'good' : '', text: `Brain proposal #${d.id} ${d.status}${d.note_path ? ` into ${d.note_path}` : ''}${d.note ? `: ${d.note}` : ''}` };
     case 'brain.updated': return { cls: 'good', text: `Updated the project brain (${String(d.commit).slice(0, 7)})` };

@@ -196,6 +196,15 @@ export class EventStore {
     return full;
   }
 
+  /**
+   * Append an event that supersedes the member's earlier ones of the same type
+   * in this run (a running total): only the latest is kept.
+   */
+  appendLatest(runId: string, event: NewEvent): RunEvent {
+    this.db.prepare('DELETE FROM events WHERE run_id = ? AND agent IS ? AND type = ?').run(runId, event.agent ?? null, event.type);
+    return this.append(runId, event);
+  }
+
   /** In-process subscription (the CLI's live printer; later the SSE feed). */
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);

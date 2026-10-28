@@ -61,6 +61,8 @@ export function summarizeRun(
     return s;
   };
 
+  /** member → the running totals of its turn in progress */
+  const liveUsage = new Map<string, { costUsd: number; tokens: number }>();
   let loops = 0;
   let maxLoops: number | undefined;
   let costUsd = 0;
@@ -100,12 +102,22 @@ export function summarizeRun(
         break;
       case 'agent.limited': {
         const a = agent(e.agent!);
+        liveUsage.delete(e.agent!);
         a.status = 'limited';
         a.turns += d.turns ?? 0;
         a.costUsd += d.cost_usd ?? 0;
         a.tokens += tokensOf(d);
         costUsd += d.cost_usd ?? 0;
         tokens += tokensOf(d);
+        if (d.switched_to) {
+          // Sharing accounts: it moves on to another one right away.
+          a.status = 'working';
+          a.activity = `limit reached; continuing on the ${d.switched_to === 'main' ? 'main' : d.switched_to} account`;
+          a.updatedAt = e.ts;
+          const open = openCards.get(e.agent!);
+          if (open) open.costUsd += d.cost_usd ?? 0;
+          break;
+        }
         a.limitedUntil = d.until ?? undefined;
         a.activity = d.waiting ? "waiting for the plan's limit to reset" : "stopped by the plan's limit";
         a.updatedAt = e.ts;
@@ -149,6 +161,7 @@ export function summarizeRun(
         break;
       case 'agent.started': {
         const a = agent(e.agent!);
+        liveUsage.delete(e.agent!);
         a.status = 'working';
         a.limitedUntil = undefined;
         limited.delete(e.agent!);
@@ -185,9 +198,14 @@ export function summarizeRun(
         if (card) card.summary = String(d.text).slice(0, 200);
         break;
       }
+      case 'agent.usage':
+        // The running total of the turn in progress; counted at the end unless the turn finishes first.
+        liveUsage.set(e.agent!, { costUsd: d.cost_usd ?? 0, tokens: tokensOf(d) });
+        break;
       case 'agent.finished':
       case 'agent.error': {
         const a = agent(e.agent!);
+        liveUsage.delete(e.agent!);
         const failed = e.type === 'agent.error';
         a.status = failed ? 'error' : 'done';
         a.activity = failed ? `failed: ${d.error}` : undefined;
@@ -253,6 +271,17 @@ export function summarizeRun(
     }
     // A chat after cleanup restores the member's worktree.
     if (e.type === 'agent.started' && e.step === 'chat') worktreesRemoved = false;
+  }
+
+  // Turns still running count with their latest running totals.
+  for (const [name, u] of liveUsage) {
+    const a = agent(name);
+    a.costUsd += u.costUsd;
+    a.tokens += u.tokens;
+    costUsd += u.costUsd;
+    tokens += u.tokens;
+    const card = openCards.get(name);
+    if (card) card.costUsd += u.costUsd;
   }
 
   // Members waiting for the limit, or what stopped the run.
@@ -367,25 +396,77 @@ export function computeStats(
   }
   const stats: Stats = {
     costUsd: { today: 0, week: 0, month: 0, all: 0 },
-    tokens: { today: 0, week: 0, all: 0, input: 0, output: 0, cacheRead: 0 },
+    tokens: { today: 0, week: 0, all: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     runs: { total: 0, running: 0, succeeded: 0, escalated: 0, failed: 0, questions: 0 },
     activeAgents: 0,
     daily: [],
     byAgent: [],
     byModel: [],
     byTeam: [],
+    byVia: [],
     usage: [],
   };
   const byAgent = new Map<string, Stats['byAgent'][number]>();
   const byModel = new Map<string, Stats['byModel'][number]>();
   const byTeam = new Map<string, Stats['byTeam'][number]>();
+  const byVia = new Map<string, Stats['byVia'][number]>();
   const usage = new Map<string, UsageWindow>();
   let gates = 0;
   let gatesPassed = 0;
 
+  /** Count one member turn's spend and tokens: a finished one, or the running total of one in progress. */
+  const tally = (e: RunEvent, teamOf: Map<string, string>) => {
+    const d = e.data as D;
+    const t = Date.parse(e.ts);
+    const cost = Number(d.cost_usd ?? 0);
+    const tok = tokensOf(d);
+    stats.costUsd.all += cost;
+    stats.tokens.all += tok;
+    stats.tokens.input += d.tokens?.input ?? 0;
+    stats.tokens.output += d.tokens?.output ?? 0;
+    stats.tokens.cacheRead += d.tokens?.cacheRead ?? 0;
+    stats.tokens.cacheWrite += d.tokens?.cacheWrite ?? 0;
+    if (t >= startOfDay) {
+      stats.costUsd.today += cost;
+      stats.tokens.today += tok;
+    }
+    if (t >= startOfDay - 6 * DAY) {
+      stats.costUsd.week += cost;
+      stats.tokens.week += tok;
+    }
+    if (t >= startOfDay - 29 * DAY) stats.costUsd.month += cost;
+    const day = daily.get(dayKey(t));
+    if (day) {
+      day.costUsd += cost;
+      day.tokens += tok;
+    }
+    const team = teamOf.get(e.runId) ?? '?';
+    const ak = `${team}/${e.agent}`;
+    const a = byAgent.get(ak) ?? { agent: e.agent ?? '?', team, costUsd: 0, tokens: 0, turns: 0 };
+    a.costUsd += cost;
+    a.tokens += tok;
+    a.turns += d.turns ?? 0;
+    byAgent.set(ak, a);
+    const model = String(d.model ?? 'default');
+    const m = byModel.get(model) ?? { model, costUsd: 0, tokens: 0 };
+    m.costUsd += cost;
+    m.tokens += tok;
+    byModel.set(model, m);
+    const tm = byTeam.get(team);
+    if (tm) tm.costUsd += cost;
+    // Turns from before connections existed ran on your login (or what the team file said).
+    const via = typeof d.via === 'string' ? d.via : 'claude';
+    const v = byVia.get(via) ?? { via, label: via, costUsd: 0, tokens: 0, turns: 0 };
+    v.costUsd += cost;
+    v.tokens += tok;
+    v.turns += d.turns ?? 0;
+    byVia.set(via, v);
+  };
+
   for (const src of sources) {
     stats.activeAgents += src.activeAgents;
     const teamOf = new Map(src.runs.map((r) => [r.id, r.team]));
+    const live = new Map<string, RunEvent>();
     for (const r of src.runs) {
       if (r.kind === 'ask') stats.runs.questions += 1;
       else if (r.kind === 'workflow') {
@@ -407,55 +488,31 @@ export function computeStats(
         continue;
       }
       if (e.type === 'usage.limit') {
-        const key = String(d.window ?? 'plan');
+        const window = String(d.window ?? 'plan');
+        const account = typeof d.account === 'string' && d.account !== 'main' ? d.account : undefined;
+        const key = `${account ?? 'main'}/${window}`;
         const prev = usage.get(key);
-        if (!prev || prev.seenAt <= e.ts) usage.set(key, { window: key, status: d.status, utilization: d.utilization, resetsAt: d.resetsAt, seenAt: e.ts });
+        if (!prev || prev.seenAt <= e.ts) usage.set(key, { window, ...(account ? { account } : {}), status: d.status, utilization: d.utilization, resetsAt: d.resetsAt, seenAt: e.ts });
+        continue;
+      }
+      // A turn in progress counts with its latest running total until its end event replaces it.
+      const turnKey = `${e.runId}/${e.agent}`;
+      if (e.type === 'agent.usage') {
+        live.set(turnKey, e);
         continue;
       }
       if (e.type !== 'agent.finished' && e.type !== 'agent.error' && e.type !== 'agent.limited') continue;
-      const t = Date.parse(e.ts);
-      const cost = Number(d.cost_usd ?? 0);
-      const tok = tokensOf(d);
-      stats.costUsd.all += cost;
-      stats.tokens.all += tok;
-      stats.tokens.input += d.tokens?.input ?? 0;
-      stats.tokens.output += d.tokens?.output ?? 0;
-      stats.tokens.cacheRead += d.tokens?.cacheRead ?? 0;
-      if (t >= startOfDay) {
-        stats.costUsd.today += cost;
-        stats.tokens.today += tok;
-      }
-      if (t >= startOfDay - 6 * DAY) {
-        stats.costUsd.week += cost;
-        stats.tokens.week += tok;
-      }
-      if (t >= startOfDay - 29 * DAY) stats.costUsd.month += cost;
-      const day = daily.get(dayKey(t));
-      if (day) {
-        day.costUsd += cost;
-        day.tokens += tok;
-      }
-      const team = teamOf.get(e.runId) ?? '?';
-      const ak = `${team}/${e.agent}`;
-      const a = byAgent.get(ak) ?? { agent: e.agent ?? '?', team, costUsd: 0, tokens: 0, turns: 0 };
-      a.costUsd += cost;
-      a.tokens += tok;
-      a.turns += d.turns ?? 0;
-      byAgent.set(ak, a);
-      const model = String(d.model ?? 'default');
-      const m = byModel.get(model) ?? { model, costUsd: 0, tokens: 0 };
-      m.costUsd += cost;
-      m.tokens += tok;
-      byModel.set(model, m);
-      const tm = byTeam.get(team);
-      if (tm) tm.costUsd += cost;
+      live.delete(turnKey);
+      tally(e, teamOf);
     }
+    for (const e of live.values()) tally(e, teamOf);
   }
   stats.daily = [...daily.values()];
   stats.byAgent = [...byAgent.values()].sort((a, b) => b.costUsd - a.costUsd);
   stats.byModel = [...byModel.values()].sort((a, b) => b.costUsd - a.costUsd);
   stats.byTeam = [...byTeam.values()].sort((a, b) => b.costUsd - a.costUsd);
-  stats.usage = [...usage.values()].sort((a, b) => a.window.localeCompare(b.window));
+  stats.byVia = [...byVia.values()].sort((a, b) => b.costUsd - a.costUsd || b.tokens - a.tokens);
+  stats.usage = [...usage.values()].sort((a, b) => (a.account ?? '').localeCompare(b.account ?? '') || a.window.localeCompare(b.window));
   stats.gatePassRate = gates ? gatesPassed / gates : undefined;
   return stats;
 }
@@ -500,14 +557,15 @@ export function collectNotifications(
         add('question', { title: `${from} asks you`, body: String(d.question), questionId: id, open: !answered.has(id) && !!run && src.live(run) });
       } else if (e.type === 'usage.limit' && (d.status === 'allowed_warning' || d.status === 'rejected')) {
         // Every member reports the same window; one notification per window, state and reset.
-        const key = `${d.window}/${d.status}/${d.resetsAt}`;
+        const account = typeof d.account === 'string' && d.account !== 'main' ? d.account : undefined;
+        const key = `${account ?? 'main'}/${d.window}/${d.status}/${d.resetsAt}`;
         if (limits.has(key)) continue;
         limits.add(key);
-        const name = LIMIT_WINDOWS[String(d.window)] ?? 'plan';
+        const name = `${account ? `${account} account's ` : ''}${LIMIT_WINDOWS[String(d.window)] ?? 'plan'}`;
         const used = typeof d.utilization === 'number' ? Math.round(d.utilization > 1 ? d.utilization : d.utilization * 100) : undefined;
         add('limit', {
           title: d.status === 'rejected' ? `Reached your ${name} limit` : `Close to your ${name} limit`,
-          body: d.status === 'rejected' ? 'Members on your subscription wait until it resets.' : used !== undefined ? `${used}% used.` : undefined,
+          body: d.status === 'rejected' ? `Members on ${account ? 'this account' : 'your subscription'} wait until it resets, or move to another account when you share them.` : used !== undefined ? `${used}% used.` : undefined,
         });
       } else if (e.type === 'agent.limited' && d.waiting) {
         // One per run and reset: every member that hits the limit reports it.
@@ -548,7 +606,8 @@ export function resetIso(v: unknown): string | undefined {
  * otherwise the last values members' turns reported. A window whose reset
  * time has passed counts as fresh.
  */
-export function usageReport(plan: PlanUsage | undefined, fromRuns: UsageWindow[], now = new Date()): UsageReport {
+export function usageReport(plan: PlanUsage | undefined, allFromRuns: UsageWindow[], now = new Date(), account = 'main'): UsageReport {
+  const fromRuns = allFromRuns.filter((u) => (u.account ?? 'main') === account);
   const status = new Map(fromRuns.map((u) => [u.window, u]));
   const fresh = (resetsAt: string | undefined) => !resetsAt || Date.parse(resetsAt) > now.getTime();
   if (plan?.available) {

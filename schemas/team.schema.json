@@ -66,6 +66,12 @@
             "manual"
           ],
           "description": "after_run (default): the curator reviews new proposals when a run ends. manual: only when you ask."
+        },
+        "min_proposals": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "description": "With curate: after_run, the curator reviews once at least this many proposals are waiting (default 1). Higher batches reviews and saves tokens."
         }
       }
     }
@@ -93,8 +99,17 @@
             "api_key",
             "gateway",
             "bedrock",
-            "vertex"
+            "vertex",
+            "connection"
           ]
+        },
+        "account": {
+          "$ref": "#/$defs/identifier",
+          "description": "subscription: a Claude account from Settings → Advanced. Unset (or main) = your own claude login."
+        },
+        "connection": {
+          "$ref": "#/$defs/identifier",
+          "description": "connection: a provider from Settings → Advanced (Anthropic-compatible, or OpenAI-compatible through covibe's translator)."
         },
         "base_url": {
           "type": "string",
@@ -133,6 +148,23 @@
             "type": "object",
             "required": [
               "base_url"
+            ]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "connection"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "required": [
+              "connection",
+              "model"
             ]
           }
         }
@@ -211,6 +243,13 @@
             "pattern": "^[a-z0-9][a-z0-9:_-]{0,127}$"
           },
           "description": "Skills by name: from your covibe skill library, or ones Claude Code already has (built-in or in the project's .claude/skills)."
+        },
+        "cache_ttl": {
+          "enum": [
+            "5m",
+            "1h"
+          ],
+          "description": "How long Claude keeps this member's prompt cache. Unset: Claude Code decides (1 hour on a subscription, 5 minutes on an API key). 1h costs more per cache write but keeps a resumed member's conversation cached across long waits such as a review between fix rounds. Only applies to Anthropic's API."
         }
       }
     },
@@ -290,6 +329,13 @@
             "pattern": "^[a-z0-9][a-z0-9:_-]{0,127}$"
           },
           "description": "Skills by name: from your covibe skill library, or ones Claude Code already has (built-in or in the project's .claude/skills)."
+        },
+        "cache_ttl": {
+          "enum": [
+            "5m",
+            "1h"
+          ],
+          "description": "How long Claude keeps this member's prompt cache. Unset: Claude Code decides (1 hour on a subscription, 5 minutes on an API key). 1h costs more per cache write but keeps a resumed member's conversation cached across long waits such as a review between fix rounds. Only applies to Anthropic's API."
         }
       }
     },

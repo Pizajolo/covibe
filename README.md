@@ -58,6 +58,7 @@ To try the UI in a browser instead, run `covibe app`.
 | **Team chat** | Describe the team you need and an architect agent sets it up: it reads your project to fit the stack and folders, asks only if something important is unclear, and saves the team through a tool that refuses invalid files and hands the problems back to it. Keep talking to change it ("add a security reviewer", "use haiku for the tester"). Available in New project, New team, and every team's **Chat** tab. |
 | **Skills** | One library of skills for all teams: **write your own**, **add from GitHub** (a repository or a folder; private ones work if git can clone them), or install from **Anthropic's skills**. Claude Code's **built-in skills** are listed too. Give skills to a member, to every member of a team, or mark one **Everyone** to give it to all members of all teams. |
 | **Projects** | Each project has **Runs**, **Brain** and **Git** tabs. **Git** shows your checkout: the branch and whether it is pushed, uncommitted changes (commit them all with a message), branches (switch, merge into the current one, push, pull request) and a graph of recent commits on every branch (click one for its diff, and revert it with a new commit). Pull requests are created with the GitHub CLI when it is signed in; otherwise the branch is pushed and the forge's page opens. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
+| **Settings → Advanced** | Sign in more **Claude accounts** (each in its own Claude Code folder), turn on **sharing work across them**, and add **model providers** with an API key (DeepSeek, Moonshot, Z.ai, OpenAI, OpenRouter, Groq, a local Ollama, or any Anthropic- or OpenAI-compatible API). Their models then appear in every team's model list. See [Accounts and providers](#accounts-and-providers). |
 | **Brain** | The project's shared notes. Every member reads them before working and can **propose** additions; only the team's **curator** (or you) writes. Review proposals yourself (accept into a new or existing note, or reject) or ask the curator. Edit notes directly; every change is in the brain's own git history. |
 
 ![A live run: members, board and gates](docs/screenshots/run-board.png)
@@ -129,6 +130,8 @@ Your checkout is never touched. The result lands on the branch `covibe/<run-id>`
 | `covibe answer <run> [<question> <answer…>]` | Answer a member's question; without a question id, list the ones waiting for you (see [Questions](#questions)) |
 | `covibe clean [--older-than <days>] [--run <id>] [--dry-run]` | Remove worktrees of finished runs; branches and history stay |
 | `covibe app [--port <n>] [--no-open]` | Serve the app UI in your browser |
+| `covibe connections` | List the Claude accounts and providers set up in Settings → Advanced |
+| `covibe login <account>` | Sign one of those Claude accounts in (runs `claude auth login` in its own config folder) |
 
 Run ids accept a unique prefix. The event store lives in `<repo>/.covibe/covibe.db`; covibe writes its own
 `.gitignore` there. Worktrees live outside the repository, in `~/.covibe/worktrees/`.
@@ -141,7 +144,7 @@ name: feature-team
 lead: manager                       # answers members' questions first (default: a member named manager; null = nobody)
 
 defaults:
-  backend: { type: subscription }   # subscription | api_key | gateway | bedrock | vertex
+  backend: { type: subscription }   # subscription | connection | api_key | gateway | bedrock | vertex
   isolation: worktree               # one git worktree per writing agent (or: none)
   max_parallel: 2                   # cap on concurrently running agents
   limits: { max_turns: 40, timeout_min: 30 }   # optional: max_budget_usd
@@ -152,6 +155,7 @@ agents:
     model: opus                     # an alias (opus | sonnet | haiku) or a model id
     effort: high                    # low | medium | high | xhigh | max (also under defaults)
     thinking: adaptive              # adaptive | off | a token budget such as 8000 (older models)
+    cache_ttl: 1h                   # 5m | 1h: how long Claude keeps its prompt cache (also under defaults)
     tools: [Read, Grep, Glob]       # no edit tools: plans, cannot change code
   frontend:
     prompt: prompts/frontend.md
@@ -199,6 +203,7 @@ defaults:
 brain:
   curator: reviewer              # maintains the project brain; needs Write or Edit
   curate: after_run              # or: manual (only when you ask)
+  min_proposals: 5               # after_run: wait until this many proposals are waiting (default 1)
 agents:
   reviewer:
     skills: [code-review, pdf]   # library skills by name, or Claude Code built-ins
@@ -214,7 +219,8 @@ outside the repository, and its own git repository (so every change has an autho
 can read it (it is added as a readable folder) and its system prompt lists the notes. Members other than the
 curator get a `propose_brain_note` tool; their file tools are blocked from the brain, and the shell sandbox
 cannot write there. The curator may edit the brain directly. With `curate: after_run`, the curator reviews
-pending proposals at the end of every run, merging accepted ones into notes and recording a decision for each.
+pending proposals at the end of a run, merging accepted ones into notes and recording a decision for each.
+Each review is a session of its own, so `min_proposals` lets proposals collect over several runs first.
 
 ### How the pieces fit
 
@@ -293,7 +299,8 @@ replaces the default one entirely.
 
 | `type` | Uses | Notes |
 |---|---|---|
-| `subscription` | `claude login`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` | `ANTHROPIC_API_KEY` is **removed** from the agent environment, so it cannot silently take over and bill the API |
+| `subscription` | `claude login`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`; with `account: <id>`, one of the Claude accounts from Settings → Advanced | `ANTHROPIC_API_KEY` is **removed** from the agent environment, so it cannot silently take over and bill the API |
+| `connection` | A provider from Settings → Advanced: `connection: <id>`, `model: <its model id>` | The key comes from the Keychain, never the team file. See [Accounts and providers](#accounts-and-providers) |
 | `api_key` | `ANTHROPIC_API_KEY`, or the variable named in `api_key_env` | Pay as you go |
 | `gateway` | `base_url`, plus a token from `ANTHROPIC_AUTH_TOKEN` (or `auth_token_env`) | LiteLLM or a corporate proxy. `model` is the gateway's model name |
 | `bedrock` / `vertex` | Cloud credentials; `region`, `project` | Sets `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` |
@@ -305,6 +312,15 @@ Example: the tester on a cheaper model behind LiteLLM, everyone else on your sub
     backend: { type: gateway, base_url: "http://localhost:4000", model: cheap-coder }
 ```
 
+Example: the reviewer on DeepSeek, the builder on your work account:
+
+```yaml
+  reviewer:
+    backend: { type: connection, connection: deepseek, model: deepseek-chat }
+  builder:
+    backend: { type: subscription, account: work }
+```
+
 **Subscription policy.** Using your own Claude subscription through the SDK, on your own machine, for your own
 work is the intended starting point. Do not use it to serve other people: products and shared or hosted setups
 need API keys. The terms have changed several times, so check the current Help Center and legal pages. Parallel
@@ -313,6 +329,46 @@ agents use up plan limits quickly; keep `max_parallel` at 2–3, and route revie
 covibe also removes the variables a parent Claude Code session sets for its children (`CLAUDECODE`,
 `CLAUDE_CODE_SESSION_ID`, remote-session variables). Without that, starting covibe from inside Claude Code would
 attach every agent to the parent's session.
+
+## Accounts and providers
+
+Settings → Advanced holds what members can connect to besides your own `claude login`. The CLI uses the same
+setup (`~/.covibe/connections.json`), so `covibe run` works with it too.
+
+**More Claude accounts.** Add an account and covibe opens Terminal with `claude auth login` for it, in a folder of
+its own (`~/.covibe/accounts/<id>`, used as `CLAUDE_CONFIG_DIR`). The login never passes through covibe. Choose the
+account per team or per member (Connection → Claude subscription → Account). Home, the sidebar and Settings show the
+5-hour and weekly usage of every account. An account's own Claude Code folder does not load your user-level
+`~/.claude` settings.
+
+**Sharing work across accounts** (off by default). When on, members on the subscription that don't name an account
+start on whichever account has the most room in its 5-hour and weekly windows (counting members already working on
+it). When one hits its limit, the member moves to the next account straight away. Its session file is copied over,
+so it picks up where it stopped. Only when every account is at its limit does the usual wait or stop apply. Members
+that name an account stay on it. Anthropic's terms limit how subscriptions may be used, and using several accounts
+to get around usage limits may not be allowed; check them before you rely on this.
+
+**Model providers.** Add a provider with its base URL, API key and models. Members on it keep all of Claude Code's
+tools, hooks, scope checks and sessions; only the model changes. Pick its models in any model field (they are
+listed under the provider's name) or under Connection.
+
+| API style | How covibe calls it |
+|---|---|
+| Anthropic-compatible (DeepSeek, Moonshot, Z.ai, Anthropic's own API) | Claude Code calls the provider directly (`ANTHROPIC_BASE_URL`), with the key as a bearer token (`x-api-key` for api.anthropic.com) |
+| OpenAI-compatible (OpenAI, OpenRouter, Groq, Ollama, vLLM…) | A translator inside covibe, on 127.0.0.1, turns Claude Code's Messages requests into Chat Completions (streaming and tool calls included) and back. The agent only gets a per-start token for the translator; the provider's key stays in covibe |
+
+For provider members, covibe also points Claude Code's small background requests at the same model and turns off
+its telemetry. A model's *max output* setting caps the answer length for models that accept less than Claude Code
+asks for. Effort and thinking settings do not apply.
+
+Keys are stored in the macOS Keychain (through the `security` tool, so the app and the CLI share them), or in
+`~/.covibe/secrets.json`, readable only by you, where there is no Keychain. Spend estimates use the prices per
+million tokens you enter for each model; without a price, a model's spend shows as $0. Home shows spend per account
+and provider.
+
+Other models are less predictable than Claude with Claude Code's prompts and tools, especially on long tool-heavy
+turns and structured reports. Some can't read images, so screenshot-based testing may not work for them. Try a
+provider on a low-risk member first, such as a reviewer or tester.
 
 ## Chat
 
@@ -366,6 +422,9 @@ Members on your Claude subscription share its 5-hour and weekly limits. covibe r
 `/usage` does (without running a model) and shows them on Home, in the sidebar and in Settings; when that is not
 available, it shows what members' turns last reported.
 
+With several Claude accounts and sharing turned on, a member that hits a limit first moves to another account (see
+[Accounts and providers](#accounts-and-providers)); the rest of this section applies when none has room.
+
 When a member hits a limit, by default the run waits: the member and the run show a countdown to the reset, and
 then the member picks its session up where it stopped. Turn this off in Settings → Usage limits to stop the run
 instead; its page then offers **Restart now** or **Restart when it resets** (a scheduled restart survives quitting
@@ -388,13 +447,33 @@ week: questions, plan usage close to or at its limit, runs that were stopped or 
 failed, and runs that finished with every gate passed. Choose in Settings → Notifications which of these show under
 the bell and which also go out as system notifications (sent while the app is in the background).
 
+## Live spend
+
+Spend and tokens update while members work, not only when a turn ends. Every few seconds a working member reports
+its running total (`agent.usage`: tokens from the responses streamed so far, priced at Claude's list prices or at the
+prices set for a provider's model). Only the latest total per member and run is kept. When the turn ends, Claude
+Code's exact figure replaces the estimate. Home, the sidebar, runs and the Office all show the running figures.
+
+## Saving tokens
+
+- **Effort per role.** Lower effort means less thinking, fewer tool calls and shorter answers. The templates run
+  reviewers and testers at `medium`; planners and builders keep the model's default.
+- **Prompt cache.** Claude reads a cached conversation at a tenth of the input price. Claude Code keeps the cache
+  for an hour on a subscription and for 5 minutes on an API key, so on an API key a member that picks up its
+  session after a long wait (a fix round after a review, a chat later) pays to cache its whole conversation again.
+  `cache_ttl: 1h` costs more per cache write (2× input instead of 1.25×) and avoids that. It applies only to
+  Anthropic's API; members on other providers are left alone.
+- **Batched brain reviews.** `brain.min_proposals` (Team settings → Project brain → "once 5 or more are waiting").
+- **Cache hit rate.** Home shows how much of what members sent was read from the cache. A low rate on a busy
+  setup usually means caches expire between turns.
+
 ## Events
 
 All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event types:
 
 `run.started` `run.finished` `step.started` `step.finished` `step.skipped` `gate.passed` `gate.failed` `loop.goto`
 `agent.started` `agent.text` `agent.tool` `agent.view` `agent.limited` `agent.finished` `agent.error` `scope.denied` `scope.violation`
-`git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit`
+`git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit` `agent.usage`
 `workspace.cleaned` `brain.proposed` `brain.decided` `brain.updated` `team.saved` `question.asked`
 `question.escalated` `question.answered` `run.paused` `run.resumed` `run.restart_scheduled` `run.restart_cancelled`
 `run.restarted`
@@ -417,6 +496,7 @@ src/engine/browser.ts      spotting members that drive a browser, and the page t
 src/events/store.ts        SQLite runs, events, sessions, inbox, questions, images members saw (node:sqlite, WAL)
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
 src/runner/backend.ts      per-agent environment for each backend
+src/connections/           Settings → Advanced: accounts and providers, Keychain keys, balancing, the OpenAI translator
 src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.0.0.1, token)
 src/server/library.ts      projects and teams library, comment-preserving YAML edits
 src/server/projections.ts  events → run summaries, member status, board, chat threads, stats, notifications, plan usage

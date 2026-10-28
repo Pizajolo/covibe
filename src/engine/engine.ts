@@ -3,7 +3,9 @@ import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
 import type { AgentConfig, Branch, JsonSchema, Step, TeamConfig } from '../config/types.js';
 import type { EventStore } from '../events/store.js';
 import type { NewEvent, RunStatus } from '../events/types.js';
-import { backendEnv, BackendError, type Env } from '../runner/backend.js';
+import type { Connections } from '../connections/store.js';
+import { MAIN_ACCOUNT } from '../connections/types.js';
+import { BackendError, plainBackends, type BackendEnv, type BackendResolver, type Env } from '../runner/backend.js';
 import { brainRoot } from '../home.js';
 import { resolveSkills } from '../skills.js';
 import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent, CustomTool } from '../runner/types.js';
@@ -28,6 +30,8 @@ export interface RunOptions {
   base?: string;
   /** When the plan's usage limit stops a member: wait for the reset and continue (default), or stop the run. */
   onLimit?: 'wait' | 'stop';
+  /** Claude accounts and providers from Settings → Advanced (and balancing across accounts). */
+  connections?: Connections;
 }
 
 export interface RunOutcome {
@@ -119,11 +123,12 @@ export async function startRun(opts: RunOptions): Promise<{ runId: string; done:
   return { runId, done: new Engine(opts, runId, workspace).run() };
 }
 
-/** The agent.finished / agent.error payload, shared by workflow steps, chat and ask. */
-export function finishedData(agent: AgentConfig, result: AgentResult): Record<string, unknown> {
+/** The agent.finished / agent.error payload, shared by workflow steps, chat and ask. `via`: the account or connection it ran on. */
+export function finishedData(agent: AgentConfig, result: AgentResult, via?: string): Record<string, unknown> {
   return {
     ok: result.ok,
     model: agent.model ?? null,
+    ...(via ? { via } : {}),
     turns: result.turns,
     cost_usd: result.costUsd,
     duration_ms: result.durationMs,
@@ -181,6 +186,14 @@ class Engine {
     let reason: string | undefined;
     let limit: { resets_at: string | null } | undefined;
     try {
+      // An account or provider that is not set up fails the run now, not halfway.
+      for (const a of Object.values(this.team.agents)) {
+        try {
+          checkBackend(a.backend, this.opts.connections);
+        } catch (err) {
+          throw new StepError(`${a.name}: ${(err as Error).message}`);
+        }
+      }
       let i = 0;
       while (i < steps.length) {
         this.opts.signal?.throwIfAborted();
@@ -227,9 +240,10 @@ class Engine {
 
     // Members' proposals from this run (and earlier ones) go to the curator.
     const { curator, curate: when } = this.team.brain;
-    if (curator && when === 'after_run' && !this.opts.signal?.aborted && this.store.proposals('pending').length) {
+    // Waiting for a batch of proposals saves a curation session per run.
+    if (curator && when === 'after_run' && !this.opts.signal?.aborted && this.store.proposals('pending').length >= this.team.brain.minProposals) {
       try {
-        await curate({ team: this.team, store: this.store, runner: this.opts.runner, repo: this.workspace.repo, runId: this.runId, buildInvocation, env: this.opts.env, signal: this.opts.signal });
+        await curate({ team: this.team, store: this.store, runner: this.opts.runner, repo: this.workspace.repo, runId: this.runId, buildInvocation, env: this.opts.env, connections: this.opts.connections, signal: this.opts.signal });
       } catch (err) {
         this.emit({ type: 'agent.error', step: 'curate', agent: curator, data: { ok: false, error: (err as Error).message } });
       }
@@ -268,26 +282,20 @@ class Engine {
   private async invoke(agentName: string, step: Step, task: unknown, outputSchema: JsonSchema | undefined): Promise<unknown> {
     const agent = this.team.agents[agentName]!;
     const base = { step: step.id, agent: agent.name };
-
-    let env: Env;
-    try {
-      const built = backendEnv(agent.backend, this.opts.env ?? process.env);
-      env = built.env;
-      for (const w of built.warnings) {
-        if (!this.warned.has(w)) {
-          this.warned.add(w);
-          this.emit({ ...base, type: 'backend.warning', data: { message: w } });
-        }
-      }
-    } catch (err) {
-      if (err instanceof BackendError) throw new StepError(`${agent.name}: ${err.message}`);
-      throw err;
-    }
+    const connections = this.opts.connections;
+    const balanced = isBalanced(agent, connections);
 
     // Nothing new starts while a question waits for the human.
     await this.pause.wait(this.opts.signal);
     const release = await this.slots.acquire();
+    let unclaim = () => {};
     try {
+      let built = await this.environment(agent, base, balanced ? await connections!.pick() : undefined);
+      const claim = () => {
+        const account = accountOf(built);
+        unclaim = balanced && account ? connections!.claim(account) : () => {};
+      };
+      claim();
       const cwd = await this.workspace.prepare(agent.name, agent.writes);
       const messages = this.store.drainInbox(this.runId, agent.name);
       for (const m of messages) this.emit({ ...base, type: 'message.delivered', data: { id: m.id, from: m.from } });
@@ -309,39 +317,59 @@ class Engine {
       this.emit({
         ...base,
         type: 'agent.started',
-        data: { model: agent.model ?? null, backend: agent.backend.type, cwd, resumed: !!resume, loop: this.context.loop },
+        data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd, resumed: !!resume, loop: this.context.loop },
       });
-      let result = await this.runAgent(agent, { cwd, prompt, resume, env, outputSchema, step: step.id });
-      // The plan's usage limit stopped the turn: wait for the reset and pick the session up again (or stop the run).
+      const turn = (p: { prompt: string; resume?: string }) =>
+        this.runAgent(agent, { cwd, ...p, env: built.env, pricing: built.pricing, account: accountOf(built), via: built.via, outputSchema, step: step.id });
+      /** Move this member to another account. */
+      const move = async (account: string) => {
+        unclaim();
+        built = await this.environment(agent, base, account);
+        claim();
+      };
+      let result = await turn({ prompt, resume });
+      // The plan's usage limit stopped the turn: move on to another account
+      // (when sharing them), or wait for the reset and pick the session up
+      // again (or stop the run).
       const waitedSince = Date.now();
       while (result.limit) {
         this.costUsd += result.costUsd;
         if (result.sessionId) this.store.saveSession(this.runId, agent.name, result.sessionId, cwd);
         const resetsAt = resetIso(result.limit.resetsAt);
+        const limited = { ...finishedData(agent, result, built.via), resets_at: resetsAt ?? null, window: result.limit.window ?? null };
+        // A session to pick up continues; without one the turn starts over.
+        const again = { prompt: result.sessionId ? LIMIT_RESUME : prompt, resume: result.sessionId ?? resume };
+        const account = accountOf(built);
+        if (balanced && account) {
+          connections!.exhausted(account, result.limit.resetsAt);
+          const next = await connections!.pick();
+          if (next) {
+            this.emit({ ...base, type: 'agent.limited', data: { ...limited, waiting: false, until: null, switched_to: next } });
+            await move(next);
+            this.emit({ ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd, resumed: !!result.sessionId, after_limit: true, switched: true, loop: this.context.loop } });
+            result = await turn({ ...again, prompt: result.sessionId ? LIMIT_SWITCH : prompt });
+            continue;
+          }
+        }
         const stop = this.opts.onLimit === 'stop' || Date.now() - waitedSince > MAX_LIMIT_WAIT_MS;
-        const until = resetsAt ? Math.max(Date.parse(resetsAt) + LIMIT_GRACE_MS, Date.now() + 2_000) : Date.now() + LIMIT_RETRY_MS;
-        this.emit({
-          ...base,
-          type: 'agent.limited',
-          data: { ...finishedData(agent, result), resets_at: resetsAt ?? null, window: result.limit.window ?? null, waiting: !stop, until: stop ? null : new Date(until).toISOString() },
-        });
+        let until = resetsAt ? Math.max(Date.parse(resetsAt) + LIMIT_GRACE_MS, Date.now() + 2_000) : Date.now() + LIMIT_RETRY_MS;
+        // Sharing accounts: wait only until the first one comes free.
+        const free = balanced ? connections!.nextFree() : undefined;
+        if (free) until = Math.min(until, Math.max(free + LIMIT_GRACE_MS, Date.now() + 2_000));
+        this.emit({ ...base, type: 'agent.limited', data: { ...limited, waiting: !stop, until: stop ? null : new Date(until).toISOString() } });
         if (stop) throw new LimitError(`${agent.name} hit the plan's usage limit on step ${step.id}${resetsAt ? `; it resets at ${resetsAt}` : ''}`, resetsAt);
         await sleep(until - Date.now(), this.opts.signal);
-        this.emit({ ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, cwd, resumed: !!result.sessionId, after_limit: true, loop: this.context.loop } });
-        result = await this.runAgent(agent, {
-          cwd,
-          // A session to pick up continues; without one the turn starts over.
-          prompt: result.sessionId ? LIMIT_RESUME : prompt,
-          resume: result.sessionId ?? resume,
-          env,
-          outputSchema,
-          step: step.id,
-        });
+        if (balanced) {
+          const next = await connections!.pick();
+          if (next && next !== account) await move(next);
+        }
+        this.emit({ ...base, type: 'agent.started', data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd, resumed: !!result.sessionId, after_limit: true, loop: this.context.loop } });
+        result = await turn(again);
       }
       this.costUsd += result.costUsd;
       if (result.sessionId) this.store.saveSession(this.runId, agent.name, result.sessionId, cwd);
 
-      const finished = finishedData(agent, result);
+      const finished = finishedData(agent, result, built.via);
       if (!result.ok) {
         this.emit({ ...base, type: 'agent.error', data: finished });
         throw new StepError(`${agent.name} failed on step ${step.id}: ${result.error ?? 'unknown error'}`);
@@ -361,12 +389,31 @@ class Engine {
       return this.output(agent, step.id, result, outputSchema);
     } finally {
       release();
+      unclaim();
+    }
+  }
+
+  /** Resolve a member's environment (on `account` when balancing chose one), reporting backend warnings once. */
+  private async environment(agent: AgentConfig, base: { step: string; agent: string }, account?: string | null): Promise<BackendEnv> {
+    const backend = account ? { ...agent.backend, account } : agent.backend;
+    try {
+      const built = await resolverOf(this.opts.connections).resolve(backend, this.opts.env ?? process.env);
+      for (const w of built.warnings) {
+        if (!this.warned.has(w)) {
+          this.warned.add(w);
+          this.emit({ ...base, type: 'backend.warning', data: { message: w } });
+        }
+      }
+      return built;
+    } catch (err) {
+      if (err instanceof BackendError) throw new StepError(`${agent.name}: ${err.message}`);
+      throw err;
     }
   }
 
   private async runAgent(
     agent: AgentConfig,
-    p: { cwd: string; prompt: string; resume?: string; env: Env; outputSchema?: JsonSchema; step: string },
+    p: { cwd: string; prompt: string; resume?: string; env: Env; pricing?: BackendEnv['pricing']; account?: string; via?: string; outputSchema?: JsonSchema; step: string },
   ): Promise<AgentResult> {
     // The time limit does not count while the member waits for an answer or the run is paused.
     const deadline = new Deadline(agent.limits.timeout_min * 60_000);
@@ -451,10 +498,11 @@ class Engine {
     const base = { step: QUESTION_STEP, agent: leadName };
     const passOn = (why: string): LeadVerdict => ({ forHuman: question, note: `${leadName} could not answer: ${why}`, options });
     try {
-      const { env } = backendEnv(lead.backend, this.opts.env ?? process.env);
+      const account = isBalanced(lead, this.opts.connections) ? await this.opts.connections!.pick() : undefined;
+      const built = await resolverOf(this.opts.connections).resolve(account ? { ...lead.backend, account } : lead.backend, this.opts.env ?? process.env);
       const session = this.store.getSession(this.runId, leadName);
       const cwd = session?.cwd ?? (await this.workspace.prepare(leadName, false));
-      this.emit({ ...base, type: 'agent.started', data: { model: lead.model ?? null, backend: lead.backend.type, cwd, resumed: !!session, question: true } });
+      this.emit({ ...base, type: 'agent.started', data: { model: lead.model ?? null, backend: lead.backend.type, via: built.via, cwd, resumed: !!session, question: true } });
       const timeout = AbortSignal.timeout(lead.limits.timeout_min * 60_000);
       const inv = buildInvocation(this.team, this.store, this.runId, lead, {
         cwd,
@@ -462,7 +510,10 @@ class Engine {
         prompt: leadPrompt({ goal: this.opts.goal, lead: leadName, from, step, question, context, options }),
         resume: session?.sessionId,
         fork: true,
-        env,
+        env: built.env,
+        pricing: built.pricing,
+        account: accountOf(built),
+        via: built.via,
         outputSchema: LEAD_SCHEMA,
         step: QUESTION_STEP,
         signal: this.opts.signal ? AbortSignal.any([this.opts.signal, timeout]) : timeout,
@@ -470,7 +521,7 @@ class Engine {
       });
       const result = await this.opts.runner.run(inv).finally(() => inv.onControl?.(null));
       this.costUsd += result.costUsd;
-      this.emit({ ...base, type: result.ok ? 'agent.finished' : 'agent.error', data: finishedData(lead, result) });
+      this.emit({ ...base, type: result.ok ? 'agent.finished' : 'agent.error', data: finishedData(lead, result, built.via) });
       if (!result.ok) return passOn(result.error ?? 'unknown error');
       return leadVerdict(result.structured ?? extractJson(result.text), question);
     } catch (err) {
@@ -495,6 +546,46 @@ class Engine {
   }
 }
 
+/** Members on the subscription without an account of their own share the Claude accounts (when balancing is on). */
+export function isBalanced(agent: AgentConfig, connections: Connections | undefined): boolean {
+  return !!connections && agent.backend.type === 'subscription' && !agent.backend.account;
+}
+
+/** Throws when a backend names an account or connection that is not set up. */
+export function checkBackend(backend: AgentConfig['backend'], connections: Connections | undefined): void {
+  if (connections) return connections.check(backend);
+  if (backend.type === 'connection') throw new BackendError(`connection "${backend.connection}" is not set up (Settings → Advanced)`);
+  if (backend.type === 'subscription' && backend.account && backend.account !== MAIN_ACCOUNT) throw new BackendError(`Claude account "${backend.account}" is not set up (Settings → Advanced)`);
+}
+
+/**
+ * The member's prompt-cache lifetime, for Claude Code. Only Anthropic's API
+ * knows it: a member pointed elsewhere (another provider, the OpenAI
+ * translator, a gateway) is left alone.
+ */
+export function withCacheTtl(env: Env, ttl: AgentConfig['cacheTtl']): Env {
+  if (!ttl) return env;
+  const base = env.ANTHROPIC_BASE_URL;
+  if (base) {
+    try {
+      if (!/(^|\.)anthropic\.com$/.test(new URL(base).hostname)) return env;
+    } catch {
+      return env;
+    }
+  }
+  return { ...env, CLAUDE_CODE_PROMPT_CACHE_TTL: ttl };
+}
+
+/** The backends a run, chat or curation resolves agent environments with. */
+export function resolverOf(connections: Connections | undefined): BackendResolver {
+  return connections ?? plainBackends;
+}
+
+/** Which Claude account a resolved environment uses ("main" for your own login), if it is on the subscription. */
+export function accountOf(built: BackendEnv): string | undefined {
+  return built.via === 'claude' ? MAIN_ACCOUNT : built.via.startsWith('claude:') ? built.via.slice(7) : undefined;
+}
+
 /**
  * Wire one agent turn to the event stream, the scope checker and the team
  * inbox. Shared by workflow steps and direct chat.
@@ -510,6 +601,12 @@ export function buildInvocation(
     prompt: string;
     resume?: string;
     env: Env;
+    /** Prices for a provider's model (see BackendEnv.pricing). */
+    pricing?: BackendEnv['pricing'];
+    /** The Claude account the turn runs on, for its usage reports. */
+    account?: string;
+    /** The account or connection it runs on (BackendEnv.via), for live spend. */
+    via?: string;
     outputSchema?: JsonSchema;
     step: string;
     signal: AbortSignal;
@@ -545,7 +642,8 @@ export function buildInvocation(
     thinking: agent.thinking,
     tools: agent.tools,
     outputSchema: p.outputSchema,
-    env: p.env,
+    env: withCacheTtl(p.env, agent.cacheTtl),
+    pricing: p.pricing,
     maxTurns: agent.limits.max_turns,
     maxBudgetUsd: agent.limits.max_budget_usd,
     settingSources: team.settingSources,
@@ -580,9 +678,12 @@ export function buildInvocation(
       const timer = setInterval(deliver, 500);
       stopLive = () => clearInterval(timer);
     },
-    onEvent: eventSink(store, runId, base),
+    onEvent: eventSink(store, runId, base, { account: p.account, via: p.via, model: agent.model }),
   };
 }
+
+const LIMIT_SWITCH =
+  'Your last turn stopped because a usage limit was reached. You now continue on another account: pick up where you left off and finish the task as asked.';
 
 const LIMIT_RESUME =
   "Your last turn stopped because the plan's usage limit was reached. The limit has reset: continue where you left off and finish the task as asked.";
@@ -590,8 +691,13 @@ const LIMIT_RESUME =
 /** Larger images are not kept (screenshots are well below this). */
 const MAX_VIEW_BYTES = 10 << 20;
 
-/** Turn an agent's stream into stored events (text, tool calls, denials, plan usage, images it saw). */
-export function eventSink(store: EventStore, runId: string, base: { step?: string; agent?: string }) {
+/**
+ * Turn an agent's stream into stored events (text, tool calls, denials, plan
+ * usage, running spend, images it saw). `account`: whose plan usage reports
+ * belong to; `via` and `model` label the running spend.
+ */
+export function eventSink(store: EventStore, runId: string, base: { step?: string; agent?: string }, meta: { account?: string; via?: string; model?: string } = {}) {
+  const { account } = meta;
   const emit = (e: NewEvent) => store.append(runId, e);
   return (e: AgentStreamEvent) => {
     if (e.kind === 'text') emit({ ...base, type: 'agent.text', data: { text: clip(e.text, 4000) } });
@@ -607,7 +713,9 @@ export function eventSink(store: EventStore, runId: string, base: { step?: strin
       emit({ ...base, type: 'agent.view', data: { id, tool: e.tool, file, media_type: e.mediaType, bytes: data.length } });
     }
     else if (e.kind === 'denied') emit({ ...base, type: 'scope.denied', data: { tool: e.tool, input: summarize(e.input), reason: e.reason } });
-    else if (e.kind === 'rate_limit') emit({ ...base, type: 'usage.limit', data: { ...e.info } });
+    else if (e.kind === 'rate_limit') emit({ ...base, type: 'usage.limit', data: { ...e.info, ...(account ? { account } : {}) } });
+    // Running totals of the turn in progress; its agent.finished (or error, or limited) replaces them.
+    else if (e.kind === 'usage') store.appendLatest(runId, { ...base, type: 'agent.usage', data: { tokens: e.tokens, cost_usd: e.costUsd ?? null, model: meta.model ?? null, ...(meta.via ? { via: meta.via } : {}) } });
   };
 }
 

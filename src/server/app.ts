@@ -28,7 +28,9 @@ import {
   updateSkill,
   writeSkillFile,
 } from '../skills.js';
-import { backendEnv } from '../runner/backend.js';
+import { ConnectionError, Connections, listModels, startLogin, type NewConnection } from '../connections/store.js';
+import { MAIN_ACCOUNT, type ProviderModel } from '../connections/types.js';
+import { backendEnv, BackendError } from '../runner/backend.js';
 import type { EnvironmentInfo, PlanUsage } from '../runner/types.js';
 import { ARCHITECT, design } from './designer.js';
 import { GitError } from '../engine/workspace.js';
@@ -36,7 +38,7 @@ import { EventStore } from '../events/store.js';
 import type { DeliveryMode, RunEvent, RunRecord } from '../events/types.js';
 import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
-import type { MemberInfo, RunDetail, RunSummary, TeamDetail } from './api-types.js';
+import type { AccountInfo, ConnectionsInfo, MemberInfo, RunDetail, RunSummary, Stats, TeamDetail, UsageReport } from './api-types.js';
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
 import { gitCheckout, gitCommit, gitMerge, gitOverview, gitPull, gitPullRequest, gitPush, gitRevert, gitShow } from './gitops.js';
 import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, summarizeRun, usageReport } from './projections.js';
@@ -57,6 +59,8 @@ export interface ServerOptions {
   port?: number;
   library?: Library;
   runner?: AgentRunner;
+  /** Claude accounts and providers (Settings → Advanced); defaults to the library's home. */
+  connections?: Connections;
   /** Fixed token (tests); otherwise random per start. */
   token?: string;
   uiDir?: string;
@@ -78,6 +82,8 @@ export interface CovibeServer {
 export async function startServer(opts: ServerOptions = {}): Promise<CovibeServer> {
   const library = opts.library ?? new Library();
   const runner = opts.runner ?? new ClaudeSdkRunner();
+  const connections = opts.connections ?? new Connections(library.home);
+  if (runner.usage && !connections.usageReader) connections.usageReader = (env) => runner.usage!(env);
   const token = opts.token ?? randomBytes(24).toString('hex');
   const uiDir = opts.uiDir ?? UI_DIR;
   const stores = new Map<string, EventStore>();
@@ -101,14 +107,64 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     }
     return environment.info;
   };
-  // Plan usage from Claude Code, read at most once a minute (each read starts a Claude Code process).
-  let planCache: { at: number; value: Promise<PlanUsage | undefined> } | undefined;
-  const planUsage = (fresh = false): Promise<PlanUsage | undefined> => {
-    if (!runner.usage) return Promise.resolve(undefined);
-    if (fresh || !planCache || Date.now() - planCache.at > 60_000) {
-      planCache = { at: Date.now(), value: runner.usage(backendEnv({ type: 'subscription' }).env).catch(() => undefined) };
+  // Plan usage from Claude Code, read at most once a minute per account (each read starts a Claude Code process).
+  const planUsage = (fresh = false): Promise<PlanUsage | undefined> => connections.usage(MAIN_ACCOUNT, fresh);
+  /** Your login's limits, plus every other Claude account's. */
+  const usageAll = async (fresh = false): Promise<UsageReport> => {
+    const fromRuns = stats().usage;
+    const main = usageReport(await planUsage(fresh), fromRuns);
+    const accounts = await Promise.all(
+      connections.accounts().map(async (a) => {
+        const [plan, info] = await Promise.all([connections.usage(a.id, fresh), accountInfo(a.id)]);
+        return { id: a.id, label: a.label, ...(info.email ? { email: info.email } : {}), usage: usageReport(plan, fromRuns, new Date(), a.id) };
+      }),
+    );
+    return accounts.length ? { ...main, accounts, balance: connections.balance } : main;
+  };
+  // Who each extra account is signed in as: `claude auth status`, then the account details Claude Code reports.
+  const infoCache = new Map<string, { at: number; value: Promise<AccountInfo> }>();
+  const accountInfo = (id: string, fresh = false): Promise<AccountInfo> => {
+    const cached = infoCache.get(id);
+    if (!fresh && cached && Date.now() - cached.at < 600_000) return cached.value;
+    const env = connections.accountEnv(id);
+    const value = (async (): Promise<AccountInfo> => {
+      const status = await exec('claude', ['auth', 'status', '--json'], { env, timeout: 20_000 })
+        .then((r) => JSON.parse(r.stdout) as { loggedIn?: boolean; email?: string; subscriptionType?: string; orgName?: string })
+        .catch(() => undefined);
+      if (!status?.loggedIn) return { loggedIn: false };
+      const account = runner.discover ? (await runner.discover(env).catch(() => undefined))?.account : undefined;
+      const email = account?.email ?? status.email;
+      const subscriptionType = account?.subscriptionType ?? status.subscriptionType;
+      const organization = account?.organization ?? status.orgName;
+      return { loggedIn: true, ...(email ? { email } : {}), ...(subscriptionType ? { subscriptionType } : {}), ...(organization ? { organization } : {}) };
+    })();
+    infoCache.set(id, { at: Date.now(), value });
+    return value;
+  };
+  const connectionsInfo = async (): Promise<ConnectionsInfo> => {
+    const env = await discover();
+    const views = await Promise.all(connections.views().map(async (c) => (c.kind === 'claude' ? { ...c, account: await accountInfo(c.id) } : c)));
+    const main: AccountInfo = { loggedIn: !!env.account, ...env.account };
+    return { connections: views, main, balance: connections.balance, secretStore: connections.secrets.kind };
+  };
+  /** What the team architect may use besides the user's own login. */
+  const connectionsNote = (): string => {
+    const lines = ['# Accounts and providers', '- Your own Claude login: { type: subscription }'];
+    for (const c of connections.list()) {
+      if (c.kind === 'claude') lines.push(`- Claude account "${c.label}": { type: subscription, account: ${c.id} }`);
+      else lines.push(`- ${c.label} (${c.kind === 'anthropic' ? 'Anthropic-compatible' : 'OpenAI-compatible'}): { type: connection, connection: ${c.id}, model: <one of ${(c.models ?? []).map((m) => m.id).join(', ') || 'no models yet'}> }`);
     }
-    return planCache.value;
+    if (connections.balance) lines.push('Sharing across Claude accounts is on: members with { type: subscription } and no account use whichever account has room.');
+    if (lines.length === 2) lines.push('Nothing else is set up; more accounts and providers can be added in Settings → Advanced.');
+    return lines.join('\n');
+  };
+  /** A connection's id or a run's "via" as people read it. */
+  const viaLabel = (via: string): string => {
+    if (via === 'claude') return 'Claude (your login)';
+    if (via.startsWith('claude:')) return `Claude (${connections.get(via.slice(7))?.label ?? via.slice(7)})`;
+    const c = connections.get(via);
+    if (c) return c.label;
+    return ({ api_key: 'Anthropic API key', gateway: 'Gateway', bedrock: 'Amazon Bedrock', vertex: 'Google Vertex AI', subscription: 'Claude (your login)' } as Record<string, string>)[via] ?? via;
   };
   /** Skill name → the team members that have it (directly or from team defaults). */
   const skillUsage = () => {
@@ -156,10 +212,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     return out.sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, limit);
   };
 
-  const stats = () => {
+  const stats = (): Stats => {
     const roster = rosters();
     const since = new Date(Date.now() - 60 * 86_400_000).toISOString();
-    return computeStats(
+    const computed = computeStats(
       library
         .projects()
         .filter((p) => existsSync(p.path))
@@ -170,12 +226,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           const activeAgents = live.reduce((n, r) => n + summary(p, r, undefined, roster).agents.filter((a) => a.status === 'working').length, 0);
           return {
             runs,
-            events: store.eventsOfType(['agent.finished', 'agent.error', 'agent.limited', 'gate.passed', 'gate.failed', 'usage.limit'], since),
+            events: store.eventsOfType(['agent.usage', 'agent.finished', 'agent.error', 'agent.limited', 'gate.passed', 'gate.failed', 'usage.limit'], since),
             live: (r: RunRecord) => store.isLive(r),
             activeAgents,
           };
         }),
     );
+    for (const v of computed.byVia) v.label = viaLabel(v.via);
+    return computed;
   };
 
   /** The bell's list, from the last week of every project. */
@@ -197,7 +255,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const launch = async (project: Project, team: TeamConfig, goal: string, base?: string) => {
     const controller = new AbortController();
     const onLimit = library.settings().onLimit ?? 'wait';
-    const { runId, done } = await startRun({ team, repo: project.path, goal, store: storeFor(project), runner, signal: controller.signal, base, onLimit });
+    const { runId, done } = await startRun({ team, repo: project.path, goal, store: storeFor(project), runner, signal: controller.signal, base, onLimit, connections });
     const key = `${project.id}/${runId}`;
     active.set(key, controller);
     done.catch(() => undefined).finally(() => active.delete(key));
@@ -220,7 +278,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const resetFor = async (project: Project, run: RunRecord): Promise<string | undefined> => {
     const own = summary(project, run).limit?.resetsAt;
     if (own && Date.parse(own) > Date.now()) return new Date(Date.parse(own) + 60_000).toISOString();
-    const usage = usageReport(await planUsage(), stats().usage);
+    const usage = await usageAll();
     const blocked = usage.windows.filter((w) => w.resetsAt && (w.status === 'rejected' || (w.utilization ?? 0) >= 1)).map((w) => w.resetsAt!);
     const next = (blocked.length ? blocked : usage.windows.filter((w) => w.window === 'five_hour').map((w) => w.resetsAt).filter((r): r is string => !!r)).sort().at(-1);
     return next && Date.parse(next) > Date.now() ? new Date(Date.parse(next) + 60_000).toISOString() : undefined;
@@ -331,7 +389,48 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const routes: Route[] = [
     ['GET', '/api/overview', () => ({ projects: library.projects(), teams: library.teams(), runs: allRuns(30), stats: stats(), home: library.home, defaultParent: library.defaultParent() })],
     ['GET', '/api/environment', () => discover()],
-    ['GET', '/api/usage', async (_p, _b, q) => usageReport(await planUsage(q.get('fresh') === '1'), stats().usage)],
+    ['GET', '/api/usage', (_p, _b, q) => usageAll(q.get('fresh') === '1')],
+
+    // ---- connections (Settings → Advanced)
+    ['GET', '/api/connections', () => connectionsInfo()],
+    ['PUT', '/api/connections', async (_p, body) => {
+      const balance = (body as { balance?: unknown }).balance;
+      if (typeof balance !== 'boolean') throw new BadRequest('"balance" is true or false');
+      connections.setBalance(balance);
+      return connectionsInfo();
+    }],
+    ['POST', '/api/connections', async (_p, body) => {
+      const c = connections.add(body as NewConnection);
+      return connections.views().find((v) => v.id === c.id);
+    }],
+    ['PUT', '/api/connections/:id', (p, body) => {
+      const b = body as { label?: string; baseUrl?: string; models?: ProviderModel[]; apiKey?: string | null };
+      connections.update(p.id!, { label: b.label, baseUrl: b.baseUrl, models: b.models, apiKey: b.apiKey });
+      return connections.views().find((v) => v.id === p.id);
+    }],
+    ['DELETE', '/api/connections/:id', async (p) => {
+      await connections.remove(p.id!);
+      infoCache.delete(p.id!);
+      return { ok: true };
+    }],
+    ['POST', '/api/connections/:id/login', async (p) => {
+      const c = connections.get(p.id!);
+      if (!c) throw new NotFound(`no connection "${p.id}"`);
+      infoCache.delete(c.id);
+      return startLogin(c);
+    }],
+    ['GET', '/api/connections/:id/account', (p, _b, q) => {
+      if (connections.get(p.id!)?.kind !== 'claude') throw new NotFound(`no Claude account "${p.id}"`);
+      return accountInfo(p.id!, q.get('fresh') === '1');
+    }],
+    // The models a provider offers: for a saved connection (its stored key), or for one being set up.
+    ['POST', '/api/connections/models', async (_p, body) => {
+      const b = body as { id?: string; kind?: string; baseUrl?: string; apiKey?: string };
+      const saved = b.id ? connections.get(b.id) : undefined;
+      const kind = (saved?.kind ?? b.kind) as string;
+      if (kind !== 'anthropic' && kind !== 'openai') throw new BadRequest('"kind" is anthropic or openai');
+      return { models: await listModels(kind, b.baseUrl ?? saved?.baseUrl ?? '', b.apiKey || (saved ? connections.key(saved.id) : undefined)) };
+    }],
 
     // ---- skills
     ['GET', '/api/skills', async () => {
@@ -421,7 +520,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       if (!store.proposals('pending').length) throw new BadRequest('there are no pending proposals');
       const run = store.createRun({ id: newRunId(), kind: 'curate', team: team.name, teamFile: team.file, repo: project.path, goal: 'Review proposals for the project brain' });
       store.append(run.id, { type: 'run.started', data: { team: team.name, goal: run.goal, kind: 'curate', steps: ['curate'] } });
-      void curate({ team, store, runner, repo: project.path, runId: run.id, buildInvocation })
+      void curate({ team, store, runner, repo: project.path, runId: run.id, buildInvocation, connections })
         .catch((err) => store.append(run.id, { type: 'agent.error', step: 'curate', agent: team.brain.curator, data: { ok: false, error: (err as Error).message } }))
         .finally(() => {
           store.finishRun(run.id, 'succeeded');
@@ -438,7 +537,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       else library.teamDir(teamId);
       const project = typeof b.project === 'string' && b.project ? library.project(b.project) : undefined;
       const settings = library.settings();
-      const { runId, done } = await design({ library, store: libraryStore, runner, teamId, projectPath: project?.path, message: str(body, 'message'), model: settings.designerModel, effort: settings.designerEffort, builtinSkills: async () => (await discover()).skills });
+      const { runId, done } = await design({ library, store: libraryStore, runner, teamId, projectPath: project?.path, message: str(body, 'message'), model: settings.designerModel, effort: settings.designerEffort, builtinSkills: async () => (await discover()).skills, connections: connectionsNote });
       answering.add(`${runId}/${ARCHITECT}`);
       void done.finally(() => answering.delete(`${runId}/${ARCHITECT}`));
       return { runId, teamId };
@@ -448,7 +547,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       if (!run) throw new NotFound('conversation not found');
       if (answering.has(`${run.id}/${ARCHITECT}`)) throw new BadRequest('the architect is still answering');
       const settings = library.settings();
-      const { done } = await design({ library, store: libraryStore, runner, teamId: run.team, runId: run.id, message: str(body, 'message'), model: settings.designerModel, effort: settings.designerEffort, builtinSkills: async () => (await discover()).skills });
+      const { done } = await design({ library, store: libraryStore, runner, teamId: run.team, runId: run.id, message: str(body, 'message'), model: settings.designerModel, effort: settings.designerEffort, builtinSkills: async () => (await discover()).skills, connections: connectionsNote });
       answering.add(`${run.id}/${ARCHITECT}`);
       void done.finally(() => answering.delete(`${run.id}/${ARCHITECT}`));
       return { runId: run.id, teamId: run.team };
@@ -609,7 +708,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const message = str(body, 'message');
       const requested = (body as { delivery?: unknown }).delivery;
       const delivery: DeliveryMode = requested === 'steer' || requested === 'interrupt' ? requested : 'queue';
-      if (store.isLive(run)) return chat({ store, runner, team, runId: run.id, agent, message, delivery });
+      if (store.isLive(run)) return chat({ store, runner, team, runId: run.id, agent, message, delivery, connections });
       if (!store.getSession(run.id, agent)) throw new BadRequest(`${agent} has not worked on this run yet, so there is no conversation to continue. Ask it a question instead.`);
       const key = `${run.id}/${agent}`;
       if (answering.has(key)) {
@@ -621,7 +720,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       }
       answering.add(key);
       // The answer streams in as events; don't hold the request open for it.
-      void chat({ store, runner, team, runId: run.id, agent, message })
+      void chat({ store, runner, team, runId: run.id, agent, message, connections })
         .catch((err) => store.append(run.id, { type: 'agent.error', agent, step: 'chat', data: { ok: false, error: (err as Error).message } }))
         .finally(() => answering.delete(key));
       return { mode: 'answering' };
@@ -629,7 +728,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     ['POST', '/api/ask', async (_p, body) => {
       const project = library.project(str(body, 'project'));
       const team = library.load(str(body, 'team'));
-      const { runId, done } = await ask({ store: storeFor(project), runner, team, repo: project.path, agent: str(body, 'agent'), question: str(body, 'question') });
+      const { runId, done } = await ask({ store: storeFor(project), runner, team, repo: project.path, agent: str(body, 'agent'), question: str(body, 'question'), connections });
       done.catch(() => undefined);
       return { runId, projectId: project.id };
     }],
@@ -691,7 +790,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           ? 409
           : err instanceof NotFound
             ? 404
-            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof BrainError
+            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof BrainError || err instanceof ConnectionError || err instanceof BackendError
               ? 400
               : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;
@@ -719,6 +818,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       await new Promise((r) => setTimeout(r, 200));
       for (const s of stores.values()) s.close();
       libraryStore.close();
+      await connections.close();
     },
   };
 }

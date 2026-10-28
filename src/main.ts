@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createInterface, type Interface } from 'node:readline/promises';
@@ -10,8 +10,16 @@ import type { DeliveryMode, RunEvent } from './events/types.js';
 import { runTeam } from './engine/engine.js';
 import { answerQuestion } from './engine/questions.js';
 import { EventStore } from './events/store.js';
-import { bold, dim, formatEvent, formatRun, green, red, yellow } from './format.js';
+import { bold, dim, formatEvent, formatRun, green, QUIET_EVENTS, red, yellow } from './format.js';
 import { ClaudeSdkRunner } from './runner/claude-sdk.js';
+import { Connections, loginCommand } from './connections/store.js';
+
+/** Accounts and providers from Settings → Advanced, shared with the app. */
+function openConnections(runner: ClaudeSdkRunner): Connections {
+  const connections = new Connections();
+  connections.usageReader = (env) => runner.usage(env);
+  return connections;
+}
 
 const USAGE = `covibe — YAML-defined agent teams on the Claude Agent SDK
 
@@ -26,6 +34,8 @@ Usage:
   covibe clean [--older-than <days>] [--run <id>] [--dry-run]
                                                Remove worktrees of finished runs
   covibe app [--port <n>] [--no-open]          Open the covibe app in your browser
+  covibe connections                           List Claude accounts and providers (Settings → Advanced)
+  covibe login <account>                       Sign in one of those Claude accounts
 
 Options:
   --repo <dir>   Repository the team works on (default: current directory)
@@ -84,6 +94,10 @@ export async function main(argv: string[]): Promise<number> {
         return await clean(values);
       case 'app':
         return await app(values.port ? Number(values.port) : undefined, !values['no-open']);
+      case 'connections':
+        return listConnections();
+      case 'login':
+        return login(args[0]);
       default:
         console.error(`unknown command "${command}"\n\n${USAGE}`);
         return 1;
@@ -144,11 +158,12 @@ async function run(file: string | undefined, values: { repo?: string; goal?: str
   process.on('SIGINT', onSigint);
   const prompter = process.stdin.isTTY ? questionPrompter(store, onSigint) : undefined;
   const unsubscribe = store.subscribe((e) => {
-    console.log(formatEvent(e));
+    if (!QUIET_EVENTS.has(e.type)) console.log(formatEvent(e));
     prompter?.onEvent(e);
   });
   try {
-    const outcome = await runTeam({ team, repo: repoRoot(values.repo), goal, store, runner: new ClaudeSdkRunner(), signal: controller.signal });
+    const runner = new ClaudeSdkRunner();
+    const outcome = await runTeam({ team, repo: repoRoot(values.repo), goal, store, runner, signal: controller.signal, connections: openConnections(runner) });
     console.log('');
     console.log(`run ${bold(outcome.runId)}: ${outcome.status}${outcome.reason ? ` — ${outcome.reason}` : ''}`);
     if (outcome.branch) console.log(`result branch: ${bold(outcome.branch)}  ${dim(`(git diff HEAD...${outcome.branch})`)}`);
@@ -279,7 +294,7 @@ async function log(id: string | undefined, values: { repo?: string; follow?: boo
   try {
     const found = store.findRun(id);
     if (!found) throw new Error(`run ${id} not found`);
-    const print = (e: Parameters<typeof formatEvent>[0]) => console.log(values.json ? JSON.stringify(e) : formatEvent(e));
+    const print = (e: Parameters<typeof formatEvent>[0]) => (values.json ? console.log(JSON.stringify(e)) : !QUIET_EVENTS.has(e.type) && console.log(formatEvent(e)));
     let last = 0;
     for (;;) {
       for (const e of store.events(found.id, last)) {
@@ -339,9 +354,10 @@ async function chatCommand(args: string[], repo: string | undefined, delivery: D
     if (!run) throw new Error(`run ${id} not found`);
     const team = loadTeam(run.teamFile);
     const live = store.isLive(run);
-    const unsubscribe = live ? () => {} : store.subscribe((e) => e.type !== 'agent.text' && console.log(formatEvent(e)));
+    const unsubscribe = live ? () => {} : store.subscribe((e) => e.type !== 'agent.text' && !QUIET_EVENTS.has(e.type) && console.log(formatEvent(e)));
     try {
-      const outcome = await chat({ store, runner: new ClaudeSdkRunner(), team, runId: run.id, agent, message: words.join(' '), delivery });
+      const runner = new ClaudeSdkRunner();
+      const outcome = await chat({ store, runner, team, runId: run.id, agent, message: words.join(' '), delivery, connections: openConnections(runner) });
       if (outcome.mode === 'queued') {
         const when =
           outcome.delivery === 'interrupt'
@@ -364,4 +380,32 @@ async function chatCommand(args: string[], repo: string | undefined, delivery: D
   } finally {
     store.close();
   }
+}
+
+function listConnections(): number {
+  const connections = new Connections();
+  const all = connections.views();
+  if (!all.length) {
+    console.log(dim('No accounts or providers yet. Add them in the app: Settings → Advanced.'));
+    return 0;
+  }
+  for (const c of all) {
+    const what = c.kind === 'claude' ? 'Claude account' : c.kind === 'anthropic' ? `Anthropic-compatible · ${c.baseUrl}` : `OpenAI-compatible · ${c.baseUrl}`;
+    const extra = c.kind === 'claude' ? '' : ` · ${c.models?.length ?? 0} model(s)${c.hasKey ? '' : yellow(' · no key')}`;
+    console.log(`${bold(c.id.padEnd(16))} ${c.label}  ${dim(what)}${extra}`);
+  }
+  console.log(dim(`\nSharing work across Claude accounts: ${connections.balance ? 'on' : 'off'}`));
+  return 0;
+}
+
+function login(id: string | undefined): number {
+  if (!id) throw new Error('usage: covibe login <account>');
+  const account = new Connections().get(id);
+  if (!account || account.kind !== 'claude' || !account.configDir) throw new Error(`no Claude account "${id}" (add it in the app: Settings → Advanced)`);
+  console.log(dim(loginCommand(account.configDir)));
+  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: account.configDir };
+  for (const k of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDECODE']) delete env[k];
+  const res = spawnSync('claude', ['auth', 'login'], { stdio: 'inherit', env });
+  if (res.error) throw new Error(`could not start claude: ${res.error.message} (is Claude Code installed?)`);
+  return res.status ?? 1;
 }

@@ -385,7 +385,7 @@ table.table tr:last-child td { border-bottom: 0; }
 table.table td.r, table.table th.r { text-align: right; }
 
 /* ---------- stat tiles & meters */
-.tiles { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.tiles { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 1100px) { .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 700px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .tile { padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
@@ -762,3 +762,18 @@ table.table td.r, table.table th.r { text-align: right; }
 .ship-options { display: flex; flex-direction: column; gap: 8px; }
 .ship-option { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font-size: 13px; }
 .ship-option > svg { width: 16px; height: 16px; flex: none; color: var(--accent); }
+
+/* Settings → Advanced (components/Connections.tsx) */
+.settings-group { margin: 10px 0 -4px; font-size: 13px; color: var(--text-2); }
+.conn-list { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius); }
+.conn-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--border); min-width: 0; }
+.conn-row:last-child { border-bottom: 0; }
+.conn-row strong { font-size: 13px; font-weight: 600; }
+.models-table td { vertical-align: middle; }
+.models-table .input.num { width: 92px; text-align: right; padding: 3px 6px; }
+@media (max-width: 760px) { .conn-row { flex-wrap: wrap; } }
+
+/* plan usage per account (components/Usage.tsx) */
+.usage-account { display: flex; flex-direction: column; gap: 10px; }
+.usage-account + .usage-account { border-top: 1px solid var(--border); padding-top: 12px; }
+.usage-account > h3 { font-weight: 600; }

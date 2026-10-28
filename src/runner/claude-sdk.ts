@@ -1,6 +1,8 @@
 // The only module that imports the Claude Agent SDK. SDK upgrades and API
 // changes should touch this file and nothing else.
 import { randomUUID } from 'node:crypto';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   createSdkMcpServer,
   query,
@@ -13,7 +15,9 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import { claudeConfigDirs, mainConfigDir, priceOf } from '../connections/store.js';
 import type { Env } from './backend.js';
+import { claudePrice } from './prices.js';
 import type { AgentInvocation, AgentResult, AgentRunner, CustomTool, EnvironmentInfo, LivePriority, PlanUsage, TokenUsage } from './types.js';
 
 const TEAM_SERVER = 'team';
@@ -23,6 +27,8 @@ const COVIBE_SERVER = 'covibe';
 const FOLLOW_UP_WAIT_MS = 30_000;
 /** Longest a member may wait for an answer to its question, or in a paused run. */
 const MAX_WAIT_MS = 7 * 24 * 60 * 60_000;
+/** How often a working member reports its running token use and spend. */
+const USAGE_EVERY_MS = 3_000;
 
 /** The prompt stream: the agent's first message, then anything sent while it works. */
 class Input implements AsyncIterable<SDKUserMessage> {
@@ -66,7 +72,17 @@ export class ClaudeSdkRunner implements AgentRunner {
   }
 
   async run(inv: AgentInvocation): Promise<AgentResult> {
+    const result = await this.turn(inv);
+    // Claude Code prices every model as Claude; another provider's model gets its own prices.
+    if (inv.pricing && result.tokens) result.costUsd = priceOf(inv.pricing, result.tokens);
+    return result;
+  }
+
+  private async turn(inv: AgentInvocation): Promise<AgentResult> {
     const started = Date.now();
+    // A session started on another Claude account lives in that account's
+    // config folder; bring it over so this account can pick it up.
+    if (inv.resumeSessionId) carrySession(inv.resumeSessionId, mainConfigDir(inv.env), claudeConfigDirs());
     const abortController = new AbortController();
     const onAbort = () => abortController.abort();
     inv.signal.addEventListener('abort', onAbort, { once: true });
@@ -102,6 +118,8 @@ export class ClaudeSdkRunner implements AgentRunner {
       effort: inv.effort,
       thinking: inv.thinking === undefined ? undefined : inv.thinking === 'adaptive' ? { type: 'adaptive' } : inv.thinking === 'off' ? { type: 'disabled' } : { type: 'enabled', budgetTokens: inv.thinking },
       abortController,
+      // Stream events carry each response's growing token count, for the live spend.
+      includePartialMessages: true,
       resume: inv.resumeSessionId,
       forkSession: inv.forkSession && !!inv.resumeSessionId,
       // Built-in tools are limited to the agent's list and pre-approved; anything
@@ -157,9 +175,16 @@ export class ClaudeSdkRunner implements AgentRunner {
     let rejected: AgentResult['limit'];
     let last: SDKResultMessage | undefined;
     let turns = 0;
+    const usage = new LiveUsage(inv.pricing, (tokens, costUsd) => inv.onEvent({ kind: 'usage', tokens, ...(costUsd === undefined ? {} : { costUsd }) }));
     try {
       for await (const msg of query({ prompt: input, options }) as AsyncIterable<SDKMessage>) {
         clearTimeout(followUp);
+        // Every API response (subagents' too) counts toward the running total.
+        if (msg.type === 'stream_event') {
+          usage.stream(msg.event as Parameters<LiveUsage['stream']>[0], msg.parent_tool_use_id ?? '');
+          continue;
+        }
+        if (msg.type === 'assistant') usage.add(msg.message);
         if (msg.type === 'system' && msg.subtype === 'init') {
           sessionId = msg.session_id;
           inv.onEvent({ kind: 'session', sessionId });
@@ -200,6 +225,7 @@ export class ClaudeSdkRunner implements AgentRunner {
       return { ok: false, sessionId, text: lastText, error, turns, costUsd: last?.total_cost_usd ?? 0, durationMs: Date.now() - started, ...(limit ? { limit } : {}) };
     } finally {
       stop();
+      usage.close();
       inv.signal.removeEventListener('abort', onAbort);
     }
 
@@ -218,11 +244,17 @@ export class ClaudeSdkRunner implements AgentRunner {
 
 /**
  * Read Claude Code's built-in skills and the signed-in account. The init
- * message arrives before any model call, and the session is closed right
- * then, so this costs nothing.
+ * message (which lists the skills) only comes with a first prompt, so one is
+ * sent, and a hook blocks it before it reaches the model: this costs nothing.
+ * (Closing the session at init was not enough; the request was often already
+ * on its way.)
  */
 export async function discoverEnvironment(env: Env): Promise<EnvironmentInfo> {
-  const q = query({ prompt: 'hi', options: { cwd: process.cwd(), env, settingSources: [], tools: ['Skill'], permissionMode: 'dontAsk', maxTurns: 1 } });
+  const block: HookCallback = async () => ({ continue: false, stopReason: 'covibe reads the environment only' });
+  const q = query({
+    prompt: 'hi',
+    options: { cwd: process.cwd(), env, settingSources: [], tools: ['Skill'], permissionMode: 'dontAsk', maxTurns: 1, hooks: { UserPromptSubmit: [{ hooks: [block] }] } },
+  });
   const timer = setTimeout(() => q.close(), 30_000);
   try {
     const [account, commands, models] = await Promise.all([
@@ -314,6 +346,122 @@ export function limitOf(error: string, rejected: AgentResult['limit']): AgentRes
   const epoch = /\|(\d{10,13})\b/.exec(error)?.[1];
   const resetsAt = rejected?.resetsAt ?? (epoch ? Math.round(Number(epoch) / (epoch.length > 10 ? 1000 : 1)) : undefined);
   return { resetsAt, window: rejected?.window };
+}
+
+type ApiUsage = {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  cache_creation?: { ephemeral_1h_input_tokens?: number | null } | null;
+};
+type Counts = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number; cache_1h: number };
+
+/**
+ * The running token count of one invocation, reported every few seconds while
+ * it works. Each API response reports its usage at the start of its stream
+ * (input and cache) and grows it in message_delta events (output); assistant
+ * messages repeat an early snapshot. Counts only grow, so each response keeps
+ * the largest value seen per field.
+ */
+export class LiveUsage {
+  private readonly responses = new Map<string, { model?: string; usage: Counts }>();
+  /** The response each stream (the main one, or a subagent's) is on. */
+  private readonly current = new Map<string, string>();
+  private timer: NodeJS.Timeout | undefined;
+  private sent = '';
+
+  constructor(
+    private readonly pricing: AgentInvocation['pricing'],
+    private readonly report: (tokens: TokenUsage, costUsd: number | undefined) => void,
+  ) {}
+
+  /** A complete assistant message (one content block of a response). */
+  add(message: { id?: string; model?: string; usage?: ApiUsage | null }) {
+    if (message.usage) this.merge(message.id ?? `#${this.responses.size}`, message.model, message.usage);
+  }
+
+  /** A raw stream event; `stream` tells the main conversation and subagents apart. */
+  stream(event: { type: string; message?: { id?: string; model?: string; usage?: ApiUsage | null }; usage?: ApiUsage | null }, stream: string) {
+    if (event.type === 'message_start' && event.message?.id) {
+      this.current.set(stream, event.message.id);
+      if (event.message.usage) this.merge(event.message.id, event.message.model, event.message.usage);
+    } else if (event.type === 'message_delta' && event.usage) {
+      const id = this.current.get(stream);
+      if (id) this.merge(id, undefined, event.usage);
+    }
+  }
+
+  private merge(id: string, model: string | undefined, u: ApiUsage) {
+    const r = this.responses.get(id) ?? { model, usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, cache_1h: 0 } };
+    r.model ??= model;
+    for (const k of ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'] as const) r.usage[k] = Math.max(r.usage[k], u[k] ?? 0);
+    r.usage.cache_1h = Math.max(r.usage.cache_1h, u.cache_creation?.ephemeral_1h_input_tokens ?? 0);
+    this.responses.set(id, r);
+    this.timer ??= setTimeout(() => this.flush(), USAGE_EVERY_MS);
+  }
+
+  /** Report now (normally on a timer). */
+  flush() {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    const tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    let cost = 0;
+    let priced = true;
+    for (const { model, usage: u } of this.responses.values()) {
+      const t = { input: u.input_tokens, output: u.output_tokens, cacheRead: u.cache_read_input_tokens, cacheWrite: u.cache_creation_input_tokens };
+      tokens.input += t.input;
+      tokens.output += t.output;
+      tokens.cacheRead += t.cacheRead;
+      tokens.cacheWrite += t.cacheWrite;
+      const price = this.pricing ?? claudePrice(model);
+      // 1-hour cache writes (Claude Code's default on a subscription) cost twice the input price.
+      if (price) cost += priceOf(price, { ...t, cacheWrite: t.cacheWrite - u.cache_1h }) + (u.cache_1h * price.input * 2) / 1e6;
+      else priced = false;
+    }
+    const key = JSON.stringify(tokens);
+    if (key === this.sent) return;
+    this.sent = key;
+    this.report(tokens, priced ? cost : undefined);
+  }
+
+  /** The turn is over: its result carries the exact figures. */
+  close() {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+}
+
+/**
+ * Make a session's transcript available in `target` (a Claude Code config
+ * folder), copying it from whichever of `dirs` has it. Claude Code keeps
+ * sessions under <config>/projects/<folder for the working directory>/<id>.jsonl.
+ */
+export function carrySession(sessionId: string, target: string, dirs: string[]): boolean {
+  const find = (dir: string) => {
+    const projects = join(dir, 'projects');
+    if (!existsSync(projects)) return undefined;
+    for (const p of readdirSync(projects)) if (existsSync(join(projects, p, `${sessionId}.jsonl`))) return p;
+    return undefined;
+  };
+  if (find(target)) return true;
+  for (const dir of dirs) {
+    if (dir === target) continue;
+    const project = find(dir);
+    if (!project) continue;
+    try {
+      const from = join(dir, 'projects', project);
+      const to = join(target, 'projects', project);
+      mkdirSync(to, { recursive: true });
+      copyFileSync(join(from, `${sessionId}.jsonl`), join(to, `${sessionId}.jsonl`));
+      // Subagent transcripts and tool output files sit in a folder named after the session.
+      if (existsSync(join(from, sessionId))) cpSync(join(from, sessionId), join(to, sessionId), { recursive: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 /** Base64 images inside tool results: what the agent sees of a screenshot it read or a browser tool returned. */

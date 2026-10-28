@@ -45,6 +45,7 @@ agents:
     description: Reviews the merged change; never edits code.
     prompt: prompts/qa.md
     model: sonnet
+    effort: medium                  # checking work needs less thinking than writing it
     tools: [Read, Grep, Glob]       # reviews only
     output_schema: schemas/review.json
 
@@ -52,6 +53,7 @@ agents:
     description: Adds and runs tests; may only write test files.
     prompt: prompts/tester.md
     model: sonnet
+    effort: medium
     tools: [Read, Write, Edit, Bash, Grep, Glob]
     scope: { write: ["**/tests/**", "**/*.test.*", "**/*.spec.*"] }
     output_schema: schemas/test.json

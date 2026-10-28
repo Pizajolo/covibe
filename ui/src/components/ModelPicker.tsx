@@ -1,8 +1,10 @@
 // Model, effort and thinking for a member, a team's defaults or the team
 // architect. The model list comes from Claude Code (what this account can use),
-// with the effort levels each model supports.
+// with the effort levels each model supports, followed by the models of the
+// providers set up in Settings → Advanced.
 import { useEffect, useState } from 'react';
 import { get, type Effort, type EnvironmentInfo, type ModelChoice, type Thinking } from '../api';
+import { KIND_LABEL, useConnections } from './Connections';
 
 const FALLBACK: ModelChoice[] = [
   {
@@ -48,6 +50,15 @@ export interface ModelSettings {
   thinking?: Thinking;
 }
 
+/** A provider's model, chosen in place of a Claude model. */
+export interface ProviderChoice {
+  id: string;
+  model: string;
+}
+
+const SEP = '\u0001';
+const providerValue = (c: { id: string; model?: string }) => `conn${SEP}${c.id}${SEP}${c.model ?? ''}`;
+
 /**
  * Three fields: model, effort, thinking. Empty means "inherit" (the team
  * default, or Claude Code's default); `inherit` names what that is.
@@ -57,19 +68,34 @@ export function ModelPicker({
   onChange,
   inherit,
   compact,
+  provider,
+  onProvider,
 }: {
   value: ModelSettings;
   onChange: (key: keyof ModelSettings, v: string | number | null) => void;
   inherit: string;
   /** Model and effort only. */
   compact?: boolean;
+  /** The provider model in use (the member's or team's connection), if any. */
+  provider?: { id: string; model?: string };
+  /** Offer the providers' models; called when one is chosen. */
+  onProvider?: (c: ProviderChoice) => void;
 }) {
   const models = useModels();
-  const known = models.find((m) => m.value === value.model || m.resolved === value.model);
-  const custom = !!value.model && !known;
+  const connections = useConnections();
+  const providers = onProvider ? (connections?.connections ?? []).filter((c) => c.kind !== 'claude' && c.models?.length) : [];
+  const known = provider ? undefined : models.find((m) => m.value === value.model || m.resolved === value.model);
+  const custom = !provider && !!value.model && !known;
   const [customOpen, setCustomOpen] = useState(custom);
   const levels = known ? known.efforts : EFFORTS.map((e) => e.value);
   const budget = typeof value.thinking === 'number';
+  const providerListed = provider && providers.some((c) => c.id === provider.id && c.models?.some((m) => m.id === provider.model));
+  const claudeOptions = models.map((m) => (
+    <option key={m.value} value={m.value}>
+      {m.name}
+      {m.description ? `: ${m.description}` : ''}
+    </option>
+  ));
 
   return (
     <div className={`model-picker ${compact ? 'compact' : ''}`}>
@@ -77,24 +103,40 @@ export function ModelPicker({
         Model
         <select
           className="input"
-          value={customOpen || custom ? '__custom' : (known?.value ?? '')}
+          value={provider ? providerValue(provider) : customOpen || custom ? '__custom' : (known?.value ?? '')}
           onChange={(e) => {
             const v = e.target.value;
+            if (v.startsWith(`conn${SEP}`)) {
+              const [, id, model] = v.split(SEP);
+              setCustomOpen(false);
+              return onProvider?.({ id: id!, model: model! });
+            }
             setCustomOpen(v === '__custom');
             if (v !== '__custom') onChange('model', v || null);
           }}
         >
           <option value="">{inherit}</option>
-          {models.map((m) => (
-            <option key={m.value} value={m.value}>
-              {m.name}
-              {m.description ? `: ${m.description}` : ''}
-            </option>
+          {providers.length ? <optgroup label="Claude">{claudeOptions}</optgroup> : claudeOptions}
+          {providers.map((c) => (
+            <optgroup key={c.id} label={`${c.label} · ${KIND_LABEL[c.kind]}`}>
+              {c.models!.map((m) => (
+                <option key={m.id} value={providerValue({ id: c.id, model: m.id })}>
+                  {m.name ?? m.id}
+                  {m.price ? ` · $${m.price.input}/$${m.price.output} per M` : ''}
+                </option>
+              ))}
+            </optgroup>
           ))}
+          {provider && !providerListed && (
+            <option value={providerValue(provider)}>
+              {provider.model ?? 'no model'} on {provider.id} (not set up)
+            </option>
+          )}
           <option value="__custom">Other model id…</option>
         </select>
-        {(customOpen || custom) && <IdField value={value.model} onCommit={(v) => onChange('model', v || null)} />}
+        {!provider && (customOpen || custom) && <IdField value={value.model} onCommit={(v) => onChange('model', v || null)} />}
         {known?.resolved && known.resolved !== known.value && <span className="help mono">{known.resolved}</span>}
+        {provider && <span className="help">Runs on {connections?.connections.find((c) => c.id === provider.id)?.label ?? provider.id}, with Claude Code's tools.</span>}
       </label>
       <label className="field">
         Effort
@@ -102,9 +144,9 @@ export function ModelPicker({
           className="input"
           value={value.effort ?? ''}
           onChange={(e) => onChange('effort', e.target.value || null)}
-          disabled={!!known && !levels.length && !value.effort}
+          disabled={(!!known && !levels.length && !value.effort) || !!provider}
         >
-          <option value="">{known && !levels.length ? 'Not adjustable for this model' : `${inherit} (model's default)`}</option>
+          <option value="">{provider ? 'Not adjustable for this provider' : known && !levels.length ? 'Not adjustable for this model' : `${inherit} (model's default)`}</option>
           {EFFORTS.filter((e) => levels.includes(e.value) || e.value === value.effort).map((e) => (
             <option key={e.value} value={e.value}>
               {e.label}: {e.help}
@@ -120,6 +162,7 @@ export function ModelPicker({
           <select
             className="input"
             value={budget ? 'budget' : (value.thinking ?? '')}
+            disabled={!!provider && value.thinking === undefined}
             onChange={(e) => {
               const v = e.target.value;
               onChange('thinking', v === 'budget' ? 8000 : v || null);

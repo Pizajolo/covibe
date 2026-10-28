@@ -31,6 +31,7 @@ export type EventType =
   | 'backend.warning'
   | 'chat.message'
   | 'usage.limit'
+  | 'agent.usage'
   | 'workspace.cleaned'
   | 'brain.proposed'
   | 'brain.decided'
