@@ -1,0 +1,1 @@
+5 Claudes, 1 pixel office, 0 standups. covibe runs a whole Claude dev team from one YAML file: they plan, build, review and test, and when a gate fails the work goes back until it passes. Then you hit merge.

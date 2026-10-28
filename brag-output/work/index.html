@@ -1,0 +1,368 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@font-face { font-family: 'Pixelify Sans'; font-weight: 400; src: url(pixelify-sans-latin-400-normal.woff2); }
+@font-face { font-family: 'Pixelify Sans'; font-weight: 600; src: url(pixelify-sans-latin-600-normal.woff2); }
+@font-face { font-family: 'Pixelify Sans'; font-weight: 700; src: url(pixelify-sans-latin-700-normal.woff2); }
+:root {
+  --ink: #141a2c; --plate-bg: #ffffff; --plate-fg: #1d2233; --plate-sub: #5b6377; --plate-line: #1d2233;
+  --accent: #0a6cff; --pixel: 'Pixelify Sans', monospace; --font: 'Inter', system-ui, sans-serif;
+  --mono: 'DejaVu Sans Mono', 'Liberation Mono', monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; }
+body { background: var(--ink); font-family: var(--font); -webkit-font-smoothing: antialiased; }
+#bg { position: absolute; inset: 0; background: radial-gradient(1200px 700px at 50% 60%, #26304d 0%, #141a2c 70%); }
+
+#cap { position: absolute; left: 0; right: 0; top: 46px; height: 140px; text-align: center; color: #fff; }
+#cap .main { font: 700 74px/1 var(--pixel); letter-spacing: 0.01em; white-space: nowrap; }
+#cap .main span { display: inline-block; }
+#cap .sub { margin-top: 18px; font: 500 27px/1 var(--mono); color: #aeb7d3; white-space: nowrap; }
+#cap .sub b { color: #ffb020; font-weight: 600; }
+
+#camera { position: absolute; left: 240px; top: 200px; width: 1440px; height: 855px; transform-origin: 50% 50%; }
+#stage { position: absolute; inset: 0; border: 8px solid #0b0f1d; border-radius: 14px; overflow: hidden; box-shadow: 0 14px 0 #0b0f1d, 0 40px 80px rgba(0,0,0,.45); background: #c8d4e4; }
+#stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; }
+.plate {
+  position: absolute; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 5px 14px 6px; background: var(--plate-bg); color: var(--plate-fg); border: 3px solid var(--plate-line); box-shadow: 0 5px 0 var(--plate-line);
+  font: 600 22px/1.15 var(--pixel); white-space: nowrap;
+}
+.plate .role { letter-spacing: 0.06em; text-transform: uppercase; }
+.plate .note { display: flex; align-items: center; gap: 8px; font: 15px var(--mono); color: var(--plate-sub); }
+.plate .note i { width: 9px; height: 9px; background: #86857e; }
+.plate[data-state='working'] .note i { background: var(--accent); }
+.plate[data-state='done'] .note i { background: #3fb950; }
+.plate[data-state='stopped'] .note i { background: #ef5b5b; }
+.plate[data-state='stopped'] .note { color: #c43c3c; }
+#dim { position: absolute; inset: 0; background: rgba(11, 15, 29, 0.6); border-radius: 14px; }
+
+.card { position: absolute; background: #fff; border-radius: 22px; box-shadow: 0 30px 80px rgba(0,0,0,.45), 0 0 0 1px rgba(0,0,0,.08); color: #1d1d1f; }
+#composer { left: 360px; top: 400px; width: 1200px; padding: 30px 34px 28px; }
+.seg { display: inline-flex; background: #ededeb; border-radius: 11px; padding: 4px; font-size: 22px; font-weight: 500; }
+.seg span { padding: 8px 18px; border-radius: 8px; color: #55554f; }
+.seg span.on { background: #fff; color: #1d1d1f; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+#goal { margin: 26px 2px 0; height: 120px; font-size: 38px; line-height: 1.3; font-weight: 500; letter-spacing: -0.01em; }
+#goal .ph { color: #a5a49c; }
+#caret { display: inline-block; width: 3px; height: 42px; background: var(--accent); vertical-align: -7px; margin-left: 2px; }
+.row { display: flex; align-items: center; gap: 14px; }
+.sel { border: 1.5px solid #d4d4d0; border-radius: 9px; padding: 9px 44px 9px 16px; font-size: 22px; position: relative; }
+.sel::after { content: ''; position: absolute; right: 16px; top: 50%; width: 9px; height: 9px; border-right: 2.5px solid #55554f; border-bottom: 2.5px solid #55554f; transform: translateY(-70%) rotate(45deg); }
+.grow { flex: 1; }
+.btn { border-radius: 10px; padding: 11px 24px; font-size: 22px; font-weight: 600; border: 1.5px solid #d4d4d0; background: #fff; color: #1d1d1f; display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+#ship { left: 410px; top: 330px; width: 1100px; padding: 34px 38px 30px; }
+#ship h3 { margin: 0 0 10px; font-size: 34px; font-weight: 700; letter-spacing: -0.01em; }
+#ship p { margin: 0 0 22px; font-size: 21px; color: #55554f; }
+#ship p code { font: 19px var(--mono); color: #1d1d1f; background: #f0f0ee; padding: 2px 7px; border-radius: 5px; }
+.opt { display: flex; align-items: center; gap: 20px; padding: 18px 20px; border: 1.5px solid #e4e4e0; border-radius: 14px; margin-top: 12px; }
+.opt svg { width: 30px; height: 30px; flex: none; color: #55554f; }
+.opt strong { font-size: 25px; display: block; }
+.opt .muted { font-size: 18px; color: #86857e; margin-top: 4px; }
+#toast { position: absolute; left: 50%; top: 860px; transform: translateX(-50%); background: #1d1d1f; color: #fff; font-size: 24px; font-weight: 600; padding: 14px 24px; border-radius: 12px; display: flex; gap: 12px; align-items: center; white-space: nowrap; }
+
+#cursor { position: absolute; width: 46px; height: 46px; left: 0; top: 0; filter: drop-shadow(0 4px 6px rgba(0,0,0,.35)); }
+
+#outro { position: absolute; inset: 0; color: #fff; text-align: center; }
+#team { position: absolute; top: 205px; left: 0; right: 0; display: flex; justify-content: center; gap: 26px; }
+#team canvas { width: 176px; height: 136px; image-rendering: pixelated; border: 5px solid #0b0f1d; border-radius: 10px; box-shadow: 0 7px 0 #0b0f1d; }
+#brand { position: absolute; top: 430px; left: 0; right: 0; display: flex; justify-content: center; align-items: center; gap: 34px; }
+#brand img { width: 128px; height: 128px; }
+#brand span { font-size: 150px; font-weight: 800; letter-spacing: -0.045em; line-height: 1; }
+#line { position: absolute; top: 640px; left: 0; right: 0; font-size: 50px; font-weight: 600; letter-spacing: -0.015em; color: #eef1fb; }
+#line em { font-style: normal; color: #8fb4ff; }
+#cmd { position: absolute; top: 760px; left: 50%; transform: translateX(-50%); font: 500 32px var(--mono); color: #c9d1ea; background: rgba(255,255,255,.07); border: 2px solid rgba(255,255,255,.12); padding: 16px 30px; border-radius: 14px; white-space: nowrap; }
+#cmd b { color: #4ade80; font-weight: 500; margin-right: 18px; }
+#tag { position: absolute; top: 880px; left: 0; right: 0; font: 600 28px var(--pixel); color: #aeb7d3; letter-spacing: 0.04em; }
+</style>
+<script>
+  // The office's wall clock reads new Date(): pin it so every frame is the same afternoon.
+  const RealDate = Date;
+  window.Date = class extends RealDate { constructor(...a) { a.length ? super(...a) : super(2026, 9, 27, 14, 47); } };
+</script>
+</head>
+<body>
+<div id="bg"></div>
+<div id="cap"><div class="main"></div><div class="sub"></div></div>
+<div id="camera">
+  <div id="stage"><canvas id="office" width="320" height="190"></canvas><div id="plates"></div></div>
+  <div id="dim"></div>
+</div>
+
+<div class="card" id="composer">
+  <div class="seg"><span class="on">New goal</span><span>Ask a question</span></div>
+  <div id="goal"></div>
+  <div class="row" style="margin-top:22px">
+    <div class="sel">shop-app</div><div class="sel">shop-team</div><div class="grow"></div>
+    <div class="btn primary" id="start"><svg width="18" height="18" viewBox="0 0 16 16"><path d="M4 2.5v11l9-5.5z" fill="#fff"/></svg>Start</div>
+  </div>
+</div>
+
+<div class="card" id="ship">
+  <h3>The team is done. What next?</h3>
+  <p>The result is committed on <code>covibe/20261027-132747-45ee</code> (4 files changed). Your checkout is untouched until you merge it.</p>
+  <div class="opt">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="7" r="2.2"/><path d="M6 7.2v9.6M18 9.2c0 5-6 4-11 8"/></svg>
+    <div class="grow"><strong>Merge into main</strong><div class="muted">A merge commit on main in your checkout.</div></div>
+    <div class="btn primary" id="merge">Merge</div>
+  </div>
+  <div class="opt">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+    <div class="grow"><strong>Open a pull request</strong><div class="muted">Push the branch and propose it into main for review.</div></div>
+    <div class="btn">Pull request…</div>
+  </div>
+  <div class="opt">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+    <div class="grow"><strong>Just push the branch</strong><div class="muted">Put the branch on origin without merging.</div></div>
+    <div class="btn">Push</div>
+  </div>
+</div>
+<div id="toast"><svg width="24" height="24" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" stroke="#4ade80" stroke-width="3" fill="none" stroke-linecap="round"/></svg>Merged into main</div>
+
+<div id="outro">
+  <div id="team"></div>
+  <div id="brand"><img src="icon.svg"><span>covibe</span></div>
+  <div id="line">Your Claude dev team, <em>in one YAML file.</em></div>
+  <div id="cmd"><b>$</b>npm install &amp;&amp; npm run desktop</div>
+  <div id="tag">MAC APP + CLI · ON THE CLAUDE AGENT SDK</div>
+</div>
+
+<svg id="cursor" viewBox="0 0 24 24"><path d="M5 2.5v17.2l4.3-4.1 2.9 6.6 3-1.3-2.9-6.5 6-.2z" fill="#fff" stroke="#111" stroke-width="1.4" stroke-linejoin="round"/></svg>
+
+<script type="module">
+import { drawScene, drawPortrait, figureFor, kindOf, layout, spotBox, W } from './office-art.js';
+
+const H = 190, SCALE = 1440 / W;
+const $ = (s) => document.querySelector(s);
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const outCubic = (x) => 1 - Math.pow(1 - x, 3);
+const outBack = (x) => { const c = 1.6; return 1 + (c + 1) * Math.pow(x - 1, 3) + c * Math.pow(x - 1, 2); };
+const inOut = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+const lerp = (a, b, x) => a + (b - a) * x;
+
+// The sample run from the README screenshots: the app's member colors in roster order.
+const COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4'];
+const NAMES = ['manager', 'frontend', 'backend', 'qa', 'tester'];
+const figs = NAMES.map((n, i) => figureFor(n, COLORS[i], kindOf(n, '', i === 0)));
+const { h: roomH, spots } = layout(NAMES.length);
+if (roomH !== H) console.warn('room height', roomH);
+
+const plates = NAMES.map((n, i) => {
+  const { cx, by } = spots[i], box = spotBox(cx, by);
+  const el = document.createElement('div');
+  el.className = 'plate';
+  el.style.left = `${(cx / W) * 100}%`;
+  el.style.top = `${(box.plateTop / H) * 100}%`;
+  el.innerHTML = `<span class="role">${n}</span><span class="note"><i></i><span></span></span>`;
+  $('#plates').append(el);
+  return el;
+});
+
+const portraits = figs.map(() => {
+  const c = document.createElement('canvas');
+  c.width = 44; c.height = 34;
+  $('#team').append(c);
+  return c;
+});
+
+const GOAL = 'Show recently viewed products on the home page';
+
+// ---------------------------------------------------------------- the run, as a function of time
+
+function deskAt(i, t) {
+  const W8 = 'waiting for its step';
+  if (t < 6) return ['sleeping', 'asleep'];
+  switch (NAMES[i]) {
+    case 'manager': return t < 7 ? ['working', 'writing the plan'] : ['done', 'done with plan'];
+    case 'frontend':
+      if (t < 7) return ['sleeping', W8];
+      if (t < 10) return ['working', 'Edit src/pages/Home.tsx'];
+      if (t < 11) return ['done', 'done with build'];
+      if (t < 12) return ['working', 'fix round 1'];
+      return ['done', 'done with fixes'];
+    case 'backend': return t < 7 ? ['sleeping', W8] : t < 10 ? ['working', 'Bash npm test'] : ['done', 'done with build'];
+    case 'qa':
+      if (t < 10) return ['sleeping', W8];
+      if (t < 11) return ['working', 'reviewing the diff'];
+      if (t < 12) return ['stopped', 'review failed'];
+      if (t < 12.75) return ['working', 're-reviewing'];
+      return ['done', 'review passed'];
+    case 'tester':
+      if (t < 12.75) return ['sleeping', W8];
+      if (t < 13.5) return ['working', 'Bash npm run e2e'];
+      return ['done', 'all tests passed'];
+  }
+}
+
+function boardAt(t) {
+  const st = (plan, build, review, test) => [
+    { label: 'plan', status: plan }, { label: 'build', status: build }, { label: 'review', status: review }, { label: 'test', status: test },
+  ];
+  let steps, status = 'working', statusTone = 'ink', footRight = '', footTone = 'good';
+  if (t < 6) { steps = st('next', 'next', 'next', 'next'); status = 'asleep'; }
+  else if (t < 7) steps = st('now', 'next', 'next', 'next');
+  else if (t < 10) steps = st('done', 'now', 'next', 'next');
+  else if (t < 11) steps = st('done', 'done', 'now', 'next');
+  else if (t < 12) { steps = st('done', 'now', 'failed', 'next'); footRight = 'review failed'; footTone = 'warn'; }
+  else if (t < 12.75) steps = st('done', 'done', 'now', 'next');
+  else if (t < 13.5) steps = st('done', 'done', 'done', 'now');
+  else { steps = st('done', 'done', 'done', 'done'); status = 'done'; statusTone = 'good'; footRight = 'all gates passed'; }
+  const cost = 0.9 * clamp((t - 6) / 7.5);
+  return { status, statusTone, steps, cost: `$${cost.toFixed(2)}`, footLeft: t < 11 ? 'loop 0/3' : 'loop 1/3', footRight, footTone };
+}
+
+// ---------------------------------------------------------------- captions
+
+const CAPS = [
+  { a: 0.0, b: 2.9, words: [['5 Claudes.', 0.25], ['1 office.', 0.75], ['0 standups.', 1.25]] },
+  { a: 3.05, b: 5.85, words: [['Give it one goal.', 3.05]] },
+  { a: 6.05, b: 9.85, words: [['They split the work.', 6.05]], sub: [['each member can only change its own paths', 6.3]] },
+  { a: 10.05, b: 10.9, words: [['Every change gets reviewed.', 10.05]] },
+  { a: 11.0, b: 13.85, words: [['Gates actually fail.', 11.0]], sub: [['review failed <b>→ back to build, loop 1/3</b>', 11.2]] },
+  { a: 14.0, b: 16.85, words: [['All gates passed.', 14.0], ['Ship it.', 14.5]] },
+];
+const capKey = { k: '' };
+function captions(t) {
+  const main = $('#cap .main'), sub = $('#cap .sub');
+  const c = CAPS.find((c) => t >= c.a - 0.001 && t < c.b + 0.15);
+  if (!c) { main.innerHTML = ''; sub.innerHTML = ''; return; }
+  const key = CAPS.indexOf(c);
+  if (capKey.k !== key) {
+    main.innerHTML = c.words.map(([w]) => `<span>${w}</span>`).join(' ');
+    sub.innerHTML = c.sub ? c.sub[0][0] : '';
+    capKey.k = key;
+  }
+  const out = prog(t, c.b, c.b + 0.15);
+  [...main.children].forEach((el, i) => {
+    const p = outCubic(prog(t, c.words[i][1], c.words[i][1] + 0.22));
+    el.style.opacity = p * (1 - out);
+    el.style.transform = `translateY(${(1 - p) * 26 - out * 14}px)`;
+  });
+  const sp = c.sub ? outCubic(prog(t, c.sub[0][1], c.sub[0][1] + 0.25)) : 0;
+  sub.style.opacity = sp * (1 - out);
+  sub.style.transform = `translateY(${(1 - sp) * 14}px)`;
+}
+
+// ---------------------------------------------------------------- frame
+
+function show(el, on) { el.style.display = on ? '' : 'none'; }
+
+function cursorAt(t, path) {
+  // path: [[time, x, y], ...]; eases between points.
+  if (t < path[0][0] || t > path[path.length - 1][0] + 0.6) return null;
+  for (let i = 0; i < path.length - 1; i++) {
+    const [t0, x0, y0] = path[i], [t1, x1, y1] = path[i + 1];
+    if (t <= t1) { const p = inOut(prog(t, t0, t1)); return [lerp(x0, x1, p), lerp(y0, y1, p)]; }
+  }
+  const l = path[path.length - 1];
+  return [l[1], l[2]];
+}
+
+window.render = (t) => {
+  const ms = 1000 + t * 1000;
+  // office
+  const desks = figs.map((fig, i) => ({ fig, state: deskAt(i, t)[0], cx: spots[i].cx, by: spots[i].by }));
+  drawScene($('#office').getContext('2d'), { w: W, h: H, desks, board: boardAt(t), dark: false }, ms);
+  plates.forEach((el, i) => {
+    const [state, note] = deskAt(i, t);
+    el.dataset.state = state;
+    el.querySelector('.note span').textContent = note;
+  });
+
+  // camera: slow push while asleep, settle when the team wakes, dip out for the outro
+  const cam = $('#camera');
+  const push = t < 6 ? lerp(0.97, 1.0, inOut(prog(t, 0, 6))) : 1.0;
+  const pop = t >= 6 && t < 6.4 ? 1 + 0.012 * Math.sin(prog(t, 6, 6.4) * Math.PI) : 1;
+  const exit = outCubic(prog(t, 17.0, 17.2));
+  cam.style.transform = `scale(${push * pop * (1 - 0.08 * exit)}) translateY(${exit * 40}px)`;
+  cam.style.opacity = 1 - exit;
+  show(cam, t < 17.25);
+
+  // goal composer (3.0 – 6.0)
+  const dimIn = prog(t, 3.0, 3.25), dimOut = prog(t, 5.6, 6.0);
+  $('#dim').style.opacity = Math.max(Math.min(dimIn, 1 - dimOut), prog(t, 14.7, 14.95));
+  const comp = $('#composer');
+  const ci = outCubic(prog(t, 3.0, 3.35)), co = Math.pow(prog(t, 5.45, 5.8), 3);
+  comp.style.opacity = ci;
+  comp.style.transform = `translateY(${(1 - ci) * 70 + co * 800}px) scale(${0.97 + 0.03 * ci})`;
+  show(comp, t > 2.95 && t < 5.8);
+  const typed = Math.min(GOAL.length, Math.max(0, Math.floor((t - 3.3) / 0.0625) * 2));
+  const caretOn = Math.floor(t / 0.25) % 2 === 0 || (t > 3.3 && typed < GOAL.length);
+  $('#goal').innerHTML = typed ? `${GOAL.slice(0, typed)}<span id="caret" style="opacity:${caretOn ? 1 : 0}"></span>`
+    : `<span id="caret" style="opacity:${caretOn ? 1 : 0}"></span><span class="ph">Describe what the team should build or fix</span>`;
+  const press = t >= 5.0 && t < 5.15;
+  $('#start').style.transform = press ? 'scale(0.95)' : '';
+  $('#start').style.filter = press ? 'brightness(0.85)' : '';
+
+  // ship dialog (14.75 – 17.0)
+  const ship = $('#ship');
+  const si = outCubic(prog(t, 14.75, 15.1));
+  ship.style.opacity = si * (1 - exit);
+  ship.style.transform = `translateY(${(1 - si) * 70}px) scale(${0.97 + 0.03 * si})`;
+  show(ship, t > 14.7 && t < 17.05);
+  const merged = t >= 16.0;
+  const mb = $('#merge');
+  mb.innerHTML = merged ? '<svg width="20" height="20" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"/></svg>Merged' : 'Merge';
+  mb.style.transform = t >= 16.0 && t < 16.15 ? 'scale(0.95)' : '';
+  mb.style.background = merged ? '#0a8f0a' : '';
+  mb.style.borderColor = merged ? '#0a8f0a' : '';
+  const toast = $('#toast'), ti = outCubic(prog(t, 16.1, 16.35));
+  toast.style.opacity = ti * (1 - exit);
+  toast.style.transform = `translateX(-50%) translateY(${(1 - ti) * 30}px)`;
+  show(toast, t > 16.1 && t < 17.05);
+
+  // cursor
+  const cur = $('#cursor');
+  let at = null;
+  if (t < 6) at = cursorAt(t, [[4.45, 1300, 980], [4.95, 1462, 676]]);
+  else if (t > 14) at = cursorAt(t, [[15.35, 1180, 1000], [15.95, 1372, 536]]);
+  const curFade = t < 6 ? prog(t, 4.45, 4.6) * (1 - prog(t, 5.3, 5.5)) : prog(t, 15.35, 15.5) * (1 - prog(t, 16.6, 16.85));
+  show(cur, !!at);
+  if (at) {
+    const down = (t >= 5.0 && t < 5.15) || (t >= 16.0 && t < 16.15);
+    cur.style.transform = `translate(${at[0] - 8}px, ${at[1] - 4}px) scale(${down ? 0.86 : 1})`;
+    cur.style.opacity = curFade;
+  }
+
+  // outro (17.15 – end)
+  const outro = $('#outro');
+  show(outro, t >= 17.2);
+  const pin = (sel, a, dy = 40) => {
+    const p = outCubic(prog(t, a, a + 0.35));
+    const el = $(sel);
+    el.style.opacity = p;
+    const base = sel === '#cmd' ? 'translateX(-50%) ' : '';
+    el.style.transform = `${base}translateY(${(1 - p) * dy}px)`;
+  };
+  portraits.forEach((c, i) => {
+    const a = 17.25 + i * 0.06, p = prog(t, a, a + 0.3);
+    c.style.opacity = clamp(p * 2);
+    c.style.transform = `translateY(${(1 - outBack(p)) * 50}px)`;
+    drawPortrait(c.getContext('2d'), figs[i], 'done', ms + i * 333, false);
+  });
+  const bp = prog(t, 17.35, 17.7);
+  $('#brand').style.opacity = clamp(bp * 2);
+  $('#brand').style.transform = `scale(${0.85 + 0.15 * outBack(bp)})`;
+  pin('#line', 17.45);
+  pin('#cmd', 17.6);
+  pin('#tag', 17.7, 20);
+
+  captions(t);
+};
+
+window.ready = (async () => {
+  await document.fonts.load('600 22px "Pixelify Sans"');
+  await document.fonts.load('700 74px "Pixelify Sans"');
+  await document.fonts.load('800 150px Inter');
+  await document.fonts.ready;
+  await Promise.all([...document.images].map((i) => i.decode()));
+  window.render(0);
+  return true;
+})();
+</script>
+</body>
+</html>
