@@ -68,6 +68,14 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
   return json as T;
 }
 
+/** Send a file's bytes as they are (a recording), and read the JSON answer. */
+export async function postRaw<T = unknown>(path: string, data: Blob): Promise<T> {
+  const res = await fetch(path, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': data.type || 'application/octet-stream' }, body: data });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError((json as { error?: string }).error ?? `${res.status} ${res.statusText}`, res.status);
+  return json as T;
+}
+
 /** A URL for an element that cannot send headers (an <img>): the token goes in the query. */
 export function authedUrl(path: string): string {
   return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;

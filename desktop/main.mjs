@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, session, shell, systemPreferences } from 'electron';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let server;
@@ -33,7 +33,33 @@ async function start() {
   // Members' browsers run in Electron's own Chromium (offscreen windows), so nothing needs installing.
   const { electronProvider } = await import(join(here, '..', 'dist', 'browser', 'electron.js'));
   server = await startServer({ uiDir: join(here, '..', 'dist-ui'), browser: electronProvider({ BrowserWindow, session }) });
+  allowMicrophone(new URL(server.url).origin);
   createWindow();
+}
+
+// The mic button (voice input) records in covibe's own page. Only that page
+// may use the microphone, never a web page shown inside it (a run's preview);
+// macOS asks you once and remembers the answer. Other permissions stay as
+// Electron grants them (notifications).
+function allowMicrophone(origin) {
+  const ours = (url) => {
+    try {
+      return new URL(url).origin === origin;
+    } catch {
+      return false;
+    }
+  };
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback, details) => {
+    if (permission !== 'media') return callback(true);
+    const audioOnly = (details.mediaTypes ?? []).every((t) => t === 'audio');
+    if (!audioOnly || !details.isMainFrame || !ours(details.requestingUrl)) return callback(false);
+    if (process.platform !== 'darwin') return callback(true);
+    systemPreferences.askForMediaAccess('microphone').then(callback, () => callback(false));
+  });
+  session.defaultSession.setPermissionCheckHandler((_wc, permission, requestingOrigin, details) => {
+    if (permission !== 'media') return true;
+    return details.isMainFrame !== false && ours(requestingOrigin) && details.mediaType !== 'video';
+  });
 }
 
 function createWindow() {

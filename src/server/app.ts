@@ -33,9 +33,10 @@ import {
 } from '../skills.js';
 import { CodexAuthError } from '../connections/codex-auth.js';
 import { ConnectionError, Connections, listModels, openInBrowser, startLogin, type NewConnection } from '../connections/store.js';
-import { McpAuthError, signInStatus, signOut, startSignIn } from '../connections/mcp-auth.js';
+import { forgetClient, McpAuthError, setClient, signInStatus, signOut, startSignIn } from '../connections/mcp-auth.js';
 import { stopMcpProxy } from '../connections/mcp-proxy.js';
 import { MAIN_ACCOUNT, type ProviderModel } from '../connections/types.js';
+import { Voice, VoiceError, type VoiceSettings } from '../voice.js';
 import { backendEnv, BackendError } from '../runner/backend.js';
 import type { EnvironmentInfo, PlanUsage } from '../runner/types.js';
 import { ARCHITECT, design } from './designer.js';
@@ -78,6 +79,8 @@ export interface ServerOptions {
   runner?: AgentRunner;
   /** Claude accounts and providers (Settings → Advanced); defaults to the library's home. */
   connections?: Connections;
+  /** Voice input (tests give one whose engines are fakes). */
+  voice?: Voice;
   /** Fixed token (tests); otherwise random per start. */
   token?: string;
   uiDir?: string;
@@ -102,6 +105,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const library = opts.library ?? new Library();
   const runner = opts.runner ?? new ClaudeSdkRunner();
   const connections = opts.connections ?? new Connections(library.home);
+  const voice = opts.voice ?? new Voice(library.home, connections.secrets, connections);
   if (runner.usage && !connections.usageReader) connections.usageReader = (env) => runner.usage!(env);
   const token = opts.token ?? randomBytes(24).toString('hex');
   const uiDir = opts.uiDir ?? UI_DIR;
@@ -638,10 +642,21 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     ['POST', '/api/plugins/github/scan', (_p, body) => plugins.scanGithub(str(body, 'url'))],
     ['POST', '/api/plugins/github/review', (_p, body) => plugins.reviewGithub(str(body, 'url'), str(body, 'id', true))],
     ['POST', '/api/plugins/github/install', (_p, body) => plugins.installGithub(str(body, 'url'), str(body, 'id', true), (body as { policy?: unknown }).policy)],
+    // MCP servers you add by hand: an address, a command or a JSON snippet, made into a plugin of your own.
+    ['POST', '/api/plugins/mcp/review', (_p, body) => plugins.reviewMcp(mcpInput(body))],
+    ['POST', '/api/plugins/mcp/add', (_p, body) => {
+      const b = body as { policy?: unknown; values?: unknown };
+      return withUsage(plugins.addMcpServer(mcpInput(body), b.policy, isRecord(b.values) ? b.values : {}));
+    }],
     ['GET', '/api/plugins/:name', (p) => withUsage(plugins.getPlugin(p.name!))],
     ['PUT', '/api/plugins/:name/policy', (p, body) => withUsage(plugins.setPolicy(p.name!, (body as { policy?: unknown }).policy))],
     ['PUT', '/api/plugins/:name/everyone', (p, body) => withUsage(plugins.setEveryone(p.name!, !!(body as { everyone?: unknown }).everyone))],
     ['POST', '/api/plugins/:name/approve', (p) => withUsage(plugins.approvePlugin(p.name!))],
+    ['PUT', '/api/plugins/:name/variables', (p, body) => {
+      const values = (body as { values?: unknown }).values;
+      if (!isRecord(values)) throw new BadRequest('"values" must be an object');
+      return withUsage(plugins.setPluginVariables(p.name!, values));
+    }],
     ['POST', '/api/plugins/:name/update', async (p) => withUsage(await plugins.updatePlugin(p.name!))],
     ['DELETE', '/api/plugins/:name', (p) => (plugins.deletePlugin(p.name!), { ok: true })],
     // Sign covibe in to a plugin's remote MCP server; the browser does the sign-in and the page watches its status.
@@ -653,11 +668,43 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       return { needed: true, url, opened: await openInBrowser(url) };
     }],
     ['GET', '/api/plugins/:name/sign-in/:server', (p) => signInStatus(p.name!, p.server!)],
+    // Your own OAuth app, for servers that do not let covibe register itself.
+    ['PUT', '/api/plugins/:name/sign-in/:server/client', (p, body) => {
+      plugins.signInTarget(p.name!, p.server!);
+      const secret = (body as { clientSecret?: unknown }).clientSecret;
+      setClient(p.name!, p.server!, str(body, 'clientId'), typeof secret === 'string' ? secret : undefined);
+      return withUsage(plugins.getPlugin(p.name!));
+    }],
+    ['DELETE', '/api/plugins/:name/sign-in/:server/client', (p) => {
+      plugins.signInTarget(p.name!, p.server!);
+      forgetClient(p.name!, p.server!);
+      return withUsage(plugins.getPlugin(p.name!));
+    }],
     ['DELETE', '/api/plugins/:name/sign-in/:server', (p) => {
       plugins.signInTarget(p.name!, p.server!);
       signOut(p.name!, p.server!);
       return withUsage(plugins.getPlugin(p.name!));
     }],
+
+    // ---- voice input (the mic button); recordings come in at POST /api/voice/transcribe
+    ['GET', '/api/voice', () => voice.status()],
+    ['PUT', '/api/voice', (_p, body) => {
+      if (!isRecord(body)) throw new BadRequest('expected an object');
+      const text = (k: string) => (typeof body[k] === 'string' ? (body[k] as string) : undefined);
+      const key = (k: string) => (body[k] === null ? null : text(k));
+      return voice.update({
+        engine: text('engine') as VoiceSettings['engine'] | undefined,
+        language: text('language'),
+        model: text('model'),
+        whisperPath: text('whisperPath'),
+        openaiConnection: text('openaiConnection'),
+        openaiModel: text('openaiModel'),
+        openaiKey: key('openaiKey'),
+        elevenlabsKey: key('elevenlabsKey'),
+      });
+    }],
+    ['POST', '/api/voice/models/:id', (p) => voice.startDownload(p.id!)],
+    ['DELETE', '/api/voice/models/:id', (p) => voice.deleteModel(p.id!)],
 
     // ---- project brain
     ['GET', '/api/projects/:pid/brain', async (p) => {
@@ -1059,6 +1106,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         return await streamBrowser(pid!, rid!, agent!, req, res);
       }
 
+      // A recording from the mic button: raw WAV, not JSON (it can be minutes long).
+      if (url.pathname === '/api/voice/transcribe' && req.method === 'POST') return send(res, 200, await voice.transcribe(await readRaw(req, 64 << 20)));
+
       if (url.pathname === '/api/events' && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
         res.write(': connected\n\n');
@@ -1086,7 +1136,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           ? 409
           : err instanceof NotFound
             ? 404
-            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof McpAuthError || err instanceof BackendError
+            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof McpAuthError || err instanceof BackendError || err instanceof VoiceError
               ? 400
               : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;
@@ -1229,10 +1279,37 @@ function gitOp(repo: string, op: string, b: Record<string, unknown>): Promise<un
   return serially(repo, async () => (await fn()) ?? { ok: true });
 }
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** An MCP server to add, from a request. */
+function mcpInput(body: unknown): plugins.McpInput {
+  const b = isRecord(body) ? body : {};
+  const h = isRecord(b.header) ? b.header : undefined;
+  return {
+    config: str(b, 'config'),
+    name: typeof b.name === 'string' ? b.name : undefined,
+    description: typeof b.description === 'string' ? b.description : undefined,
+    header: h && typeof h.name === 'string' && typeof h.value === 'string' ? { name: h.name, value: h.value } : undefined,
+  };
+}
+
 function str(body: unknown, key: string, allowEmpty = false): string {
   const v = (body as Record<string, unknown>)?.[key];
   if (typeof v !== 'string' || (!allowEmpty && !v.trim())) throw new BadRequest(`"${key}" is required`);
   return v;
+}
+
+async function readRaw(req: IncomingMessage, limit: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const c of req) {
+    size += (c as Buffer).length;
+    if (size > limit) throw new BadRequest('request too large');
+    chunks.push(c as Buffer);
+  }
+  return Buffer.concat(chunks);
 }
 
 async function readJson(req: IncomingMessage): Promise<unknown> {

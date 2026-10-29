@@ -9,6 +9,8 @@ import { accessToken, signedInUrl } from './mcp-auth.js';
 // proxy forwards them to the real server with covibe's token, renewing it when
 // it runs out. The token never reaches a member's environment or files. The
 // address carries a random key, so other programs on this computer cannot use it.
+// A remote server that takes an API key instead (in its address or a header)
+// goes through here too: the proxy adds the key saved for the plugin.
 
 let proxy: { server: Server; base: string } | undefined;
 let starting: Promise<string> | undefined;
@@ -17,6 +19,16 @@ let starting: Promise<string> | undefined;
 const DROP_REQUEST = new Set(['host', 'connection', 'keep-alive', 'content-length', 'transfer-encoding', 'authorization', 'accept-encoding', 'proxy-authorization', 'upgrade']);
 /** Response headers that no longer hold once fetch has read (and decompressed) the body. */
 const DROP_RESPONSE = new Set(['connection', 'keep-alive', 'content-length', 'content-encoding', 'transfer-encoding']);
+
+/** Remote servers reached with saved keys: the real address and headers, keys filled in. */
+const keyed = new Map<string, { url: string; headers: Record<string, string> }>();
+
+/** Set (or with undefined, clear) where a plugin's server is reached with its saved keys. */
+export function setKeyedTarget(plugin: string, server: string, target: { url: string; headers: Record<string, string> } | undefined) {
+  const k = `${plugin}/${server}`;
+  if (target) keyed.set(k, target);
+  else keyed.delete(k);
+}
 
 /** Start the proxy (once per process); resolves to its base address. */
 export function startMcpProxy(): Promise<string> {
@@ -60,7 +72,9 @@ async function handle(key: string, req: IncomingMessage, res: ServerResponse) {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     const [, given, plugin, server, ...rest] = url.pathname.split('/').map(decodeURIComponent);
     if (given !== key || !plugin || !server || rest.length) return fail(404, 'not found');
-    const target = signedInUrl(plugin, server);
+    const signedIn = signedInUrl(plugin, server);
+    const withKeys = keyed.get(`${plugin}/${server}`);
+    const target = signedIn ?? withKeys?.url;
     if (!target) return fail(401, `covibe is not signed in to ${plugin}'s ${server} server; sign in on its Plugins page`);
 
     // MCP requests are small JSON; keeping the body lets a refused token be renewed and the request sent again.
@@ -69,20 +83,21 @@ async function handle(key: string, req: IncomingMessage, res: ServerResponse) {
     const body = chunks.length ? Buffer.concat(chunks) : undefined;
     const headers: Record<string, string> = {};
     for (const [name, value] of Object.entries(req.headers)) if (value !== undefined && !DROP_REQUEST.has(name)) headers[name] = Array.isArray(value) ? value.join(', ') : value;
+    for (const [name, value] of Object.entries(withKeys?.headers ?? {})) headers[name.toLowerCase()] = value;
     const upstream = new URL(target);
     for (const [k, v] of url.searchParams) upstream.searchParams.append(k, v);
 
     const abort = new AbortController();
     res.on('close', () => abort.abort());
-    const send = (token: string) => fetch(upstream, { method: req.method, headers: { ...headers, authorization: `Bearer ${token}` }, body, signal: abort.signal, redirect: 'manual' });
-    let token: string;
+    const send = (token?: string) => fetch(upstream, { method: req.method, headers: token ? { ...headers, authorization: `Bearer ${token}` } : headers, body, signal: abort.signal, redirect: 'manual' });
+    let token: string | undefined;
     try {
-      token = await accessToken(plugin, server);
+      if (signedIn) token = await accessToken(plugin, server);
     } catch (err) {
       return fail(401, (err as Error).message);
     }
     let answer = await send(token);
-    if (answer.status === 401) {
+    if (answer.status === 401 && signedIn) {
       void answer.body?.cancel();
       try {
         answer = await send(await accessToken(plugin, server, { force: true }));

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { desktop, get, post, type ChatItem, type DiffResult, type RunDetail, type RunEvent, type RunSummary, type UndoResult } from '../api';
 import { Composer } from '../components/Composer';
+import { MicButton, withSpoken } from '../components/MicButton';
 import { deskNote, DeskPill, deskState, OfficeLegend, OfficeStage, Portrait, questionDesk, useFigures, type DeskState } from '../components/Office';
 import {
   IconAlert,
@@ -872,6 +873,7 @@ function Chat({ detail, projectId, selected, onSelect, onSent, single }: { detai
                 }
               }}
             />
+            <MicButton disabled={!hasSession && !queueMode} onText={(t) => setText((prev) => withSpoken(prev, t))} />
             <button className="btn primary icon-btn" disabled={!text.trim() || sending} onClick={() => void send()} aria-label="Send" style={{ borderRadius: 14 }}>
               <IconSend />
             </button>

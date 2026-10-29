@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { post } from '../api';
 import { go, useData } from '../data';
 import { IconBranch, IconPlay, IconQuestion } from './icons';
+import { MicButton, withSpoken } from './MicButton';
 import { useAction } from './ui';
 
 const LAST = 'covibe-composer';
@@ -134,6 +135,7 @@ export function Composer({
           </select>
         )}
         <span className="grow" />
+        <MicButton onText={(t) => (setText((prev) => withSpoken(prev, t)), ref.current?.focus())} />
         <span className="tiny faint">
           <span className="kbd">⌘</span> <span className="kbd">↩</span>
         </span>

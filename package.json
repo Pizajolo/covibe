@@ -92,7 +92,12 @@
       ],
       "darkModeSupport": true,
       "hardenedRuntime": true,
-      "identity": null
+      "identity": null,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "covibe turns what you say into the mic button into text for your goals and chats."
+      },
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "dmg": {
       "title": "covibe"

@@ -6,6 +6,7 @@ import { get, post, type HelperDetail, type HelperItem } from '../api';
 import { useLive } from '../data';
 import { money } from '../format';
 import { IconCheck, IconPlus, IconSend, IconSparkle, IconSpinner, IconStop, IconX } from './icons';
+import { MicButton, withSpoken } from './MicButton';
 import { Markdown } from './Markdown';
 import { useAction } from './ui';
 
@@ -136,6 +137,7 @@ export function GitHelper({
             }
           }}
         />
+        <MicButton disabled={busy} onText={(t) => setText((prev) => withSpoken(prev, t))} />
         <button className="btn primary" disabled={busy || !text.trim()} aria-label="Send">
           <IconSend />
         </button>

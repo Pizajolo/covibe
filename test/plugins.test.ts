@@ -64,7 +64,15 @@ describe('plugin library', () => {
       { kind: 'lsp', name: 'ts', command: 'typescript-language-server --stdio', env: [] },
     ]);
     // A remote server covibe can sign in to says whether it is.
-    expect(p.contents.remotes).toEqual([{ kind: 'mcp', name: 'docs', url: 'https://mcp.example.com/mcp', env: ['DOCS_TOKEN'], signIn: { signedIn: false } }]);
+    expect(p.contents.remotes).toEqual([
+      { kind: 'mcp', name: 'docs', url: 'https://mcp.example.com/mcp', env: ['DOCS_TOKEN'], signIn: { signedIn: false }, client: { hasSecret: false, callbackUrl: 'http://127.0.0.1:47815/callback' } },
+    ]);
+    // The keys its servers need, none saved yet.
+    expect(p.variables.map((v) => [v.name, v.servers, v.saved])).toEqual([
+      ['DB_KEY', ['db'], false],
+      ['DATABASE_URL', ['db'], false],
+      ['DOCS_TOKEN', ['docs'], false],
+    ]);
     expect(p.contents.ignored).toEqual(
       expect.arrayContaining([
         'settings.json (settings it would apply to Claude Code)',
@@ -100,7 +108,8 @@ describe('plugin library', () => {
     expect(hooks.hooks.Stop[0].hooks[0]).toEqual({ type: 'prompt', prompt: 'Check the work is done.' });
     // Local servers go through the launcher; a remote one is left as is.
     const mcp = JSON.parse(readFileSync(join(files, '.mcp.json'), 'utf8')).mcpServers;
-    expect(mcp.db).toMatchObject({ type: 'stdio', command: process.execPath, env: { DB_URL: '${DATABASE_URL}', ELECTRON_RUN_AS_NODE: '1' } });
+    // Its variables are filled in by the launcher, not by Claude Code.
+    expect(mcp.db).toMatchObject({ type: 'stdio', command: process.execPath, env: { ELECTRON_RUN_AS_NODE: '1' } });
     expect(mcp.db.args.slice(-3)).toEqual([spec, 'mcp', 'db']);
     expect(mcp.docs).toEqual({ type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: 'Bearer ${DOCS_TOKEN}' } });
     const lsp = JSON.parse(readFileSync(join(files, '.lsp.json'), 'utf8'));
@@ -110,7 +119,7 @@ describe('plugin library', () => {
       plugin: 'demo',
       root: files,
       hooks: [{ command: 'sh "${CLAUDE_PLUGIN_ROOT}/hooks/check.sh"' }],
-      mcp: { db: { command: 'npx', args: ['-y', '@example/db-mcp', '--key', '${DB_KEY}'], env: ['DB_URL'] } },
+      mcp: { db: { command: 'npx', args: ['-y', '@example/db-mcp', '--key', '${DB_KEY}'], env: ['DB_URL'], values: { DB_URL: '${DATABASE_URL}' } } },
       lsp: { ts: { command: 'typescript-language-server', args: ['--stdio'] } },
     });
 

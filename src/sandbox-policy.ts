@@ -4,6 +4,7 @@
 // shows it.
 import { existsSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import type { KeysLocation } from './connections/plugin-keys.js';
 
 /** What the user allows one plugin's programs. */
 export interface SandboxPolicy {
@@ -19,8 +20,10 @@ export interface SandboxPolicy {
 export interface LaunchEntry {
   command: string;
   args?: string[];
-  /** Variables from the caller's environment the program is given (an MCP or LSP server's env). */
+  /** Variables the program is given (an MCP or LSP server's env). */
   env?: string[];
+  /** Their values as the server's config gives them: plain text, or ${VAR} filled in from the plugin's keys and the caller's environment. */
+  values?: Record<string, string>;
 }
 
 /** sandbox.json: everything the launcher needs, written by covibe where the plugin cannot write. */
@@ -35,6 +38,8 @@ export interface LaunchSpec {
   monitors: LaunchEntry[];
   mcp: Record<string, LaunchEntry>;
   lsp: Record<string, LaunchEntry>;
+  /** Where the keys saved for this plugin are, when it has any. */
+  keys?: KeysLocation;
 }
 
 /**
@@ -114,6 +119,21 @@ export function substitute(text: string, spec: LaunchSpec, env?: NodeJS.ProcessE
     if (!env) return whole;
     return env[name] ?? fallback ?? '';
   });
+}
+
+/**
+ * A server's environment: the safe basics, then each variable it declares,
+ * its value from its config (${VAR} filled in from `source`) or else taken
+ * from `source` as it is.
+ */
+export function serverEnv(env: NodeJS.ProcessEnv, spec: LaunchSpec, entry: LaunchEntry, source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out = childEnv(env, spec);
+  for (const k of entry.env ?? []) {
+    const template = entry.values?.[k];
+    const v = template !== undefined ? substitute(template, spec, source) : source[k];
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
 }
 
 /** Quote one word for sh. */
