@@ -134,6 +134,92 @@ export interface PreviewSite {
   label: string;
 }
 
+/** How to run the app, as the App panel edits it (see apps/config.ts). */
+export interface RunAppSettings {
+  runtime?: 'sandbox' | 'docker';
+  setup?: string;
+  command?: string;
+  port?: number;
+  path?: string;
+  image?: string;
+  dockerfile?: string;
+  compose?: string;
+  service?: string;
+}
+
+/** A run's app as the App panel shows it. */
+export interface RunApp {
+  /** The app, once someone started it. */
+  app?: {
+    status: 'starting' | 'running' | 'stopping' | 'stopped' | 'failed';
+    url: string;
+    port: number;
+    path: string;
+    folder: string;
+    runtime: 'sandbox' | 'docker';
+    by: string;
+    startedAt: string;
+    readyAt?: string;
+    stoppedAt?: string;
+    reason?: string;
+    settings: RunAppSettings;
+    source: 'given' | 'team' | 'remembered' | 'detected';
+  };
+  /** The end of its log. */
+  log: string;
+  /** How Start would run it now (team file, last time, or detected), or why covibe cannot tell. */
+  suggested?: RunAppSettings & { source: 'given' | 'team' | 'remembered' | 'detected' };
+  suggestError?: string;
+  /** Where Start runs it from. */
+  folder?: string;
+  /** Why it cannot be started from here (the run's files are gone, say). */
+  unavailable?: string;
+  dockerAvailable: boolean;
+}
+
+/** Where the app panel shows the app: a view in front of it (see apps/view.ts). */
+export interface AppViewInfo {
+  port: number;
+}
+
+/** One comment a person pinned on a run's result. */
+export interface FeedbackItem {
+  id: string;
+  /** What it is about: a file of the result, or a page of the running app. */
+  target: 'file' | 'app';
+  /** The file (target file) or the page's address (target app, e.g. "/pricing"). */
+  path: string;
+  kind: 'video' | 'audio' | 'image' | 'pdf' | 'page' | 'text' | 'file';
+  /** Video or audio: the moment, and the end of a stretch, in seconds. */
+  at?: number;
+  until?: number;
+  /** Image (or a video's frame): the area, as fractions of the width and height. */
+  region?: { x: number; y: number; width: number; height: number };
+  /** PDF: the page. */
+  page?: number;
+  /** Text: the passage it is about. */
+  quote?: string;
+  /** Web page: the element picked. */
+  element?: { selector: string; tag: string; text: string; title?: string };
+  comment: string;
+  createdAt: string;
+}
+
+export interface FeedbackList {
+  items: FeedbackItem[];
+  /** Earlier feedback sent from this run: the runs it started. */
+  sent: { runId: string; at: string; count: number }[];
+}
+
+/** A file of the result put on disk to open in its own app. */
+export interface OpenedFile {
+  path: string;
+  /** True when it is a copy from the result branch (edits there do not change the run). */
+  copy: boolean;
+  /** The server opened it itself (no desktop app to do it). */
+  launched?: boolean;
+}
+
 export interface DiffResult {
   /** status and by: a run in a plain folder (added, modified or deleted, and by whom). */
   files: { path: string; additions: number; deletions: number; status?: 'added' | 'modified' | 'deleted'; by?: string[] }[];

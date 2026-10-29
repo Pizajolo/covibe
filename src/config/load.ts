@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { Ajv2020, type ErrorObject } from 'ajv/dist/2020.js';
 import jsonata from 'jsonata';
 import { parseDocument } from 'yaml';
+import type { AppConfig } from '../apps/config.js';
 import type {
   AgentConfig,
   BackendConfig,
@@ -56,6 +57,11 @@ function resolveSandbox(tools: string[], team: RawSandbox | undefined, agent: Ra
   if (merged.enabled === false) return undefined;
   const expand = (p: string) => (p === '~' ? homedir() : p.startsWith('~/') ? join(homedir(), p.slice(2)) : p);
   return { network: merged.network ?? DEFAULT_SANDBOX_NETWORK, allowWrite: (merged.allow_write ?? DEFAULT_SANDBOX_WRITE).map(expand) };
+}
+
+function resolveAppConfig(a: RawApp): AppConfig {
+  const { ready_timeout_s, ...rest } = a;
+  return { ...rest, ...(ready_timeout_s !== undefined ? { readyTimeoutS: ready_timeout_s } : {}) };
 }
 
 export class ConfigError extends Error {
@@ -149,6 +155,21 @@ interface RawAgent {
   skills?: string[];
   plugins?: string[];
   browser?: boolean;
+  app?: boolean;
+}
+interface RawApp {
+  runtime?: 'sandbox' | 'docker';
+  setup?: string;
+  command?: string;
+  port?: number;
+  path?: string;
+  env?: Record<string, string>;
+  ready_timeout_s?: number;
+  network?: string[];
+  image?: string;
+  dockerfile?: string;
+  compose?: string;
+  service?: string;
 }
 interface RawBranch {
   agent: string;
@@ -182,7 +203,9 @@ interface RawTeam {
     skills?: string[];
     plugins?: string[];
     browser?: boolean;
+    app?: boolean;
   };
+  app?: RawApp;
   brain?: { curator?: string; curate?: 'after_run' | 'manual'; min_proposals?: number };
   lead?: string | null;
   agents: Record<string, RawAgent>;
@@ -277,6 +300,7 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
       skills: [...new Set([...(defaults.skills ?? []), ...(a.skills ?? [])])],
       plugins: [...new Set([...(defaults.plugins ?? []), ...(a.plugins ?? [])])],
       browser: a.browser ?? defaults.browser ?? false,
+      app: a.app ?? defaults.app ?? (a.tools.includes('Bash') || (a.browser ?? defaults.browser ?? false)),
     };
     if (a.scope?.write && !agents[name].writes) {
       problems.push(`${where}/scope: has a write scope but no tool that can write`);
@@ -354,8 +378,12 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
   const lead = raw.lead === null ? undefined : raw.lead ?? ('manager' in agents ? 'manager' : undefined);
   if (lead && !agents[lead]) problems.push(`/lead: unknown agent "${lead}"`);
 
+  if (raw.app?.runtime !== 'docker' && (raw.app?.image || raw.app?.dockerfile || raw.app?.compose)) problems.push('/app: image, dockerfile and compose need runtime: docker');
+  if (raw.app?.compose && !raw.app.service) problems.push('/app/service: say which service of the compose file serves the app');
+
   if (problems.length) throw new ConfigError(file, problems);
   return {
+    ...(raw.app ? { app: resolveAppConfig(raw.app) } : {}),
     brain: { curator, curate: raw.brain?.curate ?? 'after_run', minProposals: raw.brain?.min_proposals ?? 1 },
     lead,
     name: raw.name,

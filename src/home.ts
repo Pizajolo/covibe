@@ -29,6 +29,11 @@ export function folderRunsRoot(folder: string): string {
   return join(covibeHome(), 'folder-runs', repoKey(folder));
 }
 
+/** Where a project's running apps keep their state and logs (see apps/manager.ts). */
+export function appsRoot(repo: string): string {
+  return join(covibeHome(), 'apps', repoKey(repo));
+}
+
 /** The project brain: notes every member reads and only the curator writes. */
 export function brainRoot(repo: string): string {
   return join(covibeHome(), 'brains', repoKey(repo));

@@ -53,7 +53,7 @@ To try the UI in a browser instead, run `covibe app`.
 | Screen | What it shows and does |
 |---|---|
 | **Home** | Today's and this week's estimated spend, tokens, members working now, run outcomes, gate pass rate; your plan's 5-hour and weekly usage as Claude Code reports it, with reset countdowns (also at the bottom of the sidebar); spend per day and per team member; live runs and recent ones. Give a new goal or ask a question right there (⌘N anywhere). |
-| **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; a member driving a browser gets a browser button above its desk that opens its browser live, or what it saw (see [Preview and live browser](#preview-and-live-browser)); click a desk for the member's details, chat and activity), **Plan** (the manager's plan, readable: its summary and every task by owner with what "done" means and how far that member is; below it, the requests members made of each other and every other step's latest report, such as the review's findings; called **Reports** when the team has no planning step), **Board** (a column per workflow step, a card per member and fix round, gate results; a card on a teammate's request says whose), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch), **Preview** (the result's files: web pages open as a site you can click through, Markdown is rendered, everything else shows as text). Stop a run, or start a **new goal on this result**. When a run succeeds, covibe asks what to do with its result: **merge** it into your branch (and push), **open a pull request**, or just **push** the branch (**Ship result** brings that back later). |
+| **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; a member driving a browser gets a browser button above its desk that opens its browser live, or what it saw (see [Preview and live browser](#preview-and-live-browser)); click a desk for the member's details, chat and activity), **Plan** (the manager's plan, readable: its summary and every task by owner with what "done" means and how far that member is; below it, the requests members made of each other and every other step's latest report, such as the review's findings; called **Reports** when the team has no planning step), **Board** (a column per workflow step, a card per member and fix round, gate results; a card on a teammate's request says whose), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch), **Preview** (the result's files: web pages open as a site you can click through, videos and audio play, images and PDFs show, Markdown is rendered, office files open in Word, Excel or PowerPoint, everything else shows as text; see [Feedback on the result](#feedback-on-the-result)), **App** (the project's app running in the sandbox or in Docker, to use live; see [Running the app](#running-the-app)). Stop a run, start a **new goal on this result**, or **send feedback**: comments you pinned on a moment of a video, an area of an image, a passage or an element of a page or the app, sent as a new goal. When a run succeeds, covibe asks what to do with its result: **merge** it into your branch (and push), **open a pull request**, or just **push** the branch (**Ship result** brings that back later). |
 | **Voice input** | A mic button next to the goal box and every chat: talk, and the text appears in the box. It runs on your Mac with whisper.cpp, or uses OpenAI or ElevenLabs (see [Voice input](#voice-input)). |
 | **Chat** | While a member is working, choose **Now** (it reads your message between tool calls and adjusts), **Stop and redirect** (it ends its current turn and answers you first) or **Next turn**. After the run, the member resumes its session and answers right away; anything it changes is scope-checked and merged into the run's branch. |
 | **Ask a question** | A read-only session with one member in your project: it can read the code but not change it. Follow-up questions continue the same session. |
@@ -347,6 +347,7 @@ The rules in the team file are enforced in code, not left to prompts:
 | Messaging | `send_message` only accepts the agent's `can_message` targets |
 | Requests | `request_work` only accepts the agent's `can_request` targets; the teammate's turn has its own tools, write scope and sandbox, and two members never wait on each other |
 | Plugins | Their hooks, MCP and LSP servers and monitors start only through covibe's sandbox launcher, with each plugin's approved network and write permissions and without your home folder or environment; an update that changes what a plugin runs waits for approval |
+| Apps | A project's app runs in the OS sandbox (its folder, temp and package caches writable; the team's sandbox domains) with a clean environment, or in a Docker container published on 127.0.0.1 only. Members without Bash cannot choose what it runs, and no member can switch it to Docker |
 | Browser | `browser_*` tools only for members with `browser: true`. A sandboxed member's browser reaches its `network` domains plus local addresses; `file://` pages are refused (its working folder is served over http instead) |
 
 **Worktrees.** With `isolation: worktree` (the default), the run gets an integration branch `covibe/<run-id>`, and
@@ -707,6 +708,101 @@ and following new ones, and the address it went to, which you can open in your o
 only when it takes a screenshot and reads it (or a browser tool returns one), so that is what the preview shows.
 covibe keeps the newest 40 images per member and run in the project's `.covibe/covibe.db`.
 
+## Running the app
+
+Members can run the project's app (a web app's dev server, a site) so they, their teammates and you can use it:
+the builder starts it to check its work, the reviewer or QA opens the same app in its browser and tries the
+change, and you use it in the run's **App** tab. Ask a member in chat to run it, or press **Start the app**.
+
+**Members' tools.** Members with Bash or a browser get these by default (`app: false` takes them away, `app: true`
+gives them to anyone):
+
+| Tool | What it does |
+|---|---|
+| `app_start` | Start the app from the member's working folder and wait until it answers; returns its address. If it already runs (a teammate started it), returns that address; `restart: true` starts it again from the member's folder. Members with Bash may give the `command` and `setup`; members without Bash start it only the way the team file, the project or covibe's detection says |
+| `app_status` | Whether it runs, where, from which folder and who started it; or what `app_start` would run |
+| `app_logs` | The end of what its setup and start commands printed, optionally only lines with some text |
+| `app_stop` | Stop it |
+
+The app gets a free port in `$PORT` (and `HOST=127.0.0.1`) and must listen on it. It keeps running between turns
+and steps and after the run, until someone stops it, its run's worktrees are removed, nobody used it for 30 minutes,
+or covibe quits. One app runs per run. A run started with `covibe run` in a terminal keeps a running app up until
+you press Ctrl-C.
+
+**What runs.** In this order: what a member or you gave, the team file's `app:` section, what last started
+successfully in this project (kept in `.covibe/app.json`), or what covibe detects: a `dev`, `start`, `serve` or
+`preview` script in package.json (with the port flags Vite, Astro, Nuxt and Next need, and `npm`, `pnpm`, `yarn` or
+`bun` install by the lockfile), `manage.py`, or an `index.html` served with Python.
+
+```yaml
+app:
+  runtime: sandbox                 # sandbox (default) or docker
+  setup: npm install               # before every start
+  command: npm run dev -- --port $PORT --host 127.0.0.1
+  path: /dashboard                 # the page to open first
+  env: { API_URL: http://127.0.0.1:9999 }
+  network: [api.stripe.com]        # sandbox: domains besides the team's sandbox list
+  ready_timeout_s: 180
+```
+
+**In the sandbox** (the default) the app runs in the same OS sandbox as members' shell commands: it writes only in
+its folder, its temp folder and package caches (not `.git`, `.claude`, `.mcp.json` or `.covibe` there), reaches only
+the team's sandbox domains plus `network`, and gets a clean environment without your keys. On macOS it listens on
+127.0.0.1 itself; on Linux the sandbox has a network of its own, so a bridge inside it carries the port out through
+a Unix socket and covibe listens on the same port outside.
+
+**In Docker** (`runtime: docker`, or **Docker** in the App tab) it runs in a container:
+
+```yaml
+app:
+  runtime: docker
+  image: node:22-bookworm-slim     # the project is mounted at /app; the command runs there
+  setup: npm ci
+  command: npm run dev -- --port $PORT --host 0.0.0.0
+  port: 3000                       # the port inside the container ($PORT); default 3000
+# or: dockerfile: Dockerfile (built and run as it is, or with command)
+# or: compose: compose.yaml and service: web (brought up with docker compose, databases and all)
+```
+
+The container's port is published on 127.0.0.1 only. A container reaches the network as Docker lets it; the
+sandbox's domain list does not apply. With a compose file, covibe adds an override that publishes the service's
+port, and takes the whole project down when the app stops. Members cannot switch the runtime; that is yours (team
+file or App tab).
+
+**The App tab** shows the app live through a view that lets you click elements to comment on them (see below), with
+its log, **Restart**, **Stop**, **Open in browser** and **How it runs** to change the runtime, setup, command, ports
+or Docker settings. What you start is remembered for the project. Starting it from the App tab runs it from the
+run's result (its integration worktree, restored if it was removed; or the folder or checkout the run worked in).
+
+![The App tab: the running app, how it runs, and feedback on its elements](docs/screenshots/app.png)
+
+## Feedback on the result
+
+Point at what should change and send it all to the team as a new goal:
+
+- **Video and audio** play in the Preview tab: **Comment at 0:12**, or **Mark start of a stretch**, play or seek to
+  its end, and comment on the stretch.
+- **Images**: drag over an area to comment on it, or comment on the whole image.
+- **Web pages** of the result and **the running app**: **Comment on an element**, then click it (its selector, its
+  text and the page go with your comment), or comment on the page.
+- **Markdown and text**: select a passage and **Comment on the selection**.
+- **PDFs, office files** and anything else: a comment on the file (with a page for a PDF). Office files (Word,
+  Excel, PowerPoint, Keynote, Pages, Numbers…) open in their own app with **Open in Word** and the like; from a
+  result branch that is a copy, so changes you make there do not change the run.
+
+![Commenting on a stretch of a video](docs/screenshots/feedback-video.png)
+
+Comments are kept with the project (`.covibe/feedback/`) until you send them. Once the run has finished,
+**Send feedback** starts a new goal with the same team on the run's result (its branch, or your folder), listing
+every comment with where it points, for example:
+
+```
+1. On final/teaser.mp4, from 0:02.5 to 0:05.2:
+   This part drags: cut it to one second
+2. On the running app, page /pricing, the element `section.hero > p.price` ("$12"):
+   Show the price per month
+```
+
 ## Notifications
 
 The bell at the top right of the app lists the questions waiting for you and the latest notifications from the past
@@ -743,7 +839,8 @@ All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event t
 `git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit` `agent.usage`
 `workspace.cleaned` `brain.proposed` `brain.decided` `brain.updated` `team.saved` `question.asked`
 `question.escalated` `question.answered` `request.sent` `request.done` `git.proposed` `git.ran` `git.skipped` `run.paused` `run.resumed` `run.restart_scheduled` `run.restart_cancelled`
-`run.restarted` `browser.opened` `browser.page` `browser.control` `browser.closed`
+`run.restarted` `browser.opened` `browser.page` `browser.control` `browser.closed` `app.starting` `app.ready` `app.failed`
+`app.stopped` `feedback.sent`
 
 `agent.finished` carries turns, estimated cost, duration, model and token counts; `usage.limit` carries the plan
 usage Claude Code reports (window, status, utilization, reset time). `message.queued` and `message.delivered` carry
@@ -766,6 +863,10 @@ src/engine/browser.ts      spotting members that drive a browser, and the page t
 src/browser/               covibe's browser: tabs over the DevTools protocol (tab.ts), page snapshots (page-script.ts),
                            members' tools (tools.ts), live tabs and taking control (hub.ts), Playwright and Electron
 src/server/site.ts         a run's files (or a member's folder) served as a website on a port of its own
+src/apps/                  running a project's app: what to run (config.ts), the sandbox launcher and its policy
+                           (launcher.ts, policy.ts), sandbox and Docker processes, state and logs (manager.ts), members'
+                           tools (tools.ts), the view the App tab shows it through (view.ts)
+src/server/feedback.ts     comments pinned on a run's result, and the goal that sends them to the team
 src/events/store.ts        SQLite runs, events, sessions, inbox, questions, images members saw (node:sqlite, WAL)
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
 src/runner/backend.ts      per-agent environment for each backend

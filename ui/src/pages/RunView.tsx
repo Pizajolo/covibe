@@ -17,6 +17,7 @@ import {
   IconInfo,
   IconLoop,
   IconPlan,
+  IconPlay,
   IconQuestion,
   IconRuns,
   IconSend,
@@ -29,6 +30,8 @@ import {
 import { BrowserPreview, viewSrc } from '../components/BrowserView';
 import { PlanTab } from '../components/Plan';
 import { Preview } from '../components/Preview';
+import { AppPanel } from '../components/AppPanel';
+import { FeedbackProvider, useFeedback } from '../components/Feedback';
 import { askedToShip, markAskedToShip, ShipDialog } from '../components/ShipDialog';
 import { Toolbar } from '../components/Toolbar';
 import { AgentStatus, Avatar, Copy, Empty, LoopBadge, Modal, RunStatusPill, useAction, useToast } from '../components/ui';
@@ -36,7 +39,7 @@ import { go, href, useData, useLive } from '../data';
 import { clock, countdown, duration, money, resetTime, tokens, toolText } from '../format';
 import { useNotify } from '../notify';
 
-type Tab = 'office' | 'plan' | 'board' | 'activity' | 'chat' | 'changes' | 'preview';
+type Tab = 'office' | 'plan' | 'board' | 'activity' | 'chat' | 'changes' | 'preview' | 'app';
 type Delivery = 'queue' | 'steer' | 'interrupt';
 
 const DELIVERY: Record<Delivery, { label: string; pending: string; help: (a: string) => string; toast: (a: string) => string }> = {
@@ -104,15 +107,18 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
   if (!detail) return <Toolbar title="Loading…" />;
   const run = detail.summary;
   const isAsk = run.kind === 'ask';
-  const tab: Tab = (['office', 'plan', 'board', 'activity', 'chat', 'changes', 'preview'].includes(tabParam ?? '') ? tabParam : isAsk ? 'chat' : 'office') as Tab;
+  const tab: Tab = (['office', 'plan', 'board', 'activity', 'chat', 'changes', 'preview', 'app'].includes(tabParam ?? '') ? tabParam : isAsk ? 'chat' : 'office') as Tab;
   const setTab = (t: Tab) => go('runs', projectId, runId, t);
   const openChat = (agent: string) => {
     setChatWith(agent);
     setTab('chat');
   };
+  // The app's latest state, from its events.
+  const appEvent = [...detail.events].reverse().find((e) => e.type.startsWith('app.'));
+  const appRunning = appEvent?.type === 'app.ready' || appEvent?.type === 'app.starting';
 
   return (
-    <>
+    <FeedbackProvider projectId={projectId} run={run}>
       <Toolbar title={run.goal} sub={`${isAsk ? 'Question for' : 'Team'} ${run.team} · ${run.projectName} · started ${new Date(run.startedAt).toLocaleString()}`}>
         {run.status === 'running' && detail.canStop && (
           <button className="btn danger" onClick={() => void stop()} disabled={stopping}>
@@ -134,6 +140,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
             <IconBranch /> Ship result
           </button>
         )}
+        {!isAsk && <SendFeedbackButton />}
         {!isAsk && run.status !== 'running' && run.branch && (
           <button className="btn" onClick={() => setContinueOpen(true)} title="Start a new goal from this run's result">
             <IconBranch /> New goal on this result
@@ -213,7 +220,12 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
           )}
           {!isAsk && (
             <button className={tab === 'preview' ? 'on' : ''} onClick={() => setTab('preview')}>
-              <IconEye width={14} height={14} /> Preview
+              <IconEye width={14} height={14} /> Preview <FeedbackBadge />
+            </button>
+          )}
+          {!isAsk && (
+            <button className={tab === 'app' ? 'on' : ''} onClick={() => setTab('app')} title="Run the project's app and use it live">
+              <IconPlay width={14} height={14} /> App {appRunning && <i className="app-dot on" title="running" />}
             </button>
           )}
         </nav>
@@ -225,6 +237,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
         {tab === 'chat' && <Chat detail={detail} projectId={projectId} selected={chatWith} onSelect={setChatWith} onSent={reload} />}
         {tab === 'changes' && <Changes projectId={projectId} run={run} />}
         {tab === 'preview' && <Preview projectId={projectId} run={run} />}
+        {tab === 'app' && <AppPanel projectId={projectId} run={run} />}
       </div>
 
       {ship && <ShipDialog projectId={projectId} run={run} onClose={() => setShip(false)} />}
@@ -237,8 +250,25 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
           </div>
         </Modal>
       )}
-    </>
+    </FeedbackProvider>
   );
+}
+
+/** Once the run has ended and you left comments: send them as a new goal. */
+function SendFeedbackButton() {
+  const { items, canSend, openSend } = useFeedback();
+  if (!items.length || !canSend) return null;
+  return (
+    <button className="btn primary" onClick={openSend} title="Start a new goal on this result with your comments">
+      <IconSend /> Send feedback ({items.length})
+    </button>
+  );
+}
+
+/** How many comments wait to be sent. */
+function FeedbackBadge() {
+  const { items } = useFeedback();
+  return items.length ? <span className="badge" title="Comments not sent yet">{items.length}</span> : null;
 }
 
 function Fact({ icon, label, title }: { icon?: React.ReactNode; label: string; title?: string }) {
@@ -725,11 +755,16 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'browser.page': return { cls: 'tool', text: `Browser on ${d.url}` };
     case 'browser.control': return { cls: d.by === 'human' ? 'warn' : '', text: d.by === 'human' ? 'You took control of its browser' : 'Browser handed back' };
     case 'browser.closed': return { cls: '', text: `Browser closed (${d.reason})` };
+    case 'app.starting': return { cls: 'tool', text: `Starting the app${d.command ? `: ${d.command}` : d.compose ? ` with docker compose (${d.compose})` : ''}${d.runtime === 'docker' ? ' in Docker' : ''}` };
+    case 'app.ready': return { cls: 'good', text: `The app runs at ${d.url}` };
+    case 'app.failed': return { cls: 'error', text: `The app did not run: ${d.reason}` };
+    case 'app.stopped': return { cls: '', text: `The app stopped (${d.reason})` };
+    case 'feedback.sent': return { cls: 'good', text: `Your feedback (${d.count} comment${d.count === 1 ? '' : 's'}) went to run ${d.run_id}` };
     default: return { cls: '', text: JSON.stringify(d) };
   }
 }
 
-const PROBLEMS = new Set(['agent.error', 'scope.violation', 'scope.denied', 'gate.failed', 'backend.warning']);
+const PROBLEMS = new Set(['agent.error', 'scope.violation', 'scope.denied', 'gate.failed', 'backend.warning', 'app.failed']);
 
 function Activity({ events, run, roots }: { events: RunEvent[]; run: RunSummary; roots: string[] }) {
   const [agent, setAgent] = useState<string | null>(null);

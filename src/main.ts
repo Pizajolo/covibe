@@ -14,6 +14,7 @@ import { answerQuestion } from './engine/questions.js';
 import { EventStore } from './events/store.js';
 import { bold, dim, formatEvent, formatRun, green, QUIET_EVENTS, red, yellow } from './format.js';
 import { ClaudeSdkRunner } from './runner/claude-sdk.js';
+import { appHub } from './apps/manager.js';
 import { Connections, loginCommand, openInBrowser } from './connections/store.js';
 import { startSignIn } from './connections/mcp-auth.js';
 import { stopMcpProxy } from './connections/mcp-proxy.js';
@@ -197,8 +198,16 @@ async function run(file: string | undefined, values: { repo?: string; goal?: str
       console.log(yellow('The fix loop ran out of rounds. Review the feedback above, then talk to an agent:'));
       console.log(dim(`  covibe chat ${outcome.runId} <agent> "<instructions>"`));
     }
+    // An app a member started runs in this process: in a terminal it stays up until you are done with it.
+    const app = appHub.list(repoRoot(values.repo), outcome.runId).find((a) => a.status === 'running');
+    if (app && process.stdin.isTTY && !controller.signal.aborted) {
+      console.log(`the app runs at ${bold(app.url)}  ${dim('(press Ctrl-C to stop it and exit)')}`);
+      process.off('SIGINT', onSigint);
+      await new Promise<void>((resolve) => process.once('SIGINT', () => resolve()));
+    }
     return outcome.status === 'succeeded' ? 0 : outcome.status === 'escalated' ? 2 : 1;
   } finally {
+    await appHub.shutdown();
     unsubscribe();
     prompter?.close();
     process.off('SIGINT', onSigint);

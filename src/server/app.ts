@@ -1,9 +1,10 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { ConfigError, DEFAULT_SANDBOX_NETWORK, DEFAULT_SANDBOX_WRITE } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
@@ -46,13 +47,20 @@ import { EventStore } from '../events/store.js';
 import type { DeliveryMode, RunEvent, RunRecord } from '../events/types.js';
 import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
-import type { AccountInfo, ConnectionsInfo, DiffResult, MemberInfo, PreviewSite, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UndoResult, UsageReport } from './api-types.js';
+import type { AccountInfo, AppViewInfo, ConnectionsInfo, DiffResult, FeedbackList, MemberInfo, OpenedFile, PreviewSite, RunApp, RunAppSettings, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UndoResult, UsageReport } from './api-types.js';
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
 import * as gitops from './gitops.js';
 import { GitProblem, gitOverview, gitShow } from './gitops.js';
 import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, stepReports, summarizeRun, usageReport } from './projections.js';
-import { diskSource, gitSource, isText, PREVIEW_BRIDGE, relPath, SiteServer, type SiteSource } from './site.js';
+import { diskSource, FEEDBACK_BRIDGE, gitSource, isText, relPath, SiteServer, type SiteSource } from './site.js';
 import { browserHub, type LiveTab } from '../browser/hub.js';
+import { AppConfigError, rememberedApp, resolveApp, type AppConfig, type AppSpec } from '../apps/config.js';
+import { appHub, AppError, tail, type AppState } from '../apps/manager.js';
+import { AppView } from '../apps/view.js';
+import { expandHome } from '../sandbox-policy.js';
+import { Workspace } from '../engine/workspace.js';
+import { cleanItem, cleanItems, feedbackGoal, readFeedback, writeFeedback } from './feedback.js';
+import { covibeHome } from '../home.js';
 import type { BrowserProvider } from '../browser/types.js';
 
 const exec = promisify(execFile);
@@ -60,6 +68,8 @@ const exec = promisify(execFile);
 const MAX_LISTED = 5000;
 /** Text shown in the code view, at most. */
 const MAX_TEXT = 1 << 20;
+/** Files of a run covibe opens in their own app (documents, media, images): never programs or scripts. */
+const OPENABLE = /\.(docx?|dotx?|xlsx?|xlsm|csv|pptx?|potx?|odt|ods|odp|rtf|key|pages|numbers|vsdx?|pdf|png|jpe?g|gif|webp|avif|bmp|tiff?|heic|psd|ai|sketch|fig|mp4|mov|m4v|webm|mp3|wav|m4a|ogg|aiff?)$/i;
 /** A run's preview site closes after this long without a request. */
 const PREVIEW_IDLE_MS = 30 * 60_000;
 const UI_DIR = new URL('../../dist-ui/', import.meta.url).pathname;
@@ -383,13 +393,126 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     return { source: gitSource(project.path, run.branch), kind: { kind: 'branch', ref: run.branch } };
   };
 
+  // ---- a run's app (see apps/): where Start runs it, what it would run, and the views people see it through
+
+  /** The folder the App panel starts the app from: the run's merged result (its worktree, restored if it was removed), or the folder or checkout it worked in. */
+  const appFolders = new Map<string, string>();
+  /** `restore`: put the worktree back if it was removed to free disk space (only when starting the app, not to look at it). */
+  const appFolder = async (project: Project, run: RunRecord, restore: boolean): Promise<string> => {
+    if (inFolder(project, run) || !run.branch) return project.path;
+    const known = appFolders.get(`${project.id}/${run.id}`);
+    if (known && existsSync(known)) return known;
+    const exists = await exec('git', ['rev-parse', '--verify', '--quiet', `${run.branch}^{commit}`], { cwd: project.path }).then(() => true, () => false);
+    if (!exists) throw new BadRequest(`branch ${run.branch} no longer exists, so the app cannot run from it`);
+    const ws = await Workspace.attach(project.path, run.id, 'worktree', run.branch);
+    if (!restore) return ws.integrationDir;
+    await ws.restore(ws.integrationDir);
+    appFolders.set(`${project.id}/${run.id}`, ws.integrationDir);
+    return ws.integrationDir;
+  };
+  /** The team's app settings and the domains its members' shell commands may reach (for an app a person starts). */
+  const appContext = (run: RunRecord): { team?: AppConfig; network: string[] } => {
+    try {
+      const team = teamForRun(run).load();
+      const lists = Object.values(team.agents).map((a) => a.sandbox?.network).filter((n): n is string[] => !!n);
+      return { team: team.app, network: lists.length ? [...new Set(lists.flat())] : DEFAULT_SANDBOX_NETWORK };
+    } catch {
+      return { network: DEFAULT_SANDBOX_NETWORK };
+    }
+  };
+  const settingsOf = (c: AppConfig): RunAppSettings => {
+    const out: RunAppSettings = {};
+    for (const k of ['runtime', 'setup', 'command', 'port', 'path', 'image', 'dockerfile', 'compose', 'service'] as const) if (c[k] !== undefined) (out as Record<string, unknown>)[k] = c[k];
+    return out;
+  };
+  const appInfo = (s: AppState): NonNullable<RunApp['app']> => ({
+    status: s.status,
+    url: s.url,
+    port: s.port,
+    path: s.path,
+    folder: s.folder,
+    runtime: s.runtime,
+    by: s.by,
+    startedAt: s.startedAt,
+    ...(s.readyAt ? { readyAt: s.readyAt } : {}),
+    ...(s.stoppedAt ? { stoppedAt: s.stoppedAt } : {}),
+    ...(s.reason ? { reason: s.reason } : {}),
+    settings: settingsOf(s.spec),
+    source: s.spec.source,
+  });
+  let dockerCheck: { at: number; ok: Promise<boolean> } | undefined;
+  const dockerAvailable = (): Promise<boolean> => {
+    if (!dockerCheck || Date.now() - dockerCheck.at > 30_000) {
+      dockerCheck = { at: Date.now(), ok: exec('docker', ['info', '--format', '{{.ServerVersion}}'], { timeout: 10_000 }).then(() => true, () => false) };
+    }
+    return dockerCheck.ok;
+  };
+  /** Settings a person typed in the App panel. */
+  const appSettingsBody = (body: unknown): AppConfig => {
+    const b = ((body as { settings?: unknown })?.settings ?? {}) as Record<string, unknown>;
+    const out: AppConfig = {};
+    if (b.runtime === 'sandbox' || b.runtime === 'docker') out.runtime = b.runtime;
+    for (const k of ['setup', 'command', 'path', 'image', 'dockerfile', 'compose', 'service'] as const) {
+      if (typeof b[k] === 'string' && (b[k] as string).trim()) out[k] = (b[k] as string).trim();
+    }
+    if (b.port !== undefined && b.port !== null && b.port !== '') {
+      const port = Number(b.port);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new BadRequest('the port is a number from 1 to 65535');
+      out.port = port;
+    }
+    return out;
+  };
+  /** Views in front of running apps, by run (see apps/view.ts). */
+  const appViews = new Map<string, Promise<AppView>>();
+  const viewFor = (project: Project, run: RunRecord, state: AppState): Promise<AppView> => {
+    const key = `${project.id}/${run.id}/${state.name}`;
+    const known = appViews.get(key);
+    if (known) {
+      return known.then((v) => {
+        if (v.target === state.port) return v;
+        appViews.delete(key);
+        void v.close();
+        return viewFor(project, run, state);
+      });
+    }
+    const view = AppView.start(state.port, { onRequest: () => appHub.touch(project.path, run.id, state.name) });
+    view.catch(() => appViews.delete(key));
+    appViews.set(key, view);
+    return view;
+  };
+  const viewSweep = setInterval(() => {
+    for (const [key, view] of appViews) {
+      void view.then((v) => {
+        if (Date.now() - v.lastUsed < PREVIEW_IDLE_MS) return;
+        appViews.delete(key);
+        void v.close();
+      }, () => undefined);
+    }
+  }, 60_000);
+  viewSweep.unref();
+  /** A file of the run on disk, to open in its own app: the file itself in a folder or checkout, else a copy from the result branch. */
+  const fileOnDisk = async (project: Project, run: RunRecord, path: string): Promise<{ file: string; copy: boolean }> => {
+    if (inFolder(project, run) || !run.branch) {
+      const file = join(project.path, path);
+      if (!existsSync(file)) throw new NotFound(`there is no ${path} in the folder`);
+      return { file, copy: false };
+    }
+    const { source } = await filesOf(project, run);
+    const data = await source.read(path);
+    if (!data) throw new NotFound(`there is no ${path} in ${source.label}`);
+    const file = join(covibeHome(), 'opened', project.id, run.id, path);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, data);
+    return { file, copy: true };
+  };
+
   // Each run's files served as a website on a port of its own (see site.ts).
   const previews = new Map<string, Promise<SiteServer>>();
   const previewFor = (project: Project, run: RunRecord): Promise<SiteServer> => {
     const key = `${project.id}/${run.id}`;
     let site = previews.get(key);
     if (!site) {
-      site = filesOf(project, run).then(({ source }) => SiteServer.start(source, { inject: PREVIEW_BRIDGE }));
+      site = filesOf(project, run).then(({ source }) => SiteServer.start(source, { inject: FEEDBACK_BRIDGE }));
       site.catch(() => previews.delete(key));
       previews.set(key, site);
     }
@@ -1062,6 +1185,126 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       await browserHub.close(run.id, p.agent!, 'closed by you');
       return { ok: true };
     }],
+    // ---- the run's app
+    ['GET', '/api/runs/:pid/:rid/app', async (p): Promise<RunApp> => {
+      const { project, run } = findRun(p.pid!, p.rid!);
+      const state = appHub.get(project.path, run.id);
+      if (state && (state.status === 'running' || state.status === 'starting')) appHub.touch(project.path, run.id);
+      const out: RunApp = { log: state ? tail(appHub.logs(project.path, run.id), 400) : '', dockerAvailable: await dockerAvailable(), ...(state ? { app: appInfo(state) } : {}) };
+      let folder: string | undefined;
+      try {
+        folder = await appFolder(project, run, false);
+        out.folder = folder;
+      } catch (err) {
+        out.unavailable = (err as Error).message;
+      }
+      if (folder && !existsSync(folder)) {
+        out.suggestError = "The run's worktree was removed to free disk space; starting the app puts it back.";
+        const runtime = appContext(run).team?.runtime ?? rememberedApp(project.path)?.runtime;
+        const remembered = rememberedApp(project.path);
+        if (remembered) out.suggested = { ...settingsOf(remembered), source: 'remembered' };
+        else if (runtime) out.suggested = { runtime, source: 'team' };
+      } else if (folder) {
+        const { team } = appContext(run);
+        try {
+          const spec = resolveApp(folder, { team, remembered: rememberedApp(project.path), allowRuntime: true });
+          out.suggested = { ...settingsOf(spec), source: spec.source };
+        } catch (err) {
+          if (!(err instanceof AppConfigError)) throw err;
+          out.suggestError = err.message;
+          const runtime = team?.runtime ?? rememberedApp(project.path)?.runtime;
+          if (runtime) out.suggested = { runtime, source: 'team' };
+        }
+      }
+      return out;
+    }],
+    ['POST', '/api/runs/:pid/:rid/app/start', async (p, body) => {
+      const { project, store, run } = findRun(p.pid!, p.rid!);
+      const folder = await appFolder(project, run, true);
+      const given = appSettingsBody(body);
+      const { team, network } = appContext(run);
+      let spec: AppSpec;
+      try {
+        spec = resolveApp(folder, { given, team, remembered: rememberedApp(project.path), allowRuntime: true });
+      } catch (err) {
+        if (err instanceof AppConfigError) throw new BadRequest(err.message);
+        throw err;
+      }
+      // Whatever a person starts is remembered for next time (as they gave it, or as it was suggested).
+      spec = { ...spec, source: 'given' };
+      const started = appHub.start({
+        repo: project.path,
+        runId: run.id,
+        folder,
+        spec,
+        by: 'you',
+        network,
+        allowWrite: DEFAULT_SANDBOX_WRITE.map((d) => expandHome(d, homedir())),
+        onEvent: (e) => store.append(run.id, { type: e.type, step: 'app', data: e.data }),
+        keepAlive: () => store.isLive(store.getRun(run.id) ?? run),
+      });
+      started.catch((err) => store.append(run.id, { type: 'app.failed', step: 'app', data: { name: 'app', reason: (err as Error).message } }));
+      // It answers once the app does; the panel follows its state meanwhile.
+      await Promise.race([started.catch(() => undefined), new Promise((r) => setTimeout(r, 300))]);
+      const state = appHub.get(project.path, run.id);
+      return state ? appInfo(state) : { status: 'failed' };
+    }],
+    ['POST', '/api/runs/:pid/:rid/app/stop', async (p) => {
+      const { project, run } = findRun(p.pid!, p.rid!);
+      const state = await appHub.stop(project.path, run.id, 'app', 'stopped by you');
+      return state ? appInfo(state) : { ok: true };
+    }],
+    ['POST', '/api/runs/:pid/:rid/app/view', async (p): Promise<AppViewInfo> => {
+      const { project, run } = findRun(p.pid!, p.rid!);
+      const state = appHub.get(project.path, run.id);
+      if (!state || state.status !== 'running') throw new BadRequest('the app is not running');
+      const view = await viewFor(project, run, state);
+      view.lastUsed = Date.now();
+      return { port: view.port };
+    }],
+    // ---- feedback on the result
+    ['GET', '/api/runs/:pid/:rid/feedback', (p): FeedbackList => {
+      const { project, run } = findRun(p.pid!, p.rid!);
+      return readFeedback(project.path, run.id);
+    }],
+    ['POST', '/api/runs/:pid/:rid/feedback', (p, body): FeedbackList => {
+      const { project, run } = findRun(p.pid!, p.rid!);
+      const list = readFeedback(project.path, run.id);
+      return writeFeedback(project.path, run.id, { ...list, items: [...list.items, cleanItem(body)] });
+    }],
+    ['PUT', '/api/runs/:pid/:rid/feedback', (p, body): FeedbackList => {
+      const { project, run } = findRun(p.pid!, p.rid!);
+      const list = readFeedback(project.path, run.id);
+      return writeFeedback(project.path, run.id, { ...list, items: cleanItems((body as { items?: unknown }).items) });
+    }],
+    ['POST', '/api/runs/:pid/:rid/feedback/send', async (p, body) => {
+      const { project, store, run } = findRun(p.pid!, p.rid!);
+      if (run.kind !== 'workflow') throw new BadRequest('feedback goes to a team run');
+      if (store.isLive(run)) throw new BadRequest('the run is still going; send your feedback once it has finished');
+      const list = readFeedback(project.path, run.id);
+      const note = typeof (body as { note?: unknown }).note === 'string' ? (body as { note: string }).note : undefined;
+      if (!list.items.length && !note?.trim()) throw new BadRequest('there is no feedback to send yet');
+      const team = teamForRun(run).load();
+      const keep = run.branch && (await exec('git', ['rev-parse', '--verify', '--quiet', `${run.branch}^{commit}`], { cwd: project.path }).then(() => true, () => false));
+      if (run.branch && !keep) throw new BadRequest(`branch ${run.branch} no longer exists, so there is no result to build on`);
+      const started = await launch(project, team, feedbackGoal(run.goal, list.items, note), run.branch ?? undefined);
+      writeFeedback(project.path, run.id, { items: [], sent: [...list.sent, { runId: started.runId, at: new Date().toISOString(), count: list.items.length }] });
+      store.append(run.id, { type: 'feedback.sent', data: { run_id: started.runId, count: list.items.length } });
+      return started;
+    }],
+    // ---- a file of the result in its own app (Word, Excel, Keynote…)
+    ['POST', '/api/runs/:pid/:rid/open', async (p, body): Promise<OpenedFile> => {
+      const { project, run } = findRun(p.pid!, p.rid!);
+      const path = relPath(str(body, 'path'));
+      if (!path) throw new BadRequest('"path" names a file of the run');
+      // Opening a program or a script would run it: only documents, media and images.
+      if (!OPENABLE.test(path)) throw new BadRequest(`covibe opens documents, media and images in their own app, not ${extname(path) || 'files without an extension'}`);
+      const { file, copy } = await fileOnDisk(project, run, path);
+      if (!(body as { launch?: unknown }).launch) return { path: file, copy };
+      const launched = await openInBrowser(file);
+      if (!launched) throw new BadRequest(`could not open ${path}: no app on this computer opens it`);
+      return { path: file, copy, launched };
+    }],
     ['GET', '/api/runs/:pid/:rid/diff', async (p): Promise<DiffResult> => {
       const { project, run } = findRun(p.pid!, p.rid!);
       if (isFolderRun(project.path, run.id)) return folderDiff(project.path, run.id);
@@ -1141,7 +1384,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           ? 409
           : err instanceof NotFound
             ? 404
-            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof McpAuthError || err instanceof BackendError || err instanceof VoiceError
+            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof McpAuthError || err instanceof BackendError || err instanceof VoiceError || err instanceof AppError || err instanceof AppConfigError
               ? 400
               : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;
@@ -1164,7 +1407,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       clearInterval(restartTimer);
       clearInterval(autoCleanTimer);
       clearInterval(previewSweep);
+      clearInterval(viewSweep);
       await Promise.all([...previews.values()].map((s) => s.then((x) => x.close(), () => undefined)));
+      await Promise.all([...appViews.values()].map((v) => v.then((x) => x.close(), () => undefined)));
+      await appHub.shutdown();
       for (const c of active.values()) c.abort();
       for (const res of sse) res.end();
       for (const res of streams) res.end();

@@ -16,3 +16,6 @@ process.stdout.on('error', (err: NodeJS.ErrnoException) => {
 
 const { main } = await import('./main.js');
 process.exitCode = await main(process.argv.slice(2));
+// Apps members started (a chat after a run, say) end with covibe.
+const { appHub } = await import('./apps/manager.js');
+await appHub.shutdown();

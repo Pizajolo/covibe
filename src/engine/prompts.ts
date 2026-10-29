@@ -2,7 +2,7 @@ import type { AgentConfig, TeamConfig } from '../config/types.js';
 import type { InboxMessage } from '../events/types.js';
 
 /** Role prompt plus the team protocol, appended to Claude Code's system prompt. */
-export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAsk?: boolean; canRequest?: boolean; folder?: string } = {}): string {
+export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAsk?: boolean; canRequest?: boolean; app?: boolean; folder?: string } = {}): string {
   const teammates = Object.values(team.agents)
     .filter((a) => a.name !== agent.name)
     .map((a) => `- ${a.name}${a.description ? `: ${a.description}` : ''}`)
@@ -69,6 +69,12 @@ export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAs
     lines.push(
       'You have a browser (the browser_* tools). Open your dev server or the pages you build (a path in your working folder works) to check they work and look right: read pages with browser_snapshot, act by element number, and take a screenshot when the look matters. People can watch it live and may take control for a moment; your browser tools wait until they hand it back.' +
         (agent.sandbox ? ' It reaches the same domains as your shell commands, plus local addresses.' : ''),
+    );
+  }
+  if (opts.app) {
+    lines.push(
+      "You can run the project's app (the app_* tools): app_start runs its dev server or site from your working folder and returns its address; it keeps running between turns and steps, so teammates and the people watching can use it too. Use app_status to see whether it already runs and where, and app_logs for its output. Start it before you test or review a web app in your browser, rather than starting a server with a shell command." +
+        (agent.writes ? ' After you change how it is built or started, start it again (restart: true).' : ''),
     );
   }
   lines.push('', '# Your role', agent.prompt.trim());

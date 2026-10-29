@@ -59,6 +59,7 @@ agents:
     model: sonnet
     effort: medium                  # checking work needs less thinking than writing it
     tools: [Read, Grep, Glob]       # reviews only
+    browser: true                   # runs the app (app_start) and tries the change live
     output_schema: schemas/review.json
 
   tester:

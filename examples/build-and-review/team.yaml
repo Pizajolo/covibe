@@ -23,6 +23,7 @@ agents:
     model: sonnet
     effort: medium                  # checking work needs less thinking than writing it
     tools: [Read, Grep, Glob]
+    browser: true                   # a web app: runs it (app_start) and tries the change live
     output_schema: schemas/review.json
 
 workflow:

@@ -17,6 +17,8 @@ import { systemPrompt, turnPrompt } from './prompts.js';
 import { browserActivity } from './browser.js';
 import { browserHub } from '../browser/hub.js';
 import { browserTools } from '../browser/tools.js';
+import { appHub } from '../apps/manager.js';
+import { appTools } from '../apps/tools.js';
 import { ASK_TOOL, Deadline, LEAD_SCHEMA, leadPrompt, leadVerdict, QUESTION_STEP, questionOptions, RunPause, waitForAnswer, type LeadVerdict } from './questions.js';
 import { REQUEST_TOOL, RequestChains, requestPrompt } from './requests.js';
 import { makeToolChecker, readOnly } from './scope.js';
@@ -765,13 +767,31 @@ export function buildInvocation(
       }),
     );
   }
+  if (agent.app && p.repo && !p.curating) {
+    tools.push(
+      ...appTools({
+        hub: appHub,
+        team,
+        agent,
+        repo: p.repo,
+        runId,
+        folder: p.cwd,
+        signal: p.signal,
+        onEvent: (e) => emit({ ...base, type: e.type, data: e.data }),
+        keepAlive: () => {
+          const run = store.getRun(runId);
+          return !!run && store.isLive(run);
+        },
+      }),
+    );
+  }
   let sandbox = agent.sandbox && isCurator ? { ...agent.sandbox, allowWrite: [...agent.sandbox.allowWrite, brain!] } : agent.sandbox;
   // In a plain folder nothing can be thrown away after the turn, so shell commands are kept out of what the scope does not reach.
   if (sandbox && p.folder) sandbox = { ...sandbox, denyWrite: denyWritePaths(p.root, agent.writes ? agent.writeScope : []) };
   return {
     agentName: agent.name,
     prompt: p.prompt,
-    systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL), canRequest: tools.some((t) => t.name === REQUEST_TOOL), folder: p.folder ? p.root : undefined }), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
+    systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL), canRequest: tools.some((t) => t.name === REQUEST_TOOL), app: tools.some((t) => t.name === 'app_start'), folder: p.folder ? p.root : undefined }), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
     readDirs: brain && !p.curating ? [brain] : undefined,
     skills: resolveSkills(agent.skills),
     plugins: resolvePlugins(agent.plugins),

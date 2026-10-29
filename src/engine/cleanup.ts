@@ -1,4 +1,5 @@
 import type { EventStore } from '../events/store.js';
+import { appHub } from '../apps/manager.js';
 import type { RunStatus } from '../events/types.js';
 import { listRunWorktrees, removeRunWorktrees } from './workspace.js';
 
@@ -59,6 +60,8 @@ export async function cleanupWorktrees(repo: string, store: EventStore, opts: { 
       result.freedKb += w.sizeKb;
       continue;
     }
+    // An app running from the run's files would lose them.
+    await appHub.stopRun(repo, w.runId, "its run's worktrees were removed to free disk space").catch(() => undefined);
     const { removed, freedKb } = await removeRunWorktrees(repo, w.runId);
     result.cleaned.push({ runId: w.runId, freedKb });
     result.freedKb += freedKb;
