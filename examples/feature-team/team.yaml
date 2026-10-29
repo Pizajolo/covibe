@@ -4,7 +4,9 @@
 # QA reviews, the tester writes and runs tests. Failed gates send findings
 # back to the builders, at most 3 times, then the run escalates to you.
 # Members ask the manager when they need a decision; if it cannot answer, the
-# question comes to you and the run pauses until you reply.
+# question comes to you and the run pauses until you reply. The designer has no
+# step of its own: the manager and frontend call on it when a design would
+# help (request_work), and skip it when not.
 version: 1
 name: feature-team
 description: Manager-led web feature team with an enforced review and test loop.
@@ -22,6 +24,7 @@ agents:
     prompt: prompts/manager.md      # long text lives in Markdown files
     model: opus
     tools: [Read, Grep, Glob]       # plans and decides, cannot edit code
+    can_request: [designer]         # may ask the designer for a design while planning
 
   frontend:
     description: Builds the web UI under web/.
@@ -31,6 +34,7 @@ agents:
     scope: { write: ["web/**"] }
     browser: true                   # checks its pages in covibe's browser; you can watch it live
     can_message: [backend]
+    can_request: [designer]         # optional: asks for a mockup or tokens when it needs one
     output_schema: schemas/build.json
 
   backend:
@@ -41,6 +45,13 @@ agents:
     scope: { write: ["api/**", "db/**"] }
     can_message: [frontend]
     output_schema: schemas/build.json
+
+  designer:
+    description: Designs screens and components as specs, tokens and SVG mockups under design/.
+    prompt: prompts/designer.md
+    model: sonnet
+    tools: [Read, Write, Edit, Grep, Glob]
+    scope: { write: ["design/**"] }   # works only when asked; not in any workflow step
 
   qa:
     description: Reviews the merged change; never edits code.

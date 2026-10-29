@@ -47,6 +47,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** For a failed git operation: what kind of trouble, what to do, and git's own output. */
+    readonly git?: import('../../src/server/api-types').GitProblemInfo,
   ) {
     super(message);
   }
@@ -59,7 +61,10 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError((json as { error?: string }).error ?? `${res.status} ${res.statusText}`, res.status);
+  if (!res.ok) {
+    const body = json as { error?: string; git?: ApiError['git'] };
+    throw new ApiError(body.error ?? `${res.status} ${res.statusText}`, res.status, body.git);
+  }
   return json as T;
 }
 

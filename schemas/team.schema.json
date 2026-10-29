@@ -298,6 +298,14 @@
             "$ref": "#/$defs/identifier"
           }
         },
+        "can_request": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "description": "Teammates this agent may ask to do work for it with the request_work tool. The teammate runs a turn of its own (even if it has no workflow step), its changes are merged, and its reply comes back as the tool's answer."
+        },
         "scope": {
           "type": "object",
           "additionalProperties": false,

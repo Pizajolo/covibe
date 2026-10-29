@@ -34,6 +34,7 @@ import { MAIN_ACCOUNT, type ProviderModel } from '../connections/types.js';
 import { backendEnv, BackendError } from '../runner/backend.js';
 import type { EnvironmentInfo, PlanUsage } from '../runner/types.js';
 import { ARCHITECT, design } from './designer.js';
+import { Approvals, GIT_HELPER, gitHelp, helperThread } from './git-helper.js';
 import { GitError } from '../engine/workspace.js';
 import { EventStore } from '../events/store.js';
 import type { DeliveryMode, RunEvent, RunRecord } from '../events/types.js';
@@ -41,8 +42,9 @@ import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
 import type { AccountInfo, ConnectionsInfo, MemberInfo, PreviewSite, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UsageReport } from './api-types.js';
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
-import { gitCheckout, gitCommit, gitMerge, gitOverview, gitPull, gitPullRequest, gitPush, gitRevert, gitShow } from './gitops.js';
-import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, summarizeRun, usageReport } from './projections.js';
+import * as gitops from './gitops.js';
+import { GitProblem, gitOverview, gitShow } from './gitops.js';
+import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, stepReports, summarizeRun, usageReport } from './projections.js';
 import { diskSource, gitSource, isText, PREVIEW_BRIDGE, relPath, SiteServer, type SiteSource } from './site.js';
 import { browserHub, type LiveTab } from '../browser/hub.js';
 import type { BrowserProvider } from '../browser/types.js';
@@ -108,6 +110,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const answering = new Set<string>();
   const busyIn = (runId: string) => new Set([...answering].filter((k) => k.startsWith(`${runId}/`)).map((k) => k.slice(runId.length + 1)));
   const cursors = new Map<string, number>();
+  /** The git helper's proposals waiting for the person, and how to stop a conversation's turn. */
+  const approvals = new Approvals();
+  const helperStops = new Map<string, AbortController>();
 
   // Conversations that belong to the library rather than a project (team design).
   const libraryStore = new EventStore(join(library.home, 'library.db'));
@@ -453,6 +458,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       writeScope: a.writeScope,
       writes: a.writes,
       canMessage: a.canMessage,
+      canRequest: a.canRequest,
       lead: team.lead === a.name,
       curator: team.brain.curator === a.name,
     }));
@@ -694,6 +700,48 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const latest = libraryStore.listRuns(200).find((r) => r.kind === 'design' && r.team === p.tid);
       return { runId: latest?.id ?? null };
     }],
+    // ---- the git helper (conversations live in the library store, one project each)
+    ['GET', '/api/projects/:pid/git-helper', (p) => {
+      const project = library.project(p.pid!);
+      const latest = libraryStore.listRuns(500).find((r) => r.kind === 'git' && r.team === project.id);
+      return { runId: latest?.id ?? null, waiting: latest ? approvals.waiting(latest.id).length : 0, busy: latest ? answering.has(`${latest.id}/${GIT_HELPER}`) : false };
+    }],
+    ['POST', '/api/projects/:pid/git-helper', async (p, body) => {
+      const project = library.project(p.pid!);
+      const b = body as { runId?: unknown };
+      const previous = typeof b.runId === 'string' && b.runId ? libraryStore.getRun(b.runId) : undefined;
+      if (previous && (previous.kind !== 'git' || previous.team !== project.id)) throw new BadRequest('that conversation belongs to another project');
+      if (previous && answering.has(`${previous.id}/${GIT_HELPER}`)) throw new BadRequest('the git helper is still answering');
+      const stop = new AbortController();
+      const { runId, done } = await gitHelp({ store: libraryStore, runner, approvals, project, runId: previous?.id, message: str(body, 'message'), signal: stop.signal });
+      answering.add(`${runId}/${GIT_HELPER}`);
+      helperStops.set(runId, stop);
+      void done.finally(() => {
+        answering.delete(`${runId}/${GIT_HELPER}`);
+        helperStops.delete(runId);
+      });
+      return { runId };
+    }],
+    ['GET', '/api/git-helper/:rid', (p) => {
+      const run = libraryStore.getRun(p.rid!);
+      if (!run || run.kind !== 'git') throw new NotFound('conversation not found');
+      const events = libraryStore.events(run.id);
+      return {
+        runId: run.id,
+        busy: answering.has(`${run.id}/${GIT_HELPER}`),
+        thread: helperThread(events, new Set(approvals.waiting(run.id))),
+        costUsd: events.filter((e) => e.type === 'agent.finished' || e.type === 'agent.error').reduce((n, e) => n + Number(e.data.cost_usd ?? 0), 0),
+      };
+    }],
+    ['POST', '/api/git-helper/:rid/decide', (p, body) => {
+      const b = body as { id?: unknown; run?: unknown };
+      if (!approvals.decide(p.rid!, String(b.id ?? ''), b.run === true)) throw new BadRequest('that proposal is no longer waiting');
+      return { ok: true };
+    }],
+    ['POST', '/api/git-helper/:rid/stop', (p) => {
+      helperStops.get(p.rid!)?.abort();
+      return { ok: true };
+    }],
     ['GET', '/api/stats', () => stats()],
     ['GET', '/api/settings', () => library.settings()],
     ['PUT', '/api/settings', (_p, body) => library.updateSettings(body as Parameters<Library['updateSettings']>[0])],
@@ -712,26 +760,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     // ---- git in the project's own checkout
     ['GET', '/api/projects/:pid/git', (p) => gitOverview(library.project(p.pid!).path)],
     ['GET', '/api/projects/:pid/git/commits/:sha', (p) => gitShow(library.project(p.pid!).path, p.sha!)],
-    ['POST', '/api/projects/:pid/git/commit', async (p, body) => {
-      const paths = (body as { paths?: unknown }).paths;
-      return { sha: await gitCommit(library.project(p.pid!).path, str(body, 'message'), Array.isArray(paths) ? paths.map(String) : undefined) };
-    }],
-    ['POST', '/api/projects/:pid/git/checkout', async (p, body) => {
-      const b = body as { create?: unknown; from?: unknown };
-      await gitCheckout(library.project(p.pid!).path, str(body, 'branch'), b.create === true, typeof b.from === 'string' && b.from ? b.from : undefined);
-      return { ok: true };
-    }],
-    ['POST', '/api/projects/:pid/git/push', (p, body) => {
-      const branch = (body as { branch?: unknown }).branch;
-      return gitPush(library.project(p.pid!).path, typeof branch === 'string' && branch ? branch : undefined);
-    }],
-    ['POST', '/api/projects/:pid/git/pull', async (p) => (await gitPull(library.project(p.pid!).path), { ok: true })],
-    ['POST', '/api/projects/:pid/git/merge', async (p, body) => ({ sha: await gitMerge(library.project(p.pid!).path, str(body, 'branch')) })],
-    ['POST', '/api/projects/:pid/git/revert', async (p, body) => ({ sha: await gitRevert(library.project(p.pid!).path, str(body, 'sha')) })],
-    ['POST', '/api/projects/:pid/git/pr', (p, body) => {
-      const b = body as { body?: unknown };
-      return gitPullRequest(library.project(p.pid!).path, { branch: str(body, 'branch'), base: str(body, 'base'), title: str(body, 'title'), body: typeof b.body === 'string' ? b.body : undefined });
-    }],
+    ['GET', '/api/projects/:pid/git/diff', (p, _b, q) => gitops.gitFileDiff(library.project(p.pid!).path, q.get('path') ?? '')],
+    ['POST', '/api/projects/:pid/git/:op', (p, body) => gitOp(library.project(p.pid!).path, p.op!, (body ?? {}) as Record<string, unknown>)],
+    ['POST', '/api/projects/:pid/git/:op/:sub', (p, body) => gitOp(library.project(p.pid!).path, `${p.op}/${p.sub}`, (body ?? {}) as Record<string, unknown>)],
     ['GET', '/api/projects', () => library.projects()],
     ['POST', '/api/projects', (_p, body) => library.addProject(str(body, 'path'), { init: !!(body as { init?: unknown }).init })],
     ['POST', '/api/projects/create', (_p, body) => library.createProject(str(body, 'parent'), str(body, 'name'))],
@@ -778,6 +809,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         members: membersOf(run),
         events,
         threads: chatThreads(events, [project.path]),
+        ...stepReports(events),
         roots: [project.path],
         chatMode: store.isLive(run) ? 'queue' : 'answer',
         canStop: active.has(`${project.id}/${run.id}`),
@@ -998,7 +1030,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
               : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;
       if (status === 500) console.error(err);
-      send(res, status, { error: message, ...(err instanceof NeedsGit ? { code: 'needs_git' } : {}) });
+      const git = err instanceof GitProblem ? { git: { kind: err.kind, hint: err.hint, detail: err.detail, command: err.command } } : {};
+      send(res, status, { error: message, ...(err instanceof NeedsGit ? { code: 'needs_git' } : {}), ...git });
     }
   });
 
@@ -1078,6 +1111,60 @@ async function browserInput(live: LiveTab, b: Record<string, unknown>) {
     default:
       throw new BadRequest('"type" is click, down, up, move, wheel, text or key');
   }
+}
+
+/** One change at a time per repository, so a double click or two windows never run git over each other. */
+const gitQueues = new Map<string, Promise<unknown>>();
+function serially<T>(repo: string, fn: () => Promise<T>): Promise<T> {
+  const next = (gitQueues.get(repo) ?? Promise.resolve()).then(fn, fn);
+  gitQueues.set(repo, next.catch(() => undefined));
+  return next;
+}
+
+/** The Git tab's operations on a project's checkout. */
+function gitOp(repo: string, op: string, b: Record<string, unknown>): Promise<unknown> {
+  const s = (k: string) => (typeof b[k] === 'string' ? (b[k] as string) : '');
+  const opt = (k: string) => (typeof b[k] === 'string' && b[k] ? (b[k] as string) : undefined);
+  const paths = b.paths;
+  const ops: Record<string, () => Promise<unknown>> = {
+    fetch: () => gitops.gitFetch(repo),
+    pull: () => gitops.gitPull(repo, s('mode') === 'rebase' ? 'rebase' : s('mode') === 'merge' ? 'merge' : 'ff'),
+    push: () => gitops.gitPush(repo, opt('branch'), { force: b.force === true }),
+    commit: async () => ({ sha: await gitops.gitCommit(repo, s('message'), { all: b.all === true, amend: b.amend === true, paths: Array.isArray(paths) ? paths.map(String) : undefined }) }),
+    'commit/undo': () => gitops.gitUndoCommit(repo),
+    stage: () => gitops.gitStage(repo, paths),
+    unstage: () => gitops.gitUnstage(repo, paths),
+    discard: () => gitops.gitDiscard(repo, paths),
+    checkout: () => gitops.gitCheckout(repo, s('branch'), b.create === true, opt('from'), { stash: b.stash === true }),
+    'branch/delete': () => (b.remote === true ? gitops.gitDeleteRemoteBranch(repo, s('branch')) : gitops.gitDeleteBranch(repo, s('branch'), b.force === true)),
+    'branch/rename': () => gitops.gitRenameBranch(repo, s('from'), s('to')),
+    merge: () => gitops.gitMerge(repo, s('branch')),
+    rebase: () => gitops.gitRebase(repo, s('onto')),
+    'cherry-pick': () => gitops.gitCherryPick(repo, s('sha')),
+    revert: () => gitops.gitRevert(repo, s('sha')),
+    reset: () => gitops.gitReset(repo, s('sha'), s('mode') as 'soft' | 'mixed' | 'hard'),
+    operation: () => gitops.gitOperation(repo, s('action') as 'continue' | 'abort' | 'skip'),
+    resolve: () => gitops.gitResolve(repo, s('path'), s('how') as 'current' | 'incoming' | 'resolved'),
+    stash: () => gitops.gitStash(repo, opt('message')),
+    'stash/apply': () => gitops.gitStashApply(repo, Number(b.index), b.pop === true),
+    'stash/drop': () => gitops.gitStashDrop(repo, Number(b.index)),
+    tag: () => gitops.gitTag(repo, s('name'), opt('sha'), opt('message')),
+    'tag/delete': () => gitops.gitDeleteTag(repo, s('name')),
+    'tag/push': () => gitops.gitPushTag(repo, s('name')),
+    remote: () => gitops.gitRemoteAdd(repo, s('name'), s('url')),
+    'remote/remove': () => gitops.gitRemoteRemove(repo, s('name')),
+    'remote/url': () => gitops.gitRemoteSetUrl(repo, s('name'), s('url')),
+    identity: () => gitops.gitSetIdentity(repo, s('name'), s('email'), b.global === true),
+    unlock: async () => ({ removed: await gitops.gitClearLock(repo) }),
+    run: async () => {
+      const args = gitops.splitCommand(s('command'));
+      return { args, ...(await gitops.gitRun(repo, args)) };
+    },
+    pr: () => gitops.gitPullRequest(repo, { branch: s('branch'), base: s('base'), title: s('title'), body: opt('body') }),
+  };
+  const fn = ops[op];
+  if (!fn) throw new NotFound(`no git operation "${op}"`);
+  return serially(repo, async () => (await fn()) ?? { ok: true });
 }
 
 function str(body: unknown, key: string, allowEmpty = false): string {

@@ -51,13 +51,13 @@ To try the UI in a browser instead, run `covibe app`.
 | Screen | What it shows and does |
 |---|---|
 | **Home** | Today's and this week's estimated spend, tokens, members working now, run outcomes, gate pass rate; your plan's 5-hour and weekly usage as Claude Code reports it, with reset countdowns (also at the bottom of the sidebar); spend per day and per team member; live runs and recent ones. Give a new goal or ask a question right there (⌘N anywhere). |
-| **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; a member driving a browser gets a browser button above its desk that opens its browser live, or what it saw (see [Preview and live browser](#preview-and-live-browser)); click a desk for the member's details, chat and activity), **Board** (a column per workflow step, a card per member and fix round, gate results), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch), **Preview** (the result's files: web pages open as a site you can click through, Markdown is rendered, everything else shows as text). Stop a run, or start a **new goal on this result**. When a run succeeds, covibe asks what to do with its result: **merge** it into your branch (and push), **open a pull request**, or just **push** the branch (**Ship result** brings that back later). |
+| **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; a member driving a browser gets a browser button above its desk that opens its browser live, or what it saw (see [Preview and live browser](#preview-and-live-browser)); click a desk for the member's details, chat and activity), **Plan** (the manager's plan, readable: its summary and every task by owner with what "done" means and how far that member is; below it, the requests members made of each other and every other step's latest report, such as the review's findings; called **Reports** when the team has no planning step), **Board** (a column per workflow step, a card per member and fix round, gate results; a card on a teammate's request says whose), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch), **Preview** (the result's files: web pages open as a site you can click through, Markdown is rendered, everything else shows as text). Stop a run, or start a **new goal on this result**. When a run succeeds, covibe asks what to do with its result: **merge** it into your branch (and push), **open a pull request**, or just **push** the branch (**Ship result** brings that back later). |
 | **Chat** | While a member is working, choose **Now** (it reads your message between tool calls and adjusts), **Stop and redirect** (it ends its current turn and answers you first) or **Next turn**. After the run, the member resumes its session and answers right away; anything it changes is scope-checked and merged into the run's branch. |
 | **Ask a question** | A read-only session with one member in your project: it can read the code but not change it. Follow-up questions continue the same session. |
-| **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, report format, connection, limits), **Workflow** (a drag-and-drop graph: drag steps to reorder, drag members onto a step or between steps, drag a gate's ↺ handle onto an earlier step to set where failed work goes back; plus forms for gates and the fix loop), **Team settings** (connection, sandbox, limits), **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
+| **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, who it can ask for work, report format, connection, limits), **Workflow** (a drag-and-drop graph: drag steps to reorder, drag members onto a step or between steps, drag a gate's ↺ handle onto an earlier step to set where failed work goes back; plus forms for gates and the fix loop), **Team settings** (connection, sandbox, limits), **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
 | **Team chat** | Describe the team you need and an architect agent sets it up: it reads your project to fit the stack and folders, asks only if something important is unclear, and saves the team through a tool that refuses invalid files and hands the problems back to it. Keep talking to change it ("add a security reviewer", "use haiku for the tester"). Available in New project, New team, and every team's **Chat** tab. |
 | **Skills** | One library of skills for all teams: **write your own**, **add from GitHub** (a repository or a folder; private ones work if git can clone them), or install from **Anthropic's skills**. Claude Code's **built-in skills** are listed too. Give skills to a member, to every member of a team, or mark one **Everyone** to give it to all members of all teams. |
-| **Projects** | Each project has **Runs**, **Brain** and **Git** tabs. **Git** shows your checkout: the branch and whether it is pushed, uncommitted changes (commit them all with a message), branches (switch, merge into the current one, push, pull request) and a graph of recent commits on every branch (click one for its diff, and revert it with a new commit). Pull requests are created with the GitHub CLI when it is signed in; otherwise the branch is pushed and the forge's page opens. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
+| **Projects** | Each project has **Runs**, **Brain** and **Git** tabs. **Git** works with your checkout (see [The Git tab](#the-git-tab)): fetch, pull, push, stage and commit, stashes, branches local and on the remote, merges and rebases with conflicts resolved file by file, a commit graph to revert, cherry-pick, branch, tag or reset from, remotes, any git command, and a **git helper** to chat with when something is stuck. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
 | **Settings → Advanced** | Sign in more **Claude accounts** (each in its own Claude Code folder), turn on **sharing work across them**, sign in **ChatGPT accounts** (the sign-in Codex uses) to put members on OpenAI's models within your ChatGPT plan, and add **model providers** with an API key (DeepSeek, Moonshot, Z.ai, OpenAI, OpenRouter, Groq, a local Ollama, or any Anthropic- or OpenAI-compatible API). Their models then appear in every team's model list. See [Accounts and providers](#accounts-and-providers). |
 | **Brain** | The project's shared notes. Every member reads them before working and can **propose** additions; only the team's **curator** (or you) writes. Review proposals yourself (accept into a new or existing note, or reject) or ask the curator. Edit notes directly; every change is in the brain's own git history. |
 
@@ -162,7 +162,12 @@ agents:
     tools: &builder [Read, Edit, Write, Bash, Grep, Glob]
     scope: { write: ["web/**"] }    # enforced, see below
     can_message: [backend]          # gets a send_message tool for these teammates
+    can_request: [designer]         # may ask the designer for work (request_work), if and when it wants
     output_schema: schemas/build.json
+  designer:                         # in no workflow step: works only when someone asks
+    prompt: prompts/designer.md
+    tools: [Read, Write, Edit, Grep, Glob]
+    scope: { write: ["design/**"] }
   qa:
     prompt: prompts/qa.md
     tools: [Read, Grep, Glob]
@@ -235,6 +240,10 @@ Each review is a session of its own, so `min_proposals` lets proposals collect o
 - **Loops.** When a gate fails, the engine evaluates the `feed` expressions, stores them as `feedback`, and jumps
   back to `goto`. The agents there get the feedback in their prompt and resume their own sessions, so they
   remember what they did. After `max_loops` rounds, the run ends with status `escalated` (or `failed`).
+- **Reports.** Every step's output also goes into the event log (`step.finished`), so the plan and each report can
+  be read while the run goes: in the app's **Plan** tab, and in `covibe log`, which prints a plan's tasks. The plan is
+  the step named `plan`, or else the first step whose report has a `tasks` list.
+- **Requests.** Not everything has to go through the workflow's steps. See [Requests between members](#requests-between-members).
 - **Prompts.** Long prompts live in Markdown files. A `prompt` value that contains a newline is used as the prompt
   text itself.
 
@@ -259,6 +268,7 @@ The rules in the team file are enforced in code, not left to prompts:
 | Gates | JSONata, evaluated by the engine against schema-validated reports |
 | Bounded loops | `max_loops`, `max_turns`, `timeout_min`, optional `max_budget_usd`, `max_parallel` |
 | Messaging | `send_message` only accepts the agent's `can_message` targets |
+| Requests | `request_work` only accepts the agent's `can_request` targets; the teammate's turn has its own tools, write scope and sandbox, and two members never wait on each other |
 | Browser | `browser_*` tools only for members with `browser: true`. A sandboxed member's browser reaches its `network` domains plus local addresses; `file://` pages are refused (its working folder is served over http instead) |
 
 **Worktrees.** With `isolation: worktree` (the default), the run gets an integration branch `covibe/<run-id>`, and
@@ -437,6 +447,57 @@ can type an option's number.
 A member waits up to 7 days for an answer. Stopping the run cancels open questions; so does quitting the app or
 the terminal that runs it, since runs do not survive their process yet.
 
+## The Git tab
+
+Each project's **Git** tab works with your own checkout (runs never touch it; their results are on `covibe/…` branches).
+
+- **Where you stand.** The branch, how far it is ahead of and behind its remote branch, and when the remotes were last fetched; the tab fetches by itself when that was more than five minutes ago, so the numbers are real.
+- **Changes.** Tick files to stage them, click one for its diff, discard one or all, stash, commit what is staged (or everything), amend the last commit, or undo a commit you have not pushed yet.
+- **Branches.** Switch (uncommitted changes in the way can be stashed first), create one from any branch or commit, merge, rebase, rename, delete, push, open a pull request. Branches on the remote are listed too: switching to one makes a local branch that tracks it, and you can delete it on the remote.
+- **Pull and push.** Pull fast-forwards; when both sides have new commits it rebases yours on top, or merges. Uncommitted changes are put aside and brought back. A push the remote refuses offers to pull first, or a force push with lease (it refuses if someone pushed since your last fetch).
+- **Conflicts.** A merge, rebase, cherry-pick, revert or stash that stops on conflicts stays in progress: keep either side per file, or edit the file and mark it resolved, then continue (or skip a commit, or abort).
+- **History.** Click a commit to see it, revert it, cherry-pick it onto your branch, check it out, branch or tag from it, or reset your branch to it.
+- **Remotes and tags,** your name and email when git has none yet, and a box to **run any git command** in the checkout.
+
+**When something fails,** the tab says what went wrong in plain words and what to do, with the fix one click away (stash and switch, pull with rebase then push, remove a stale lock…), git's own output, and **Ask the git helper**.
+
+Git runs without a terminal, so it can never hang waiting for a password or an editor: sign-in problems come back as an explanation instead (for GitHub: `gh auth login` and `gh auth setup-git` once in a terminal). Reading the repository takes no locks, so refreshing the tab never trips up a commit, and a lock left by another git program is waited out (or, when it is stale, removed on request).
+
+**The git helper** is a chat beside the tab. It reads the repository by itself (status, log, diff, branches… and the state of the checkout comes with every message) and explains what is going on. Every command that would change something (the repository, your files or a remote) appears as a proposal with its reason; nothing runs until you click **Run it**. It may edit files only while they have merge conflicts, to resolve them.
+
+## Requests between members
+
+The workflow is the backbone, but members can also call on each other when they want to. Give a member
+`can_request: [designer]` and it gets a `request_work` tool: it says what it needs, the designer does it in a turn of
+its own, and the tool returns the designer's reply. Asking is never required; a member that does not need the
+designer just does its work.
+
+```yaml
+agents:
+  manager:  { …, can_request: [designer] }   # may get a sketch before it finishes the plan
+  frontend: { …, can_request: [designer] }   # may ask for a component's states mid-build
+  designer: { …, scope: { write: ["design/**"] } }   # no workflow step: works only when asked
+```
+
+- **The teammate needs no step.** A member that only works on request (an on-call designer, a security reviewer, a
+  DBA) can be left out of `workflow.steps` entirely. Members in a step can be asked too; a request waits until their
+  current turn ends, and their next step waits for the request.
+- **It works like any other turn.** The teammate resumes its own session in its own worktree, with its tools, write
+  scope and sandbox; its changes are committed and merged into the run branch. A member that asked from a worktree of
+  its own gets the changes merged into it right away (if its own unsaved changes are in the way, it is told where to
+  read them), and read-only members such as the manager see the merged state anyway.
+- **It does not take a parallel slot.** The member that asked waits, so the teammate works in its place; requests do
+  not stall a team with `max_parallel: 1`.
+- **No circles.** When a member asks someone who is (directly or through others) waiting on it, the tool refuses and
+  says who is waiting, instead of both waiting forever. A teammate that fails reports the error to the member that
+  asked, which carries on without it.
+- **You see it.** The board shows the teammate's card in the asking member's step, marked with whose request it is;
+  the Plan tab lists every request with its reply and files; both members' chats note it; `covibe log` prints
+  `request.sent` and `request.done`. The member editor's **Can ask for work** chips set `can_request`.
+
+The feature-team example has a designer like this: the manager may ask it for a design while planning, and frontend
+may ask it during the build.
+
 ## Plan limits
 
 Members on your Claude subscription share its 5-hour and weekly limits. covibe reads them from Claude Code the way
@@ -528,12 +589,13 @@ All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event t
 `agent.started` `agent.text` `agent.tool` `agent.view` `agent.limited` `agent.finished` `agent.error` `scope.denied` `scope.violation`
 `git.commit` `git.merge` `message.queued` `message.delivered` `chat.message` `backend.warning` `usage.limit` `agent.usage`
 `workspace.cleaned` `brain.proposed` `brain.decided` `brain.updated` `team.saved` `question.asked`
-`question.escalated` `question.answered` `run.paused` `run.resumed` `run.restart_scheduled` `run.restart_cancelled`
+`question.escalated` `question.answered` `request.sent` `request.done` `git.proposed` `git.ran` `git.skipped` `run.paused` `run.resumed` `run.restart_scheduled` `run.restart_cancelled`
 `run.restarted` `browser.opened` `browser.page` `browser.control` `browser.closed`
 
 `agent.finished` carries turns, estimated cost, duration, model and token counts; `usage.limit` carries the plan
 usage Claude Code reports (window, status, utilization, reset time). `message.queued` and `message.delivered` carry
-the delivery mode, and `live: true` when a message reached a member mid-turn.
+the delivery mode, and `live: true` when a message reached a member mid-turn. `step.finished` carries the step's report
+(`output`, long text clipped) and who wrote it; an `agent.started` on a teammate's request carries `request_from`.
 
 ## Code layout
 
@@ -545,6 +607,7 @@ src/engine/workspace.ts    git worktrees, commits, merges, out-of-scope discard
 src/engine/scope.ts        pre-tool-use write-scope checks
 src/engine/chat.ts         queue-or-resume chat
 src/engine/questions.ts    members' questions: the lead first, then you; pausing the run
+src/engine/requests.ts     members asking teammates for work (request_work), and keeping them out of waiting circles
 src/engine/browser.ts      spotting members that drive a browser, and the page they go to
 src/browser/               covibe's browser: tabs over the DevTools protocol (tab.ts), page snapshots (page-script.ts),
                            members' tools (tools.ts), live tabs and taking control (hub.ts), Playwright and Electron
@@ -556,8 +619,10 @@ src/connections/           Settings → Advanced: accounts and providers, Keycha
                            (Chat Completions; Responses for ChatGPT accounts in codex-proxy.ts, their sign-in in codex-auth.ts)
 src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.0.0.1, token)
 src/server/library.ts      projects and teams library, comment-preserving YAML edits
-src/server/projections.ts  events → run summaries, member status, board, chat threads, stats, notifications, plan usage
-src/server/gitops.ts       git in the project's checkout: status, branches, graph, commit, merge, push, revert, PRs
+src/server/projections.ts  events → run summaries, member status, board, chat threads, step reports and the plan, stats,
+                           notifications, plan usage
+src/server/gitops.ts       git in the project's checkout: every operation the Git tab offers, run without a terminal, with failures explained
+src/server/git-helper.ts   the git helper: reads freely, proposes changes for you to run, edits only conflicted files
 ui/src/components/Office.tsx    the run as a pixel office (office-art.ts draws it, office-state.ts maps member states)
 src/main.ts                CLI
 ui/                        the app UI (React, Vite, CodeMirror)

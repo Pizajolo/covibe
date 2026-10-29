@@ -140,6 +140,7 @@ interface RawAgent {
   cache_ttl?: CacheTtl;
   tools: string[];
   can_message?: string[];
+  can_request?: string[];
   scope?: { write?: string[] };
   output_schema?: string;
   backend?: RawBackend;
@@ -246,6 +247,10 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
       if (target === name) problems.push(`${where}/can_message: an agent cannot message itself`);
       else if (!(target in raw.agents)) problems.push(`${where}/can_message: unknown agent "${target}"`);
     }
+    for (const target of a.can_request ?? []) {
+      if (target === name) problems.push(`${where}/can_request: an agent cannot request work from itself`);
+      else if (!(target in raw.agents)) problems.push(`${where}/can_request: unknown agent "${target}"`);
+    }
     // An agent-level backend replaces the default one entirely; merging fields
     // across backend types (say a gateway base_url into api_key) is never wanted.
     const backend = a.backend ?? defaultBackend;
@@ -260,6 +265,7 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
       cacheTtl: a.cache_ttl ?? defaults.cache_ttl,
       tools: a.tools,
       canMessage: a.can_message ?? [],
+      canRequest: a.can_request ?? [],
       writeScope: a.scope?.write,
       outputSchema: a.output_schema ? readSchema(a.output_schema, `${where}/output_schema`) : undefined,
       backend,
