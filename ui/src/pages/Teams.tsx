@@ -77,6 +77,12 @@ export function NewTeam({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState('');
   const [chat, setChat] = useState(false);
   const [project, setProject] = useState('');
+  const [create, busy] = useAction(async () => {
+    const t = await post<TeamListing>('/api/teams', { name: name || template, template });
+    await refresh();
+    onClose();
+    go('teams', t.id);
+  });
   if (chat)
     return (
       <Modal title="Design a team with chat" onClose={() => (void refresh(), onClose())} wide>
@@ -100,12 +106,6 @@ export function NewTeam({ onClose }: { onClose: () => void }) {
         <DesignChat key={project} projectId={project || undefined} name={name || 'new-team'} height={440} onTeam={() => void refresh()} />
       </Modal>
     );
-  const [create, busy] = useAction(async () => {
-    const t = await post<TeamListing>('/api/teams', { name: name || template, template });
-    await refresh();
-    onClose();
-    go('teams', t.id);
-  });
   const blurbs: Record<string, string> = {
     'feature-team': 'Manager plans, frontend and backend build in parallel, QA reviews, tester tests. Up to 3 fix rounds.',
     'build-and-review': 'A builder and a reviewer with a review gate and two fix rounds.',
