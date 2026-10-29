@@ -770,6 +770,9 @@ function AddMcp({ initial, onClose, onAdded }: { initial?: { name: string; descr
               <h3 className="row" style={{ margin: 0 }}>
                 <IconShield width={15} height={15} /> Its sandbox
               </h3>
+              <span className="tiny" style={{ color: 'var(--warn)' }}>
+                It can only reach the websites listed here. Add the address of the service it talks to (for ElevenLabs, api.elevenlabs.io), or its tools will fail.
+              </span>
               <PolicyEditor value={policy} onChange={setPolicy} />
             </div>
           )}

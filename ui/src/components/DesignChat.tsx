@@ -3,6 +3,7 @@ import { get, post, type ChatItem, type TeamDetail } from '../api';
 import { go, useLive } from '../data';
 import { money } from '../format';
 import { IconAlert, IconCheck, IconSend, IconSpinner, IconTeam } from './icons';
+import { MicButton, withSpoken } from './MicButton';
 import { Avatar, useAction } from './ui';
 
 interface DesignDetail {
@@ -135,6 +136,7 @@ export function DesignChat({
                 }
               }}
             />
+            <MicButton onText={(t) => setText((prev) => withSpoken(prev, t))} />
             <button className="btn primary icon-btn" style={{ borderRadius: 14 }} disabled={!text.trim() || busy} onClick={() => void send(text)} aria-label="Send">
               <IconSend />
             </button>

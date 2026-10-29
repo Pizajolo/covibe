@@ -5,6 +5,7 @@ import { IconInfo } from '../components/icons';
 import { ModelPicker } from '../components/ModelPicker';
 import { Toolbar } from '../components/Toolbar';
 import { UsageMeters } from '../components/Usage';
+import { VoiceSettings } from '../components/VoiceSettings';
 import { useAction, useToast } from '../components/ui';
 import { useData, useLive } from '../data';
 import { askPushPermission, pushState } from '../notify';
@@ -257,6 +258,8 @@ export function Settings() {
           <ClaudeAccount />
 
           <UsageLimits />
+
+          <VoiceSettings />
 
           <DiskSpace />
 

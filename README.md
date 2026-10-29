@@ -54,12 +54,13 @@ To try the UI in a browser instead, run `covibe app`.
 |---|---|
 | **Home** | Today's and this week's estimated spend, tokens, members working now, run outcomes, gate pass rate; your plan's 5-hour and weekly usage as Claude Code reports it, with reset countdowns (also at the bottom of the sidebar); spend per day and per team member; live runs and recent ones. Give a new goal or ask a question right there (⌘N anywhere). |
 | **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; a member driving a browser gets a browser button above its desk that opens its browser live, or what it saw (see [Preview and live browser](#preview-and-live-browser)); click a desk for the member's details, chat and activity), **Plan** (the manager's plan, readable: its summary and every task by owner with what "done" means and how far that member is; below it, the requests members made of each other and every other step's latest report, such as the review's findings; called **Reports** when the team has no planning step), **Board** (a column per workflow step, a card per member and fix round, gate results; a card on a teammate's request says whose), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch), **Preview** (the result's files: web pages open as a site you can click through, Markdown is rendered, everything else shows as text). Stop a run, or start a **new goal on this result**. When a run succeeds, covibe asks what to do with its result: **merge** it into your branch (and push), **open a pull request**, or just **push** the branch (**Ship result** brings that back later). |
+| **Voice input** | A mic button next to the goal box and every chat: talk, and the text appears in the box. It runs on your Mac with whisper.cpp, or uses OpenAI or ElevenLabs (see [Voice input](#voice-input)). |
 | **Chat** | While a member is working, choose **Now** (it reads your message between tool calls and adjusts), **Stop and redirect** (it ends its current turn and answers you first) or **Next turn**. After the run, the member resumes its session and answers right away; anything it changes is scope-checked and merged into the run's branch. |
 | **Ask a question** | A read-only session with one member in your project: it can read the code but not change it. Follow-up questions continue the same session. |
 | **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant, writing, video editing, research) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, who it can ask for work, report format, connection, limits), **Workflow** (a drag-and-drop graph: drag steps to reorder, drag members onto a step or between steps, drag a gate's ↺ handle onto an earlier step to set where failed work goes back; plus forms for gates and the fix loop), **Team settings** (connection, sandbox, limits), **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
 | **Team chat** | Describe the team you need and an architect agent sets it up: it reads your project to fit the stack and folders, asks only if something important is unclear, and saves the team through a tool that refuses invalid files and hands the problems back to it. Keep talking to change it ("add a security reviewer", "use haiku for the tester"). Available in New project, New team, and every team's **Chat** tab. |
 | **Skills** | One library of skills for all teams: **write your own**, **add from GitHub** (a repository or a folder; private ones work if git can clone them), or install from **Anthropic's skills**. Claude Code's **built-in skills** are listed too. Give skills to a member, to every member of a team, or mark one **Everyone** to give it to all members of all teams. |
-| **Plugins** | Claude Code plugins (skills, slash commands, agents, hooks, MCP and LSP servers) from **Anthropic's directory** or **any GitHub repository or marketplace**. Before installing, covibe shows what a plugin runs on your computer and where it sends data, and you choose its sandbox: the websites it may reach and the folders it may write. Every hook and server it runs is confined to that sandbox. Give plugins to members like skills. |
+| **Plugins** | Claude Code plugins (skills, slash commands, agents, hooks, MCP and LSP servers) from **Anthropic's directory** or **any GitHub repository or marketplace**, or **any MCP server** (ElevenLabs, Linear, your own) from its address, command or JSON snippet (see [Adding any MCP server](#adding-any-mcp-server)). Before installing, covibe shows what a plugin runs on your computer and where it sends data, and you choose its sandbox: the websites it may reach and the folders it may write. Every hook and server it runs is confined to that sandbox. Keys its servers need are saved on its page, with covibe's other keys. Give plugins to members like skills. |
 | **Projects** | Each project has **Runs**, **Brain** and **Git** tabs. **Git** works with your checkout (see [The Git tab](#the-git-tab)): fetch, pull, push, stage and commit, stashes, branches local and on the remote, merges and rebases with conflicts resolved file by file, a commit graph to revert, cherry-pick, branch, tag or reset from, remotes, any git command, and a **git helper** to chat with when something is stuck. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
 | **Settings → Advanced** | Sign in more **Claude accounts** (each in its own Claude Code folder), turn on **sharing work across them**, sign in **ChatGPT accounts** (the sign-in Codex uses) to put members on OpenAI's models within your ChatGPT plan, and add **model providers** with an API key (DeepSeek, Moonshot, Z.ai, OpenAI, OpenRouter, Groq, a local Ollama, or any Anthropic- or OpenAI-compatible API). Their models then appear in every team's model list. See [Accounts and providers](#accounts-and-providers). |
 | **Brain** | The project's shared notes. Every member reads them before working and can **propose** additions; only the team's **curator** (or you) writes. Review proposals yourself (accept into a new or existing note, or reject) or ask the curator. Edit notes directly; every change is in the brain's own git history. |
@@ -242,7 +243,7 @@ macOS, bubblewrap on Linux) with that plugin's policy:
 | Read | Everything outside your home folder. In it, only the plugin, its data folder, language toolchains (`~/.nvm`, `~/.cargo`…) and the member's working folder: not `~/.ssh`, `~/.aws`, your other projects or Claude's settings |
 | Write | Their own data folder (`CLAUDE_PLUGIN_DATA`, which holds their `TMPDIR`) and folders you allow; the working folder only if you allow it, and never its `.git`, `.claude` or `.mcp.json` (what is there would run outside the sandbox) |
 | Network | Only the domains you allow (none by default; an `npx` or `uvx` server is offered its package registry) |
-| Environment | `PATH`, `HOME`, locale and the plugin's own folders, plus the variables a server declares in its config. Your API keys and tokens stay out |
+| Environment | `PATH`, `HOME`, locale and the plugin's own folders, plus the variables a server declares in its config (filled in from the keys saved for that plugin, then your environment). Your other API keys and tokens stay out |
 
 What a plugin sends to a remote MCP server or an HTTP hook leaves your computer, so the review lists those
 addresses separately. Settings a plugin would apply to Claude Code (`settings.json`) are left out. Installing
@@ -272,6 +273,37 @@ Members never get the tokens. Their Claude Code reaches a signed-in server throu
 refuses it, and passes everything else through as it is. If renewing fails, the card says so and asks you to sign
 in again. Signing out (or deleting the plugin) forgets the tokens, and members go back to the server's own
 address. covibe signs in to servers on https (or on this computer) that use MCP's streamable HTTP transport.
+
+covibe normally registers itself with the server's sign-in service. Some services do not allow that and say so
+when you click **Sign in** (GitHub and Slack, for example). For those, create an OAuth app in the service's
+developer settings with the callback address `http://127.0.0.1:47815/callback`, then enter its client id (and
+secret, if it has one) under **Use your own OAuth app** on the plugin's page. The id is kept in
+`~/.covibe/mcp-clients.json` and the secret with your keys.
+
+### Adding any MCP server
+
+**Plugins → Add MCP server** takes whatever the service publishes for Claude Code, Claude Desktop, Cursor or VS Code:
+
+- an address: `https://mcp.example.com/mcp` (add an API key header there if the server takes a key instead of a sign-in)
+- a command: `npx -y @example/mcp-server`, or `EXAMPLE_API_KEY=… uvx example-mcp`
+- a JSON snippet: `{ "mcpServers": { "elevenlabs": { "command": "uvx", "args": ["elevenlabs-mcp"], "env": { "ELEVENLABS_API_KEY": "…" } } } }`
+  (also VS Code's `"servers"`, a single server, or a snippet copied without its outer braces)
+
+covibe turns it into a small plugin of your own (shown as **MCP server you added**) and gives it the same review,
+sandbox, sign-in and proxy as any plugin. Give it to members by its name (`plugins: [elevenlabs]`). **Change
+servers** on its page edits the config later. A server started on this computer can only reach the websites
+you allow, so add the address of the service it talks to (for ElevenLabs, `api.elevenlabs.io`).
+
+**Keys.** Keys written into what you paste (an `env` value or a header such as `Authorization` or `x-api-key`)
+are taken out: the config gets `${VARIABLE}` instead, and the value is saved with covibe's other keys (the
+Keychain, or `~/.covibe/secrets.json`). Placeholders such as `<your-api-key>` become variables to fill in. Every
+plugin's page, including plugins from GitHub, has a **Keys and settings** card listing the variables its servers
+use (`${VAR}` in its config, or an `env` entry with no value), saved or not.
+
+Members never get these values, in their environment or in a file they can read. The sandbox launcher reads
+them when it starts one of the plugin's servers and gives them to that server alone. A remote server that needs
+a key in its address or headers is reached through covibe's MCP proxy, which adds the key, like a sign-in token.
+A variable you have not saved is taken from the environment covibe runs in, as before.
 
 ### How the pieces fit
 
@@ -468,6 +500,30 @@ on an escalated run.
 
 Teammates' `send_message` messages use the same inbox, in steer mode: a working teammate reads them between tool
 calls.
+
+## Voice input
+
+The mic button sits next to the goal box (⌘N), member chats, team chat and the git helper. Click it, talk, and
+click again; the text is added to the box for you to check and send. Esc throws the recording away. The app
+records 16 kHz mono WAV and covibe turns it into text with the engine chosen in **Settings → Voice input**:
+
+| Engine | What it needs | Where the recording goes |
+|---|---|---|
+| **whisper.cpp** (default) | `brew install whisper-cpp`, and a model downloaded from that page | Nowhere: it runs on your Mac |
+| **OpenAI** | A model provider from Settings → Advanced, or a key just for voice input. Other OpenAI-compatible APIs with `/audio/transcriptions` (Groq) work too | OpenAI (or that provider) |
+| **ElevenLabs** | A key just for voice input, or the `ELEVENLABS_API_KEY` saved for an ElevenLabs plugin | ElevenLabs (Scribe) |
+
+The whisper.cpp models are a one-time download into `~/.covibe/voice/models/`: **tiny** (75 MB), **base**
+(142 MB, the default; fast on any Mac, good for clear English), **small** (466 MB; clearly better for German,
+French and other languages, still quick on Apple silicon) and **large-v3-turbo** (547 MB, the most accurate).
+On Apple silicon even small turns a short message into text in a second or two. Setting the language you speak
+helps with short recordings.
+
+Dictation apps that type into any text field, such as Wispr Flow or macOS dictation (press Fn twice), work in
+every text box too, without any setup.
+
+The Mac app asks macOS for the microphone the first time. Only covibe's own page may use it, never a web page
+shown inside it (a run's preview).
 
 ## Questions
 
@@ -710,7 +766,8 @@ src/events/store.ts        SQLite runs, events, sessions, inbox, questions, imag
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
 src/runner/backend.ts      per-agent environment for each backend
 src/connections/           Settings → Advanced: accounts and providers, Keychain keys, balancing, the OpenAI translator;
-                           signing in to plugin MCP servers (mcp-auth.ts) and the proxy that adds the token (mcp-proxy.ts)
+                           signing in to plugin MCP servers (mcp-auth.ts), the proxy that adds the token or key (mcp-proxy.ts),
+                           and keys saved for plugin servers (plugin-keys.ts)
                            (Chat Completions; Responses for ChatGPT accounts in codex-proxy.ts, their sign-in in codex-auth.ts)
 src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.0.0.1, token)
 src/server/library.ts      projects and teams library, comment-preserving YAML edits
@@ -719,6 +776,8 @@ src/server/projections.ts  events → run summaries, member status, board, chat 
 src/server/gitops.ts       git in the project's checkout: every operation the Git tab offers, run without a terminal, with failures explained
 src/server/git-helper.ts   the git helper: reads freely, proposes changes for you to run, edits only conflicted files
 ui/src/components/Office.tsx    the run as a pixel office (office-art.ts draws it, office-state.ts maps member states)
+src/mcp-config.ts          reading an MCP server you paste (address, command or JSON) and taking keys out of it
+src/voice.ts               voice input: whisper.cpp on this computer, OpenAI or ElevenLabs; settings and model downloads
 src/main.ts                CLI
 ui/                        the app UI (React, Vite, CodeMirror)
 desktop/                   the macOS shell (Electron): window, menus, folder picker, quit guard, members' browser

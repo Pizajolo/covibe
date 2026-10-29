@@ -36,6 +36,7 @@ import { ConnectionError, Connections, listModels, openInBrowser, startLogin, ty
 import { forgetClient, McpAuthError, setClient, signInStatus, signOut, startSignIn } from '../connections/mcp-auth.js';
 import { stopMcpProxy } from '../connections/mcp-proxy.js';
 import { MAIN_ACCOUNT, type ProviderModel } from '../connections/types.js';
+import { Voice, VoiceError, type VoiceSettings } from '../voice.js';
 import { backendEnv, BackendError } from '../runner/backend.js';
 import type { EnvironmentInfo, PlanUsage } from '../runner/types.js';
 import { ARCHITECT, design } from './designer.js';
@@ -78,6 +79,8 @@ export interface ServerOptions {
   runner?: AgentRunner;
   /** Claude accounts and providers (Settings → Advanced); defaults to the library's home. */
   connections?: Connections;
+  /** Voice input (tests give one whose engines are fakes). */
+  voice?: Voice;
   /** Fixed token (tests); otherwise random per start. */
   token?: string;
   uiDir?: string;
@@ -102,6 +105,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const library = opts.library ?? new Library();
   const runner = opts.runner ?? new ClaudeSdkRunner();
   const connections = opts.connections ?? new Connections(library.home);
+  const voice = opts.voice ?? new Voice(library.home, connections.secrets, connections);
   if (runner.usage && !connections.usageReader) connections.usageReader = (env) => runner.usage!(env);
   const token = opts.token ?? randomBytes(24).toString('hex');
   const uiDir = opts.uiDir ?? UI_DIR;
@@ -682,6 +686,26 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       return withUsage(plugins.getPlugin(p.name!));
     }],
 
+    // ---- voice input (the mic button); recordings come in at POST /api/voice/transcribe
+    ['GET', '/api/voice', () => voice.status()],
+    ['PUT', '/api/voice', (_p, body) => {
+      if (!isRecord(body)) throw new BadRequest('expected an object');
+      const text = (k: string) => (typeof body[k] === 'string' ? (body[k] as string) : undefined);
+      const key = (k: string) => (body[k] === null ? null : text(k));
+      return voice.update({
+        engine: text('engine') as VoiceSettings['engine'] | undefined,
+        language: text('language'),
+        model: text('model'),
+        whisperPath: text('whisperPath'),
+        openaiConnection: text('openaiConnection'),
+        openaiModel: text('openaiModel'),
+        openaiKey: key('openaiKey'),
+        elevenlabsKey: key('elevenlabsKey'),
+      });
+    }],
+    ['POST', '/api/voice/models/:id', (p) => voice.startDownload(p.id!)],
+    ['DELETE', '/api/voice/models/:id', (p) => voice.deleteModel(p.id!)],
+
     // ---- project brain
     ['GET', '/api/projects/:pid/brain', async (p) => {
       const project = library.project(p.pid!);
@@ -1082,6 +1106,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         return await streamBrowser(pid!, rid!, agent!, req, res);
       }
 
+      // A recording from the mic button: raw WAV, not JSON (it can be minutes long).
+      if (url.pathname === '/api/voice/transcribe' && req.method === 'POST') return send(res, 200, await voice.transcribe(await readRaw(req, 64 << 20)));
+
       if (url.pathname === '/api/events' && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
         res.write(': connected\n\n');
@@ -1109,7 +1136,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           ? 409
           : err instanceof NotFound
             ? 404
-            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof McpAuthError || err instanceof BackendError
+            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof McpAuthError || err instanceof BackendError || err instanceof VoiceError
               ? 400
               : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;
@@ -1272,6 +1299,17 @@ function str(body: unknown, key: string, allowEmpty = false): string {
   const v = (body as Record<string, unknown>)?.[key];
   if (typeof v !== 'string' || (!allowEmpty && !v.trim())) throw new BadRequest(`"${key}" is required`);
   return v;
+}
+
+async function readRaw(req: IncomingMessage, limit: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const c of req) {
+    size += (c as Buffer).length;
+    if (size > limit) throw new BadRequest('request too large');
+    chunks.push(c as Buffer);
+  }
+  return Buffer.concat(chunks);
 }
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
