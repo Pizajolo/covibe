@@ -39,6 +39,17 @@ interface Remote {
   env?: string[];
   /** A server covibe can sign in to, and whether it is. */
   signIn?: SignIn;
+  /** Your own OAuth app for signing in. */
+  client?: { clientId?: string; hasSecret: boolean; callbackUrl: string };
+}
+
+interface Variable {
+  name: string;
+  servers: string[];
+  saved: boolean;
+  inEnvironment: boolean;
+  /** Found in what you pasted (when adding an MCP server): saved with your keys when you add it. */
+  found?: boolean;
 }
 
 interface Contents {
@@ -67,6 +78,9 @@ export interface PluginRow {
   policy: SandboxPolicy;
   approved: boolean;
   contents: Contents;
+  variables: Variable[];
+  /** You added it as an MCP server: its servers' config. */
+  mcpServers?: Record<string, unknown>;
   updatedAt: string;
   usedBy: { team: string; agent: string }[];
 }
@@ -108,11 +122,15 @@ export function Plugins({ tab: tabParam, name }: { tab?: string; name?: string }
   const tab: Tab = tabParam === 'anthropic' ? 'anthropic' : 'library';
   const { value, reload } = useLive(() => get<PluginsResponse>('/api/plugins'), []);
   const [adding, setAdding] = useState(false);
+  const [addingMcp, setAddingMcp] = useState(false);
 
   if (name) return <PluginDetail name={name} sandbox={value?.sandbox} onChanged={reload} />;
   return (
     <>
       <Toolbar title="Plugins" sub="Skills, commands, hooks and MCP servers packaged for Claude Code. Whatever a plugin runs runs in the OS sandbox.">
+        <button className="btn" onClick={() => setAddingMcp(true)}>
+          <IconPlug /> Add MCP server
+        </button>
         <button className="btn primary" onClick={() => setAdding(true)}>
           <IconPlus /> Add from GitHub
         </button>
@@ -132,11 +150,12 @@ export function Plugins({ tab: tabParam, name }: { tab?: string; name?: string }
       <div className="content">
         <div className="page">
           {value && <SandboxBanner sandbox={value.sandbox} />}
-          {tab === 'library' && <Library plugins={value?.library} onChanged={reload} onAdd={() => setAdding(true)} />}
+          {tab === 'library' && <Library plugins={value?.library} onChanged={reload} onAdd={() => setAdding(true)} onAddMcp={() => setAddingMcp(true)} />}
           {tab === 'anthropic' && <Catalog onInstalled={reload} />}
         </div>
       </div>
       {adding && <FromGithub onClose={() => setAdding(false)} onInstalled={(n) => (reload(), go('plugins', 'library', n))} />}
+      {addingMcp && <AddMcp onClose={() => setAddingMcp(false)} onAdded={(n) => (reload(), go('plugins', 'library', n))} />}
     </>
   );
 }
@@ -171,7 +190,8 @@ function summary(c: Contents): string {
     .join(' · ');
 }
 
-function SourceBadge({ origin }: { origin?: Origin }) {
+function SourceBadge({ origin, added }: { origin?: Origin; added?: boolean }) {
+  if (added) return <span className="pill info">MCP server you added</span>;
   if (!origin) return <span className="pill">Local</span>;
   return (
     <span className="pill info" title={`${origin.repo}/${origin.path} @ ${origin.commit.slice(0, 7)}`}>
@@ -190,7 +210,7 @@ function UsedBy({ used = [] }: { used?: PluginRow['usedBy'] }) {
   );
 }
 
-function Library({ plugins, onChanged, onAdd }: { plugins?: PluginRow[]; onChanged: () => void; onAdd: () => void }) {
+function Library({ plugins, onChanged, onAdd, onAddMcp }: { plugins?: PluginRow[]; onChanged: () => void; onAdd: () => void; onAddMcp: () => void }) {
   const toast = useToast();
   const [toggle] = useAction(async (p: PluginRow) => {
     await put(`/api/plugins/${p.name}/everyone`, { everyone: !p.everyone });
@@ -209,6 +229,9 @@ function Library({ plugins, onChanged, onAdd }: { plugins?: PluginRow[]; onChang
               <button className="btn" onClick={() => go('plugins', 'anthropic')}>
                 Browse Anthropic's directory
               </button>
+              <button className="btn" onClick={onAddMcp}>
+                <IconPlug /> Add MCP server
+              </button>
               <button className="btn primary" onClick={onAdd}>
                 <IconPlus /> Add from GitHub
               </button>
@@ -216,7 +239,7 @@ function Library({ plugins, onChanged, onAdd }: { plugins?: PluginRow[]; onChang
           }
         >
           A plugin bundles skills, slash commands, agents, hooks and MCP servers. covibe shows you what a plugin runs before you install it, and runs all of it in the OS sandbox with
-          only the network and folders you allow.
+          only the network and folders you allow. Any MCP server (ElevenLabs, Linear, your own) can be added too: paste its address, command or JSON snippet.
         </Empty>
       </div>
     );
@@ -230,7 +253,7 @@ function Library({ plugins, onChanged, onAdd }: { plugins?: PluginRow[]; onChang
               <div className="row">
                 <strong className="mono">{p.name}</strong>
                 {p.version && <span className="tiny faint">v{p.version}</span>}
-                <SourceBadge origin={p.origin} />
+                <SourceBadge origin={p.origin} added={!!p.mcpServers} />
                 {!p.approved && (
                   <span className="pill warn">
                     <IconAlert /> Update needs your approval
@@ -560,11 +583,17 @@ function PluginDetail({ name, sandbox, onChanged }: { name: string; sandbox?: Sa
     onChanged();
     go('plugins', 'library');
   });
+  const [editing, setEditing] = useState(false);
   if (!value) return <Toolbar title={name} />;
   const current = policy ?? value.policy;
   return (
     <>
       <Toolbar title={<span className="mono">{name}</span>} sub={value.description}>
+        {value.mcpServers && (
+          <button className="btn" onClick={() => setEditing(true)}>
+            Change servers
+          </button>
+        )}
         {value.origin && (
           <button className="btn" disabled={updating} onClick={() => void update()} title={`Re-install from ${value.origin.repo}`}>
             {updating ? 'Updating…' : 'Update from GitHub'}
@@ -587,7 +616,7 @@ function PluginDetail({ name, sandbox, onChanged }: { name: string; sandbox?: Sa
             </div>
           )}
           <div className="row wrap" style={{ gap: 10 }}>
-            <SourceBadge origin={value.origin} />
+            <SourceBadge origin={value.origin} added={!!value.mcpServers} />
             {value.version && <span className="tiny faint">v{value.version}</span>}
             <UsedBy used={value.usedBy} />
             <span className="tiny faint">Changed {ago(value.updatedAt)}</span>
@@ -595,6 +624,7 @@ function PluginDetail({ name, sandbox, onChanged }: { name: string; sandbox?: Sa
           <div className="card card-pad">
             <ContentsView contents={value.contents} />
           </div>
+          {value.variables.length > 0 && <Variables plugin={name} variables={value.variables} onChange={() => (void reload(), onChanged())} />}
           {value.contents.remotes.some((r) => r.signIn) && <SignIns plugin={name} remotes={value.contents.remotes.filter((r) => r.signIn)} onChange={() => void reload()} />}
           {value.contents.programs.length > 0 && (
             <div className="card card-pad col" style={{ gap: 10 }}>
@@ -611,7 +641,192 @@ function PluginDetail({ name, sandbox, onChanged }: { name: string; sandbox?: Sa
           )}
         </div>
       </div>
+      {editing && value.mcpServers && (
+        <AddMcp
+          initial={{ name, description: value.description, config: JSON.stringify({ mcpServers: value.mcpServers }, null, 2) }}
+          onClose={() => setEditing(false)}
+          onAdded={() => (setEditing(false), void reload(), onChanged())}
+        />
+      )}
     </>
+  );
+}
+
+/**
+ * Add any MCP server as a plugin of your own: its address, the command that
+ * starts it, or the JSON snippet its maker publishes. Keys in the snippet
+ * are saved with covibe's other keys, not in the plugin.
+ */
+function AddMcp({ initial, onClose, onAdded }: { initial?: { name: string; description: string; config: string }; onClose: () => void; onAdded: (name: string) => void }) {
+  const toast = useToast();
+  const [config, setConfig] = useState(initial?.config ?? '');
+  const [name, setName] = useState(initial?.name ?? '');
+  const [header, setHeader] = useState({ name: '', value: '' });
+  const [review, setReview] = useState<(Review & { mcpServers: Record<string, unknown>; variables: Variable[] }) | null>(null);
+  const [policy, setPolicy] = useState<SandboxPolicy | null>(null);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const isUrl = /^https?:\/\//i.test(config.trim());
+  const input = () => ({ config, name: name.trim() || undefined, description: initial?.description, header: isUrl && header.name.trim() ? header : undefined });
+  const [check, checking] = useAction(async () => {
+    const r = await post<NonNullable<typeof review>>('/api/plugins/mcp/review', input());
+    setReview(r);
+    setPolicy(r.policy);
+    if (!name.trim()) setName(r.name);
+  });
+  const [add, adding] = useAction(async () => {
+    const p = await post<PluginRow>('/api/plugins/mcp/add', { ...input(), name: review!.name, policy, values });
+    toast(initial ? `Saved ${p.name}` : `Added ${p.name}`);
+    onAdded(p.name);
+  });
+  const missing = review?.variables.filter((v) => !v.saved && !v.found && !v.inEnvironment && !values[v.name]?.trim()) ?? [];
+
+  return (
+    <Modal
+      title={initial ? <span>Change <span className="mono">{initial.name}</span></span> : 'Add an MCP server'}
+      wide
+      onClose={onClose}
+      footer={
+        <>
+          {review && (
+            <button className="btn" onClick={() => setReview(null)}>
+              Back
+            </button>
+          )}
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          {review ? (
+            <button className="btn primary" disabled={adding || !policy} onClick={() => void add()}>
+              {adding ? 'Saving…' : review.installed ? 'Save with these permissions' : 'Add with these permissions'}
+            </button>
+          ) : (
+            <button className="btn primary" disabled={!config.trim() || checking} onClick={() => void check()}>
+              {checking ? 'Reading…' : 'Review'}
+            </button>
+          )}
+        </>
+      }
+    >
+      {!review ? (
+        <div className="col" style={{ gap: 14 }}>
+          <label className="field">
+            Address, command or JSON
+            <textarea
+              className="input mono"
+              autoFocus
+              rows={initial ? 12 : 6}
+              value={config}
+              onChange={(e) => setConfig(e.target.value)}
+              placeholder={'https://mcp.example.com/mcp\n\nor a command:  npx -y @example/mcp-server\n\nor the JSON from its docs:  { "mcpServers": { "example": { "command": "uvx", "args": ["example-mcp"], "env": { "EXAMPLE_API_KEY": "…" } } } }'}
+            />
+            <span className="help">
+              Most services publish one of these for Claude Code, Claude Desktop or Cursor. Paste it as it is: keys in it are taken out and saved with covibe's other keys
+              (the {navigator.platform.startsWith('Mac') ? 'Keychain' : 'secrets file'}), never in the plugin.
+            </span>
+          </label>
+          <label className="field">
+            Name
+            <input className="input mono" value={name} disabled={!!initial} placeholder="Taken from the server if you leave it empty" onChange={(e) => setName(e.target.value)} />
+            <span className="help">What team files call it: plugins: [{name.trim() || 'name'}].</span>
+          </label>
+          {isUrl && (
+            <div className="field">
+              API key header (optional)
+              <div className="row">
+                <input className="input mono" style={{ maxWidth: 200 }} value={header.name} placeholder="e.g. Authorization or x-api-key" onChange={(e) => setHeader({ ...header, name: e.target.value })} />
+                <input className="input mono grow" type="password" value={header.value} placeholder="Bearer sk-… or the key" onChange={(e) => setHeader({ ...header, value: e.target.value })} />
+              </div>
+              <span className="help">For servers that take a key instead of a sign-in. Servers that want a sign-in (OAuth) get a Sign in button once added.</span>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="col" style={{ gap: 14 }}>
+          <p className="small muted">
+            <span className="mono">{review.name}</span>: {review.description}
+            {review.installed && <span className="pill" style={{ marginLeft: 6 }}>replaces the one in your library</span>}
+          </p>
+          <ContentsView contents={review.contents} />
+          {review.variables.length > 0 && (
+            <div className="col" style={{ gap: 8 }}>
+              <h3 style={{ margin: 0 }}>Keys and settings</h3>
+              {review.variables.map((v) => (
+                <label key={v.name} className="field">
+                  <span className="mono">{v.name}</span>
+                  <input
+                    className="input mono"
+                    type="password"
+                    value={values[v.name] ?? ''}
+                    placeholder={v.found ? 'Found in what you pasted: saved with your keys' : v.saved ? 'Saved: leave empty to keep it' : v.inEnvironment ? 'Taken from your environment unless you enter one' : 'Not set'}
+                    onChange={(e) => setValues({ ...values, [v.name]: e.target.value })}
+                  />
+                </label>
+              ))}
+              {missing.length > 0 && <span className="tiny" style={{ color: 'var(--warn)' }}>Without {missing.map((v) => v.name).join(', ')} the server may not start. You can add them later on its page.</span>}
+            </div>
+          )}
+          {review.contents.programs.length > 0 && policy && (
+            <div className="col" style={{ gap: 8 }}>
+              <h3 className="row" style={{ margin: 0 }}>
+                <IconShield width={15} height={15} /> Its sandbox
+              </h3>
+              <PolicyEditor value={policy} onChange={setPolicy} />
+            </div>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/** Keys and other values a plugin's servers need, kept with covibe's other keys and given only to those servers. */
+function Variables({ plugin, variables, onChange }: { plugin: string; variables: Variable[]; onChange: () => void }) {
+  const toast = useToast();
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [save, saving] = useAction(async (change: Record<string, string | null>) => {
+    await put(`/api/plugins/${encodeURIComponent(plugin)}/variables`, { values: change });
+    setValues((v) => Object.fromEntries(Object.entries(v).filter(([k]) => !(k in change))));
+    toast('Saved: it applies from the next turn');
+    onChange();
+  });
+  const edited = Object.fromEntries(Object.entries(values).filter(([, v]) => v.trim()));
+  return (
+    <div className="card card-pad col" style={{ gap: 10 }}>
+      <div className="row">
+        <h3 className="grow" style={{ margin: 0 }}>
+          Keys and settings
+        </h3>
+        <button className="btn sm primary" disabled={!Object.keys(edited).length || saving} onClick={() => void save(edited)}>
+          Save
+        </button>
+      </div>
+      <span className="tiny faint">
+        Kept with covibe's other keys. The launcher gives them only to this plugin's servers (a remote server gets them through covibe's proxy): members never see them.
+      </span>
+      {variables.map((v) => (
+        <div key={v.name} className="row" style={{ gap: 10 }}>
+          <div className="col" style={{ gap: 2, minWidth: 220 }}>
+            <span className="small mono">{v.name}</span>
+            <span className="tiny faint" style={!v.saved && !v.inEnvironment ? { color: 'var(--warn)' } : undefined}>
+              {v.saved ? 'Saved' : v.inEnvironment ? 'From your environment' : 'Not set'} · {v.servers.join(', ')}
+            </span>
+          </div>
+          <input
+            className="input mono grow"
+            type="password"
+            value={values[v.name] ?? ''}
+            placeholder={v.saved ? 'Enter a new value to replace it' : 'Enter a value'}
+            onChange={(e) => setValues({ ...values, [v.name]: e.target.value })}
+            onKeyDown={(e) => e.key === 'Enter' && values[v.name]?.trim() && void save({ [v.name]: values[v.name]! })}
+          />
+          {v.saved && (
+            <button className="btn sm ghost" disabled={saving} onClick={() => void save({ [v.name]: null })}>
+              Remove
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -735,6 +950,7 @@ function SignIns({ plugin, remotes, onChange }: { plugin: string; remotes: Remot
           </div>
         );
       })}
+      {remotes.map((r) => r.client && <OwnClient key={`client-${r.name}`} plugin={plugin} server={r.name} client={r.client} onChange={onChange} />)}
       {login && (
         <div className="banner info small">
           <IconAlert />
@@ -749,6 +965,62 @@ function SignIns({ plugin, remotes, onChange }: { plugin: string; remotes: Remot
           </span>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Your own OAuth app for a server that does not let covibe register itself
+ * (the sign-in says so): made in the service's developer settings with
+ * covibe's fixed callback address.
+ */
+function OwnClient({ plugin, server, client, onChange }: { plugin: string; server: string; client: NonNullable<Remote['client']>; onChange: () => void }) {
+  const toast = useToast();
+  const [open, setOpen] = useState(!!client.clientId);
+  const [id, setId] = useState(client.clientId ?? '');
+  const [secret, setSecret] = useState('');
+  const path = `/api/plugins/${encodeURIComponent(plugin)}/sign-in/${encodeURIComponent(server)}/client`;
+  const [save, saving] = useAction(async () => {
+    await put(path, { clientId: id, ...(secret ? { clientSecret: secret } : {}) });
+    setSecret('');
+    toast(`${server} signs in with your OAuth app now: sign in again`);
+    onChange();
+  });
+  const [remove] = useAction(async () => {
+    await del(path);
+    setId('');
+    toast(`${server} signs in with covibe's own registration again`);
+    onChange();
+  });
+  if (!open)
+    return (
+      <button className="btn sm ghost" style={{ alignSelf: 'flex-start' }} onClick={() => setOpen(true)}>
+        Use your own OAuth app for {server}
+      </button>
+    );
+  return (
+    <div className="col" style={{ gap: 8, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+      <strong className="small">Your own OAuth app for {server}</strong>
+      <span className="tiny faint">
+        For servers that do not let covibe register itself. Create an OAuth app in the service's developer settings with this callback address, then enter its client id (and
+        secret, if it has one):
+      </span>
+      <span className="row" style={{ gap: 6 }}>
+        <code className="small mono">{client.callbackUrl}</code>
+        <Copy text={client.callbackUrl} label="Copy" />
+      </span>
+      <div className="row">
+        <input className="input mono grow" value={id} placeholder="Client id" onChange={(e) => setId(e.target.value)} />
+        <input className="input mono grow" type="password" value={secret} placeholder={client.hasSecret ? 'Secret saved: enter one to replace it' : 'Client secret (if any)'} onChange={(e) => setSecret(e.target.value)} />
+        <button className="btn sm primary" disabled={!id.trim() || saving} onClick={() => void save()}>
+          Save
+        </button>
+        {client.clientId && (
+          <button className="btn sm ghost" onClick={() => void remove()}>
+            Remove
+          </button>
+        )}
+      </div>
     </div>
   );
 }

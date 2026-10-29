@@ -33,7 +33,7 @@ import {
 } from '../skills.js';
 import { CodexAuthError } from '../connections/codex-auth.js';
 import { ConnectionError, Connections, listModels, openInBrowser, startLogin, type NewConnection } from '../connections/store.js';
-import { McpAuthError, signInStatus, signOut, startSignIn } from '../connections/mcp-auth.js';
+import { forgetClient, McpAuthError, setClient, signInStatus, signOut, startSignIn } from '../connections/mcp-auth.js';
 import { stopMcpProxy } from '../connections/mcp-proxy.js';
 import { MAIN_ACCOUNT, type ProviderModel } from '../connections/types.js';
 import { backendEnv, BackendError } from '../runner/backend.js';
@@ -638,10 +638,21 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     ['POST', '/api/plugins/github/scan', (_p, body) => plugins.scanGithub(str(body, 'url'))],
     ['POST', '/api/plugins/github/review', (_p, body) => plugins.reviewGithub(str(body, 'url'), str(body, 'id', true))],
     ['POST', '/api/plugins/github/install', (_p, body) => plugins.installGithub(str(body, 'url'), str(body, 'id', true), (body as { policy?: unknown }).policy)],
+    // MCP servers you add by hand: an address, a command or a JSON snippet, made into a plugin of your own.
+    ['POST', '/api/plugins/mcp/review', (_p, body) => plugins.reviewMcp(mcpInput(body))],
+    ['POST', '/api/plugins/mcp/add', (_p, body) => {
+      const b = body as { policy?: unknown; values?: unknown };
+      return withUsage(plugins.addMcpServer(mcpInput(body), b.policy, isRecord(b.values) ? b.values : {}));
+    }],
     ['GET', '/api/plugins/:name', (p) => withUsage(plugins.getPlugin(p.name!))],
     ['PUT', '/api/plugins/:name/policy', (p, body) => withUsage(plugins.setPolicy(p.name!, (body as { policy?: unknown }).policy))],
     ['PUT', '/api/plugins/:name/everyone', (p, body) => withUsage(plugins.setEveryone(p.name!, !!(body as { everyone?: unknown }).everyone))],
     ['POST', '/api/plugins/:name/approve', (p) => withUsage(plugins.approvePlugin(p.name!))],
+    ['PUT', '/api/plugins/:name/variables', (p, body) => {
+      const values = (body as { values?: unknown }).values;
+      if (!isRecord(values)) throw new BadRequest('"values" must be an object');
+      return withUsage(plugins.setPluginVariables(p.name!, values));
+    }],
     ['POST', '/api/plugins/:name/update', async (p) => withUsage(await plugins.updatePlugin(p.name!))],
     ['DELETE', '/api/plugins/:name', (p) => (plugins.deletePlugin(p.name!), { ok: true })],
     // Sign covibe in to a plugin's remote MCP server; the browser does the sign-in and the page watches its status.
@@ -653,6 +664,18 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       return { needed: true, url, opened: await openInBrowser(url) };
     }],
     ['GET', '/api/plugins/:name/sign-in/:server', (p) => signInStatus(p.name!, p.server!)],
+    // Your own OAuth app, for servers that do not let covibe register itself.
+    ['PUT', '/api/plugins/:name/sign-in/:server/client', (p, body) => {
+      plugins.signInTarget(p.name!, p.server!);
+      const secret = (body as { clientSecret?: unknown }).clientSecret;
+      setClient(p.name!, p.server!, str(body, 'clientId'), typeof secret === 'string' ? secret : undefined);
+      return withUsage(plugins.getPlugin(p.name!));
+    }],
+    ['DELETE', '/api/plugins/:name/sign-in/:server/client', (p) => {
+      plugins.signInTarget(p.name!, p.server!);
+      forgetClient(p.name!, p.server!);
+      return withUsage(plugins.getPlugin(p.name!));
+    }],
     ['DELETE', '/api/plugins/:name/sign-in/:server', (p) => {
       plugins.signInTarget(p.name!, p.server!);
       signOut(p.name!, p.server!);
@@ -1227,6 +1250,22 @@ function gitOp(repo: string, op: string, b: Record<string, unknown>): Promise<un
   const fn = ops[op];
   if (!fn) throw new NotFound(`no git operation "${op}"`);
   return serially(repo, async () => (await fn()) ?? { ok: true });
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** An MCP server to add, from a request. */
+function mcpInput(body: unknown): plugins.McpInput {
+  const b = isRecord(body) ? body : {};
+  const h = isRecord(b.header) ? b.header : undefined;
+  return {
+    config: str(b, 'config'),
+    name: typeof b.name === 'string' ? b.name : undefined,
+    description: typeof b.description === 'string' ? b.description : undefined,
+    header: h && typeof h.name === 'string' && typeof h.value === 'string' ? { name: h.name, value: h.value } : undefined,
+  };
 }
 
 function str(body: unknown, key: string, allowEmpty = false): string {

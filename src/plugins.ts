@@ -13,21 +13,23 @@
 //   ~/.covibe/plugins/<name>/sandbox.json  the launcher's commands and policy (outside files/, out of the plugin's reach)
 //   ~/.covibe/plugin-data/<name>/          the plugin's own writable folder (CLAUDE_PLUGIN_DATA)
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { signedInUrl, signInStatus, signOut, type McpSignInStatus } from './connections/mcp-auth.js';
-import { mcpProxyUrl } from './connections/mcp-proxy.js';
+import { clientStatus, forgetClient, signedInUrl, signInStatus, signOut, type McpClientStatus, type McpSignInStatus } from './connections/mcp-auth.js';
+import { mcpProxyUrl, setKeyedTarget } from './connections/mcp-proxy.js';
+import { forgetPluginKeys, keysLocation, pluginKeys, setPluginKeys } from './connections/plugin-keys.js';
 import { checkout, fetchLfs, forgetCheckout, git, parseGithub, sparse, type GithubRef } from './github.js';
 import { covibeHome } from './home.js';
-import { expandHome, shellQuote, type LaunchSpec, type SandboxPolicy } from './sandbox-policy.js';
+import { McpConfigError, parseMcpInput, type McpInput, type ParsedMcp } from './mcp-config.js';
+import { expandHome, shellQuote, substitute, type LaunchSpec, type SandboxPolicy } from './sandbox-policy.js';
 import { parseSkillMd, SKILL_PLUGIN } from './skills.js';
 
-export type { SandboxPolicy };
+export type { McpInput, SandboxPolicy };
 export class PluginError extends Error {}
 
 type Json = Record<string, unknown>;
@@ -71,6 +73,19 @@ export interface PluginRemote {
    * hooks and for servers on the older SSE transport.
    */
   signIn?: McpSignInStatus;
+  /** Your own OAuth app for signing in, for servers that do not let covibe register itself. */
+  client?: McpClientStatus;
+}
+
+/** A variable a plugin's servers need (an API key, say), and whether covibe has a value for it. */
+export interface PluginVariable {
+  name: string;
+  /** The servers that use it. */
+  servers: string[];
+  /** Saved on the plugin's page (with covibe's other keys). */
+  saved: boolean;
+  /** Set in the environment covibe runs in. */
+  inEnvironment: boolean;
 }
 
 export interface PluginDoc {
@@ -99,6 +114,10 @@ export interface LibraryPlugin {
   /** False after an update changed what it runs, until you approve it again. */
   approved: boolean;
   contents: PluginContents;
+  /** Keys and other values its servers need. */
+  variables: PluginVariable[];
+  /** You added it as an MCP server (not from GitHub): its servers' config, to change it. */
+  mcpServers?: Record<string, Json>;
   updatedAt: string;
 }
 
@@ -110,6 +129,8 @@ interface PluginRecord {
   install?: { url: string; id: string };
   origin?: PluginOrigin;
   everyone?: boolean;
+  /** You added it as an MCP server (Plugins → Add MCP server). */
+  added?: boolean;
   policy: SandboxPolicy;
   /** Fingerprint of the programs and remotes you approved. */
   approved?: string;
@@ -339,6 +360,25 @@ function serverEnv(cfg: Json): string[] {
   return [...new Set([...Object.keys(isObj(cfg.env) ? cfg.env : {}), ...envRefs([cfg.command, cfg.args, cfg.env])])];
 }
 
+/** The variables a server needs a value for: ${VAR}s in its config, and declared ones it gives no value. */
+function neededVars(cfg: Json): string[] {
+  const env = isObj(cfg.env) ? cfg.env : {};
+  const unset = Object.entries(env).filter(([, v]) => typeof v !== 'string' || !v).map(([k]) => k);
+  return [...new Set([...envRefs([cfg.command, cfg.args, cfg.env, cfg.url, cfg.headers]), ...unset])];
+}
+
+function variablesOf(r: Pick<PluginRecord, 'mcpServers' | 'lspServers'>, saved: Record<string, string>): PluginVariable[] {
+  const out = new Map<string, PluginVariable>();
+  for (const [server, cfg] of [...Object.entries(r.mcpServers), ...Object.entries(r.lspServers)]) {
+    for (const name of neededVars(cfg)) {
+      const v = out.get(name) ?? { name, servers: [], saved: name in saved, inEnvironment: !!process.env[name] };
+      v.servers.push(server);
+      out.set(name, v);
+    }
+  }
+  return [...out.values()];
+}
+
 function programsOf(r: Pick<PluginRecord, 'hooks' | 'mcpServers' | 'lspServers' | 'monitors'>): { programs: PluginProgram[]; remotes: PluginRemote[] } {
   const programs: PluginProgram[] = [];
   const remotes: PluginRemote[] = [];
@@ -453,10 +493,17 @@ function prepare(r: PluginRecord): string {
   const data = dataDir(r.name);
   mkdirSync(data, { recursive: true });
   const L = launcher();
-  const spec: LaunchSpec = { plugin: r.name, root: files, data, policy: r.policy, hooks: [], monitors: [], mcp: {}, lsp: {} };
+  const saved = pluginKeys(r.name);
+  const spec: LaunchSpec = { plugin: r.name, root: files, data, policy: r.policy, hooks: [], monitors: [], mcp: {}, lsp: {}, ...(Object.keys(saved).length ? { keys: keysLocation(r.name) } : {}) };
   const shell = (kind: string, key: string) => `ELECTRON_RUN_AS_NODE=1 ${[...L, specPath, kind, key].map(shellQuote).join(' ')}`;
   const argv = (kind: string, key: string) => ({ command: L[0]!, args: [...L.slice(1), specPath, kind, key] });
-  const envOf = (cfg: Json) => ({ ...(isObj(cfg.env) ? cfg.env : {}), ELECTRON_RUN_AS_NODE: '1' });
+  // A server's variables are filled in by the launcher (from the saved keys and the environment), not by Claude Code.
+  const entry = (cfg: Json) => {
+    const env = isObj(cfg.env) ? cfg.env : {};
+    const values = Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string'));
+    return { command: String(cfg.command), args: strings(cfg.args), env: Object.keys(env), ...(Object.keys(values).length ? { values } : {}) };
+  };
+  const launcherEnv = { ELECTRON_RUN_AS_NODE: '1' };
 
   const hooks: Record<string, Json[]> = {};
   for (const [event, groups] of Object.entries(r.hooks)) {
@@ -472,19 +519,26 @@ function prepare(r: PluginRecord): string {
   const mcp: Record<string, Json> = {};
   for (const [n, cfg] of Object.entries(r.mcpServers)) {
     if (typeof cfg.command !== 'string') {
-      // Signed in: the member's Claude Code goes through covibe's proxy, which adds the token.
+      // Signed in, or needing a saved key: the member's Claude Code goes through covibe's proxy, which adds them.
       // (Another covibe process may rewrite this with its own proxy; both work while they run.)
-      const proxied = canSignIn(cfg) && signedInUrl(r.name, n) === cfg.url ? mcpProxyUrl(r.name, n) : undefined;
-      mcp[n] = proxied ? { ...cfg, type: 'http', url: proxied } : cfg;
+      const withKeys = canSignIn(cfg) && envRefs([cfg.url, cfg.headers]).some((v) => v in saved);
+      const target = remoteTarget(r.name, cfg, saved);
+      setKeyedTarget(r.name, n, withKeys ? target : undefined);
+      const proxied = canSignIn(cfg) && (withKeys || signedInUrl(r.name, n) === target.url) ? mcpProxyUrl(r.name, n) : undefined;
+      if (!proxied) mcp[n] = cfg;
+      else if (withKeys) {
+        const { headers: _, ...rest } = cfg;
+        mcp[n] = { ...rest, type: 'http', url: proxied };
+      } else mcp[n] = { ...cfg, type: 'http', url: proxied };
       continue;
     }
-    spec.mcp[n] = { command: cfg.command, args: strings(cfg.args), env: Object.keys(isObj(cfg.env) ? cfg.env : {}) };
-    mcp[n] = { type: 'stdio', ...argv('mcp', n), env: envOf(cfg) };
+    spec.mcp[n] = entry(cfg);
+    mcp[n] = { type: 'stdio', ...argv('mcp', n), env: launcherEnv };
   }
   const lsp: Record<string, Json> = {};
   for (const [n, cfg] of Object.entries(r.lspServers)) {
-    spec.lsp[n] = { command: String(cfg.command), args: strings(cfg.args), env: Object.keys(isObj(cfg.env) ? cfg.env : {}) };
-    lsp[n] = { ...cfg, ...argv('lsp', n), env: envOf(cfg) };
+    spec.lsp[n] = entry(cfg);
+    lsp[n] = { ...cfg, ...argv('lsp', n), env: launcherEnv };
   }
   const monitors = r.monitors.map((m) => {
     spec.monitors.push({ command: String(m.command) });
@@ -501,11 +555,20 @@ function prepare(r: PluginRecord): string {
   return files;
 }
 
+/** A remote server's real address and headers, with the plugin's saved keys (then covibe's environment) filled in. */
+function remoteTarget(plugin: string, cfg: Json, saved = pluginKeys(plugin)): { url: string; headers: Record<string, string> } {
+  const source = { ...process.env, ...saved };
+  const spec = { root: join(pluginDir(plugin), 'files'), data: dataDir(plugin) } as LaunchSpec;
+  const headers = Object.fromEntries(Object.entries(isObj(cfg.headers) ? cfg.headers : {}).map(([k, v]) => [k, substitute(String(v), spec, source)]));
+  return { url: substitute(String(cfg.url), spec, source), headers };
+}
+
 // ---------------------------------------------------------------- the library
 
 function toPlugin(r: PluginRecord): LibraryPlugin {
   const files = join(pluginDir(r.name), 'files');
   const { programs, remotes } = programsOf(r);
+  const signInable = (x: PluginRemote) => x.kind === 'mcp' && canSignIn(r.mcpServers[x.name] ?? {});
   return {
     name: r.name,
     description: typeof r.manifest.description === 'string' ? r.manifest.description : '',
@@ -517,9 +580,11 @@ function toPlugin(r: PluginRecord): LibraryPlugin {
     contents: {
       ...docsOf(files, r.manifest),
       programs,
-      remotes: remotes.map((x) => (x.kind === 'mcp' && canSignIn(r.mcpServers[x.name] ?? {}) ? { ...x, signIn: signInStatus(r.name, x.name) } : x)),
+      remotes: remotes.map((x) => (signInable(x) ? { ...x, signIn: signInStatus(r.name, x.name), client: clientStatus(r.name, x.name) } : x)),
       ignored: r.ignored,
     },
+    variables: variablesOf(r, pluginKeys(r.name)),
+    ...(r.added ? { mcpServers: r.mcpServers } : {}),
     updatedAt: r.updatedAt,
   };
 }
@@ -536,7 +601,7 @@ export function signInTarget(name: string, server: string): string {
   const cfg = r.mcpServers[server];
   if (!cfg || typeof cfg.command === 'string') throw new PluginError(`plugin ${name} has no remote server "${server}"`);
   if (!canSignIn(cfg)) throw new PluginError(`covibe can only sign in to servers on https (or on this computer) that use the streamable HTTP transport; ${server} does not`);
-  return String(cfg.url);
+  return remoteTarget(name, cfg).url;
 }
 
 export function listPlugins(): LibraryPlugin[] {
@@ -597,7 +662,12 @@ export function setPolicy(name: string, policy: unknown): LibraryPlugin {
 
 export function deletePlugin(name: string) {
   const r = readRecord(name);
-  for (const server of Object.keys(r?.mcpServers ?? {})) if (signInStatus(name, server).at) signOut(name, server);
+  for (const server of Object.keys(r?.mcpServers ?? {})) {
+    if (signInStatus(name, server).at) signOut(name, server);
+    forgetClient(name, server);
+    setKeyedTarget(name, server, undefined);
+  }
+  forgetPluginKeys(name);
   rmSync(pluginDir(name), { recursive: true, force: true });
   rmSync(dataDir(name), { recursive: true, force: true });
 }
@@ -626,7 +696,7 @@ function copyPlugin(src: string, dest: string) {
 }
 
 /** Put a plugin folder into the library. Without `approve`, an update that changes what it runs waits for approval. */
-export function installFromDir(src: string, opts: { entry?: Json; install?: PluginRecord['install']; origin?: PluginOrigin; policy?: SandboxPolicy; approve: boolean }): LibraryPlugin {
+export function installFromDir(src: string, opts: { entry?: Json; install?: PluginRecord['install']; origin?: PluginOrigin; policy?: SandboxPolicy; approve: boolean; added?: boolean }): LibraryPlugin {
   const parsed = parsePlugin(src, opts.entry);
   const dir = pluginDir(parsed.name);
   const previous = readRecord(parsed.name);
@@ -648,6 +718,7 @@ export function installFromDir(src: string, opts: { entry?: Json; install?: Plug
     install: opts.install,
     origin: opts.origin,
     everyone: previous?.everyone ?? false,
+    ...(opts.added ?? previous?.added ? { added: true } : {}),
     policy: opts.policy ?? previous?.policy ?? suggestPolicy(programsOf(parsed).programs),
     updatedAt: new Date().toISOString(),
   };
@@ -669,7 +740,88 @@ export function reviewDir(src: string, entry?: Json): Omit<LibraryPlugin, 'every
     version: typeof parsed.manifest.version === 'string' ? parsed.manifest.version : undefined,
     policy: previous?.policy ?? suggestPolicy(programs),
     contents: { ...docsOf(src, parsed.manifest), programs, remotes, ignored: parsed.ignored },
+    variables: variablesOf(parsed, previous ? pluginKeys(parsed.name) : {}),
   };
+}
+
+/** Save, replace or (null) remove values of a plugin's variables; they apply from the next turn. */
+export function setPluginVariables(name: string, values: Record<string, unknown>): LibraryPlugin {
+  const r = readRecord(name);
+  if (!r) throw new PluginError(`plugin ${name} not found`);
+  const known = new Set(variablesOf(r, {}).map((v) => v.name));
+  const change: Record<string, string | null> = {};
+  for (const [k, v] of Object.entries(values)) {
+    if (!known.has(k)) throw new PluginError(`${name}'s servers do not use a variable "${k}"`);
+    if (v !== null && typeof v !== 'string') throw new PluginError(`the value of ${k} must be text`);
+    change[k] = typeof v === 'string' ? v.trim() : null;
+  }
+  setPluginKeys(name, change);
+  return update(name, () => undefined);
+}
+
+// ---------------------------------------------------------------- MCP servers you add
+
+/** Read what you pasted, or explain what is wrong with it. */
+function parseMcp(input: McpInput): ParsedMcp {
+  try {
+    return parseMcpInput(input);
+  } catch (err) {
+    if (err instanceof McpConfigError) throw new PluginError(err.message);
+    throw err;
+  }
+}
+
+/** The plugin folder for servers you added: a manifest and an .mcp.json. */
+function writeMcpPlugin(p: ParsedMcp): string {
+  const dir = mkdtempSync(join(tmpdir(), 'covibe-mcp-'));
+  mkdirSync(join(dir, '.claude-plugin'));
+  writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: p.name, description: p.description }, null, 2) + '\n');
+  writeFileSync(join(dir, '.mcp.json'), JSON.stringify({ mcpServers: p.servers }, null, 2) + '\n');
+  return dir;
+}
+
+function checkAddable(name: string) {
+  const previous = readRecord(name);
+  if (previous && !previous.added) throw new PluginError(`a plugin named ${name} is already in your library; choose another name`);
+  if (name === SKILL_PLUGIN) throw new PluginError(`"${SKILL_PLUGIN}" is reserved for your skill library; choose another name`);
+  return previous;
+}
+
+/** What adding these servers would add and run, and the keys found in what you pasted (by name only). */
+export function reviewMcp(input: McpInput) {
+  const parsed = parseMcp(input);
+  const previous = checkAddable(parsed.name);
+  const dir = writeMcpPlugin(parsed);
+  try {
+    const review = reviewDir(dir);
+    return {
+      ...review,
+      mcpServers: parsed.servers,
+      variables: review.variables.map((v) => (v.name in parsed.values ? { ...v, found: true } : v)),
+      installed: !!previous,
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Add MCP servers as a plugin of your own, with the permissions you approved.
+ * Keys found in the config and the values you entered are saved with covibe's
+ * other keys; adding again under the same name replaces it.
+ */
+export function addMcpServer(input: McpInput, policy: unknown, values: Record<string, unknown> = {}): LibraryPlugin {
+  const checked = checkPolicy(policy);
+  const parsed = parseMcp(input);
+  checkAddable(parsed.name);
+  const dir = writeMcpPlugin(parsed);
+  try {
+    installFromDir(dir, { policy: checked, approve: true, added: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const given = Object.fromEntries(Object.entries(values).filter((e): e is [string, string] => typeof e[1] === 'string' && !!e[1].trim()));
+  return setPluginVariables(parsed.name, { ...parsed.values, ...given });
 }
 
 // ---------------------------------------------------------------- for members

@@ -14,6 +14,10 @@ import { defaultSecrets, type SecretStore } from './secrets.js';
 // stay with covibe's other keys. Members never get them: their Claude Code
 // reaches the server through covibe's local proxy (mcp-proxy.ts), which adds
 // the token and refreshes it.
+//
+// Some servers do not let covibe register itself. For those you create an
+// OAuth app in the service's developer settings, with CALLBACK_URL as its
+// callback, and give covibe its client id (and secret, if it has one).
 
 export class McpAuthError extends Error {}
 
@@ -37,6 +41,18 @@ interface IndexEntry {
   problem?: string;
 }
 
+/** The callback address of sign-ins with your own OAuth app: it must match what the app has registered. */
+export const CALLBACK_PORT = 47815;
+export const CALLBACK_URL = `http://127.0.0.1:${CALLBACK_PORT}/callback`;
+
+/** Your own OAuth app for a server (no secret: that stays with the keys). */
+export interface McpClientStatus {
+  clientId?: string;
+  hasSecret: boolean;
+  /** The callback address to register with the app. */
+  callbackUrl: string;
+}
+
 export interface McpSignInStatus {
   signedIn: boolean;
   at?: string;
@@ -50,6 +66,7 @@ export interface McpSignInStatus {
 const key = (plugin: string, server: string) => `${plugin}/${server}`;
 /** The secret's name; Keychain account names stay plain. */
 const secretId = (plugin: string, server: string) => `mcp.${plugin}.${server}`.replace(/[^\w.@-]/g, '_');
+const clientSecretId = (plugin: string, server: string) => `mcp-client.${plugin}.${server}`.replace(/[^\w.@-]/g, '_');
 
 let secrets: SecretStore | undefined;
 const store = () => (secrets ??= defaultSecrets(covibeHome()));
@@ -78,6 +95,62 @@ function writeIndex(change: (all: Record<string, IndexEntry>) => void) {
   const tmp = `${indexFile()}.${process.pid}`;
   writeFileSync(tmp, JSON.stringify(all, null, 2) + '\n');
   renameSync(tmp, indexFile());
+}
+
+function clientsFile() {
+  return join(covibeHome(), 'mcp-clients.json');
+}
+
+/** Client ids of your own OAuth apps, by plugin/server (ids are not secret; their secrets are kept as keys). */
+function readClients(): Record<string, { clientId: string; hasSecret?: boolean }> {
+  try {
+    return existsSync(clientsFile()) ? (JSON.parse(readFileSync(clientsFile(), 'utf8')) as Record<string, { clientId: string; hasSecret?: boolean }>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeClients(change: (all: Record<string, { clientId: string; hasSecret?: boolean }>) => void) {
+  const all = readClients();
+  change(all);
+  mkdirSync(covibeHome(), { recursive: true });
+  const tmp = `${clientsFile()}.${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(all, null, 2) + '\n');
+  renameSync(tmp, clientsFile());
+}
+
+export function clientStatus(plugin: string, server: string): McpClientStatus {
+  const c = readClients()[key(plugin, server)];
+  return { ...(c ? { clientId: c.clientId } : {}), hasSecret: !!c?.hasSecret, callbackUrl: CALLBACK_URL };
+}
+
+/** Sign in to this server with your own OAuth app from now on (a secret of undefined keeps the saved one; empty removes it). */
+export function setClient(plugin: string, server: string, clientId: string, clientSecret?: string) {
+  const id = clientId.trim();
+  if (!id) throw new McpAuthError('the client id is required');
+  const k = key(plugin, server);
+  if (clientSecret !== undefined) {
+    if (clientSecret.trim()) store().set(clientSecretId(plugin, server), clientSecret.trim());
+    else store().delete(clientSecretId(plugin, server));
+  }
+  const hasSecret = clientSecret !== undefined ? !!clientSecret.trim() : !!readClients()[k]?.hasSecret;
+  writeClients((all) => (all[k] = { clientId: id, ...(hasSecret ? { hasSecret } : {}) }));
+}
+
+/** Go back to covibe registering itself with the server. */
+export function forgetClient(plugin: string, server: string) {
+  const k = key(plugin, server);
+  if (!readClients()[k]) return;
+  store().delete(clientSecretId(plugin, server));
+  writeClients((all) => delete all[k]);
+}
+
+/** The OAuth app to sign in with, if you gave one. */
+function ownClient(plugin: string, server: string): OAuthClientInformationMixed | undefined {
+  const c = readClients()[key(plugin, server)];
+  if (!c) return undefined;
+  const secret = c.hasSecret ? store().get(clientSecretId(plugin, server)) : undefined;
+  return { client_id: c.clientId, ...(secret ? { client_secret: secret } : {}) };
 }
 
 /** In-memory copies, so the proxy does not read the Keychain on every request. */
@@ -157,7 +230,7 @@ class Client implements OAuthClientProvider {
       redirect_uris: [this.saved.redirectUrl],
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
-      token_endpoint_auth_method: 'none',
+      token_endpoint_auth_method: this.saved.client && 'client_secret' in this.saved.client && this.saved.client.client_secret ? 'client_secret_post' : 'none',
     };
   }
 
@@ -264,15 +337,19 @@ export async function startSignIn(plugin: string, server: string, serverUrl: str
   const need = await probe(serverUrl);
   if (!need.needed) return { done: Promise.resolve() };
 
+  // With your own OAuth app the callback address is fixed (the app has it registered); otherwise any free port.
+  const own = ownClient(plugin, server);
   const callback = createServer();
   await new Promise<void>((resolve, reject) => {
-    callback.once('error', reject);
-    callback.listen(0, '127.0.0.1', () => resolve());
+    callback.once('error', (err: NodeJS.ErrnoException) =>
+      reject(err.code === 'EADDRINUSE' && own ? new McpAuthError(`port ${CALLBACK_PORT} for the sign-in callback is in use (another sign-in in progress?); try again in a moment`) : err),
+    );
+    callback.listen(own ? CALLBACK_PORT : 0, '127.0.0.1', () => resolve());
   });
-  const redirectUrl = `http://127.0.0.1:${(callback.address() as AddressInfo).port}/callback`;
+  const redirectUrl = own ? CALLBACK_URL : `http://127.0.0.1:${(callback.address() as AddressInfo).port}/callback`;
   const state = randomBytes(24).toString('base64url');
   // Registered afresh for this callback address: some servers hold a client to the exact address it registered.
-  const saved: Saved = { serverUrl, redirectUrl };
+  const saved: Saved = { serverUrl, redirectUrl, ...(own ? { client: own } : {}) };
   const client = new Client(plugin, server, saved, state);
   const options = { serverUrl, resourceMetadataUrl: need.resourceMetadataUrl, scope: need.scope };
   let first: Awaited<ReturnType<typeof auth>>;
@@ -280,7 +357,13 @@ export async function startSignIn(plugin: string, server: string, serverUrl: str
     first = await auth(client, options);
   } catch (err) {
     close(callback);
-    throw new McpAuthError(`could not start the sign-in: ${(err as Error).message}`);
+    const message = (err as Error).message;
+    if (!own && /dynamic client registration|registration/i.test(message)) {
+      throw new McpAuthError(
+        `this server does not let covibe register itself (${message}). Create an OAuth app in the service's developer settings with the callback ${CALLBACK_URL}, then enter its client id (and secret) under "Use your own OAuth app"`,
+      );
+    }
+    throw new McpAuthError(`could not start the sign-in: ${message}`);
   }
   if (first === 'AUTHORIZED' || !client.authorizationUrl) {
     close(callback);
