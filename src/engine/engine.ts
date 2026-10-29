@@ -7,6 +7,7 @@ import type { Connections } from '../connections/store.js';
 import { MAIN_ACCOUNT } from '../connections/types.js';
 import { BackendError, plainBackends, type BackendEnv, type BackendResolver, type Env } from '../runner/backend.js';
 import { brainRoot } from '../home.js';
+import { startMcpProxy } from '../connections/mcp-proxy.js';
 import { resolvePlugins } from '../plugins.js';
 import { resolveSkills } from '../skills.js';
 import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent, CustomTool } from '../runner/types.js';
@@ -19,7 +20,8 @@ import { browserTools } from '../browser/tools.js';
 import { ASK_TOOL, Deadline, LEAD_SCHEMA, leadPrompt, leadVerdict, QUESTION_STEP, questionOptions, RunPause, waitForAnswer, type LeadVerdict } from './questions.js';
 import { REQUEST_TOOL, RequestChains, requestPrompt } from './requests.js';
 import { makeToolChecker, readOnly } from './scope.js';
-import { Workspace } from './workspace.js';
+import { denyWritePaths, type Writer } from './folder.js';
+import { Workspace, type CollectResult } from './workspace.js';
 
 export interface RunOptions {
   team: TeamConfig;
@@ -30,7 +32,7 @@ export interface RunOptions {
   /** Parent environment for agent processes (defaults to process.env). */
   env?: Env;
   signal?: AbortSignal;
-  /** Git ref to start from, e.g. an earlier run's branch to build on its result. Defaults to HEAD. */
+  /** Git ref to start from, e.g. an earlier run's branch to build on its result. Defaults to HEAD. Ignored in a plain folder. */
   base?: string;
   /** When the plan's usage limit stops a member: wait for the reset and continue (default), or stop the run. */
   onLimit?: 'wait' | 'stop';
@@ -114,7 +116,7 @@ export async function runTeam(opts: RunOptions): Promise<RunOutcome> {
  */
 export async function startRun(opts: RunOptions): Promise<{ runId: string; done: Promise<RunOutcome> }> {
   const runId = newRunId();
-  const workspace = await Workspace.create(opts.repo, runId, opts.team.isolation, opts.base);
+  const workspace = await Workspace.create(opts.repo, runId, opts.team.isolation, opts.base, writersOf(opts.team));
   opts.store.createRun({
     id: runId,
     team: opts.team.name,
@@ -125,6 +127,13 @@ export async function startRun(opts: RunOptions): Promise<{ runId: string; done:
     base: opts.base,
   });
   return { runId, done: new Engine(opts, runId, workspace).run() };
+}
+
+/** The members that change files, and where (for a plain folder's record of changes). */
+export function writersOf(team: TeamConfig): Writer[] {
+  return Object.values(team.agents)
+    .filter((a) => a.writes)
+    .map((a) => ({ name: a.name, scope: a.writeScope }));
 }
 
 /** The agent.finished / agent.error payload, shared by workflow steps, chat and ask. `via`: the account or connection it ran on. */
@@ -179,12 +188,16 @@ class Engine {
     const { steps } = this.team;
     // The brain must exist before members are pointed at it.
     await ensureBrain(this.workspace.repo).catch(() => undefined);
+    // Signed-in plugin servers are reached through it (see mcp-proxy.ts).
+    await startMcpProxy().catch(() => undefined);
     this.emit({
       type: 'run.started',
       data: {
         team: this.team.name,
         goal: this.opts.goal,
-        isolation: this.team.isolation,
+        // A plain folder: members work in it directly, and the run can be undone.
+        isolation: this.workspace.folder ? 'folder' : this.team.isolation,
+        ...(this.workspace.folder ? { folder: this.workspace.repo } : {}),
         branch: this.workspace.branch,
         steps: steps.map((s) => s.id),
       },
@@ -421,13 +434,12 @@ class Engine {
       if (agent.writes) {
         const label = request ? `${stepId}: ${agent.name} for ${request.from} (request ${request.id})` : `${stepId}: ${agent.name} (round ${this.context.loop})`;
         const c = await this.workspace.collect(agent.name, agent.writeScope, label);
-        if (c.reverted.length) this.emit({ ...base, type: 'scope.violation', data: { files: c.reverted, scope: agent.writeScope ?? null } });
-        if (c.commit) this.emit({ ...base, type: 'git.commit', data: { commit: c.commit, files: c.files } });
-        if (c.merged) this.emit({ ...base, type: 'git.merge', data: { into: this.workspace.branch } });
+        for (const e of collectEvents(c, agent, this.workspace.branch)) this.emit({ ...base, ...e });
         files = c.files;
       }
       return { ...result, files };
     } finally {
+      this.workspace.release(agent.name);
       releaseMember();
       unclaim();
     }
@@ -467,9 +479,10 @@ class Engine {
     const signal = this.opts.signal ? AbortSignal.any([this.opts.signal, deadline.signal]) : deadline.signal;
     const inv = buildInvocation(this.team, this.store, this.runId, agent, {
       ...p,
-      root: this.team.isolation === 'none' ? this.workspace.repo : p.cwd,
+      root: this.workspace.isolation === 'none' ? this.workspace.repo : p.cwd,
       signal,
       repo: this.workspace.repo,
+      folder: !!this.workspace.folder,
       extraTools: [this.askTool(agent.name, p.step, deadline), ...(agent.canRequest.length ? [this.requestTool(agent, p.step, deadline)] : [])],
       // A paused run holds working members at their next tool call.
       beforeToolUse: () => this.pause.wait(signal),
@@ -607,7 +620,8 @@ class Engine {
       const timeout = AbortSignal.timeout(lead.limits.timeout_min * 60_000);
       const inv = buildInvocation(this.team, this.store, this.runId, lead, {
         cwd,
-        root: this.team.isolation === 'none' ? this.workspace.repo : cwd,
+        root: this.workspace.isolation === 'none' ? this.workspace.repo : cwd,
+        folder: !!this.workspace.folder,
         prompt: leadPrompt({ goal: this.opts.goal, lead: leadName, from, step, question, context, options }),
         resume: session?.sessionId,
         fork: true,
@@ -719,6 +733,8 @@ export function buildInvocation(
     /** Resume into a copy of the session (see AgentInvocation.forkSession). */
     fork?: boolean;
     beforeToolUse?: () => Promise<void>;
+    /** The member works directly in a plain folder (no git): `root` is that folder. */
+    folder?: boolean;
   },
 ): AgentInvocation {
   const base = { step: p.step, agent: agent.name };
@@ -749,11 +765,13 @@ export function buildInvocation(
       }),
     );
   }
-  const sandbox = agent.sandbox && isCurator ? { ...agent.sandbox, allowWrite: [...agent.sandbox.allowWrite, brain!] } : agent.sandbox;
+  let sandbox = agent.sandbox && isCurator ? { ...agent.sandbox, allowWrite: [...agent.sandbox.allowWrite, brain!] } : agent.sandbox;
+  // In a plain folder nothing can be thrown away after the turn, so shell commands are kept out of what the scope does not reach.
+  if (sandbox && p.folder) sandbox = { ...sandbox, denyWrite: denyWritePaths(p.root, agent.writes ? agent.writeScope : []) };
   return {
     agentName: agent.name,
     prompt: p.prompt,
-    systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL), canRequest: tools.some((t) => t.name === REQUEST_TOOL) }), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
+    systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL), canRequest: tools.some((t) => t.name === REQUEST_TOOL), folder: p.folder ? p.root : undefined }), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
     readDirs: brain && !p.curating ? [brain] : undefined,
     skills: resolveSkills(agent.skills),
     plugins: resolvePlugins(agent.plugins),
@@ -841,6 +859,18 @@ export function eventSink(store: EventStore, runId: string, base: { step?: strin
     // Running totals of the turn in progress; its agent.finished (or error, or limited) replaces them.
     else if (e.kind === 'usage') store.appendLatest(runId, { ...base, type: 'agent.usage', data: { tokens: e.tokens, cost_usd: e.costUsd ?? null, model: meta.model ?? null, ...(meta.via ? { via: meta.via } : {}) } });
   };
+}
+
+/** The events for what a member's turn changed: commits and merges, or in a plain folder the files it changed. */
+export function collectEvents(c: CollectResult, agent: AgentConfig, branch: string | undefined): NewEvent[] {
+  const scope = agent.writeScope ?? null;
+  const out: NewEvent[] = [];
+  if (c.reverted.length) out.push({ type: 'scope.violation', data: { files: c.reverted, scope } });
+  if (c.folder?.outside.length) out.push({ type: 'scope.violation', data: { files: c.folder.outside, scope, kept: true } });
+  if (c.folder && c.files.length) out.push({ type: 'files.changed', data: { files: c.files, added: c.folder.added, modified: c.folder.modified, deleted: c.folder.deleted } });
+  if (c.commit) out.push({ type: 'git.commit', data: { commit: c.commit, files: c.files } });
+  if (c.merged) out.push({ type: 'git.merge', data: { into: branch } });
+  return out;
 }
 
 /** Fallback for backends that return the report as text: take the last JSON object in it. */

@@ -1,9 +1,10 @@
 # covibe
 
-A thin multi-agent coding studio on top of the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview).
+A thin multi-agent studio on top of the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview).
 You define a team (manager, frontend, backend, QA, tester, or any roles you like) in one YAML file. covibe runs it
 with role-scoped write permissions, hard gates, and a bounded fix loop. Every agent action goes into one JSON
-event log.
+event log. Teams work on code in git repositories, and on anything else in [plain folders](#plain-folders):
+documents, video footage, research.
 
 The engine, not a model, decides control flow: which step runs next, whether a gate passed, when to loop back, and
 when to stop and hand the run to you. Models only do the work and return structured reports.
@@ -38,9 +39,10 @@ To try the UI in a browser instead, run `covibe app`.
 
 **New project** walks you through three steps:
 
-1. **Where is the code?** Open a folder on your Mac, clone a repository (GitHub or any git URL), or start from
-   scratch. A folder without git can be set up for you: covibe runs `git init` and makes a first commit, leaving
-   out `node_modules`, `.env` files and build folders.
+1. **Where is the work?** Open a folder on your Mac, clone a repository (GitHub or any git URL), or start from
+   scratch. A folder without git can be used as it is, as a [plain folder](#plain-folders) (documents, footage,
+   research), or set up for you as a repository: covibe runs `git init` and makes a first commit, leaving out
+   `node_modules`, `.env` files and build folders.
 2. **Who works on it?** Use a team you have, start from a template, or **design it with chat**.
 3. **What should they do first?** Give the first goal and watch the team start.
 
@@ -54,7 +56,7 @@ To try the UI in a browser instead, run `covibe app`.
 | **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; a member driving a browser gets a browser button above its desk that opens its browser live, or what it saw (see [Preview and live browser](#preview-and-live-browser)); click a desk for the member's details, chat and activity), **Plan** (the manager's plan, readable: its summary and every task by owner with what "done" means and how far that member is; below it, the requests members made of each other and every other step's latest report, such as the review's findings; called **Reports** when the team has no planning step), **Board** (a column per workflow step, a card per member and fix round, gate results; a card on a teammate's request says whose), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch), **Preview** (the result's files: web pages open as a site you can click through, Markdown is rendered, everything else shows as text). Stop a run, or start a **new goal on this result**. When a run succeeds, covibe asks what to do with its result: **merge** it into your branch (and push), **open a pull request**, or just **push** the branch (**Ship result** brings that back later). |
 | **Chat** | While a member is working, choose **Now** (it reads your message between tool calls and adjusts), **Stop and redirect** (it ends its current turn and answers you first) or **Next turn**. After the run, the member resumes its session and answers right away; anything it changes is scope-checked and merged into the run's branch. |
 | **Ask a question** | A read-only session with one member in your project: it can read the code but not change it. Follow-up questions continue the same session. |
-| **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, who it can ask for work, report format, connection, limits), **Workflow** (a drag-and-drop graph: drag steps to reorder, drag members onto a step or between steps, drag a gate's ↺ handle onto an earlier step to set where failed work goes back; plus forms for gates and the fix loop), **Team settings** (connection, sandbox, limits), **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
+| **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant, writing, video editing, research) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, who it can ask for work, report format, connection, limits), **Workflow** (a drag-and-drop graph: drag steps to reorder, drag members onto a step or between steps, drag a gate's ↺ handle onto an earlier step to set where failed work goes back; plus forms for gates and the fix loop), **Team settings** (connection, sandbox, limits), **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
 | **Team chat** | Describe the team you need and an architect agent sets it up: it reads your project to fit the stack and folders, asks only if something important is unclear, and saves the team through a tool that refuses invalid files and hands the problems back to it. Keep talking to change it ("add a security reviewer", "use haiku for the tester"). Available in New project, New team, and every team's **Chat** tab. |
 | **Skills** | One library of skills for all teams: **write your own**, **add from GitHub** (a repository or a folder; private ones work if git can clone them), or install from **Anthropic's skills**. Claude Code's **built-in skills** are listed too. Give skills to a member, to every member of a team, or mark one **Everyone** to give it to all members of all teams. |
 | **Plugins** | Claude Code plugins (skills, slash commands, agents, hooks, MCP and LSP servers) from **Anthropic's directory** or **any GitHub repository or marketplace**. Before installing, covibe shows what a plugin runs on your computer and where it sends data, and you choose its sandbox: the websites it may reach and the folders it may write. Every hook and server it runs is confined to that sandbox. Give plugins to members like skills. |
@@ -129,10 +131,13 @@ Your checkout is never touched. The result lands on the branch `covibe/<run-id>`
 | `covibe log <run> [--follow] [--json]` | Print a run's event log. `--json` prints the raw events, one per line |
 | `covibe chat <run> <agent> <message…> [--now \| --interrupt]` | Talk to an agent (see [Chat](#chat)) |
 | `covibe answer <run> [<question> <answer…>]` | Answer a member's question; without a question id, list the ones waiting for you (see [Questions](#questions)) |
-| `covibe clean [--older-than <days>] [--run <id>] [--dry-run]` | Remove worktrees of finished runs; branches and history stay |
+| `covibe changes <run>` | List what a run in a [plain folder](#plain-folders) changed, and who changed it |
+| `covibe undo <run>` | Put a plain folder back the way it was before a run |
+| `covibe clean [--older-than <days>] [--run <id>] [--dry-run]` | Remove worktrees of finished runs (in a plain folder: the copies kept for undo); branches and history stay |
 | `covibe app [--port <n>] [--no-open]` | Serve the app UI in your browser |
 | `covibe connections` | List the Claude accounts, ChatGPT accounts and providers set up in Settings → Advanced |
 | `covibe login <account>` | Sign one of those accounts in: a Claude account runs `claude auth login` in its own config folder; a ChatGPT account opens OpenAI's sign-in in your browser |
+| `covibe login <plugin>` | Sign in to a plugin's remote servers (Notion, say) in your browser, for your members (see [Signing in to plugin servers](#signing-in-to-plugin-servers)) |
 
 Run ids accept a unique prefix. The event store lives in `<repo>/.covibe/covibe.db`; covibe writes its own
 `.gitignore` there. Worktrees live outside the repository, in `~/.covibe/worktrees/`.
@@ -252,6 +257,19 @@ curator get a `propose_brain_note` tool; their file tools are blocked from the b
 cannot write there. The curator may edit the brain directly. With `curate: after_run`, the curator reviews
 pending proposals at the end of a run, merging accepted ones into notes and recording a decision for each.
 Each review is a session of its own, so `min_proposals` lets proposals collect over several runs first.
+
+### Signing in to plugin servers
+
+Some plugins connect to a remote MCP server that needs your account, such as Notion's. Their page under
+**Plugins** has a **Sign-in** card with a **Sign in** button per server (on the command line: `covibe login
+<plugin>`). Your browser opens the service's own sign-in page; covibe registers itself as an OAuth client (with
+PKCE) and keeps the tokens with its other keys (the macOS Keychain, or `~/.covibe/secrets.json`).
+
+Members never get the tokens. Their Claude Code reaches a signed-in server through a proxy inside covibe, on
+127.0.0.1 with a random key in its address; the proxy adds the token, renews it when it runs out or the server
+refuses it, and passes everything else through as it is. If renewing fails, the card says so and asks you to sign
+in again. Signing out (or deleting the plugin) forgets the tokens, and members go back to the server's own
+address. covibe signs in to servers on https (or on this computer) that use MCP's streamable HTTP transport.
 
 ### How the pieces fit
 
@@ -473,6 +491,53 @@ can type an option's number.
 A member waits up to 7 days for an answer. Stopping the run cancels open questions; so does quitting the app or
 the terminal that runs it, since runs do not survive their process yet.
 
+## Plain folders
+
+A project does not have to be a git repository. Add any folder (in the app, **Use it as a plain folder**; on the
+command line, run `covibe run` in it) and the team works in the folder itself: what members change is what you
+get, with no branch to merge.
+
+| | In a git repository | In a plain folder |
+|---|---|---|
+| Where members work | Their own worktrees; your checkout is never touched | The folder itself |
+| Changes | Commits merged into `covibe/<run-id>` | Recorded after every turn: which files each member added, changed or deleted |
+| Review | **Changes** tab: the branch's diff | **Changes** tab: every file the run changed, by whom, with a diff of text files; `covibe changes <run>` |
+| Keep or drop | Merge, push or open a pull request | Keep it as it is, or **Undo changes** (`covibe undo <run>`) |
+| Write scope, file tools | Blocked outside `scope.write` | The same |
+| Write scope, shell commands | Out-of-scope changes discarded | The OS sandbox cannot write to any top-level folder the scope does not reach (with `final/**`, everything but `final/`); a scope that matches anywhere (`*.md`) leaves the top level open, and a stray change is reported and left in place |
+
+**Undo.** When a run starts, covibe snapshots the folder and keeps copies of its files in
+`~/.covibe/folder-runs/<folder>-<hash>/<run-id>/`. On a disk that can clone files (APFS on a Mac, Btrfs, XFS) the
+copies cost no space, so every file is kept, footage included. Elsewhere files are copied up to 50 MB each and
+1 GB in all, the files the team may change first. Undo brings changed and deleted files back and removes the files
+the run added. Nothing is thrown away: the run's versions are moved next to the copies. A file that changed again
+after the run (you edited it), or that was too large to copy, is left as it is and listed. Cleaning up a project
+(or **Clean up** on the Projects screen) removes the copies, after which the run can no longer be undone.
+
+Members are told they work in your own folder and to leave originals alone unless the goal says otherwise. Edits
+you make in the folder while a run is working can show up as the run's changes. The project's run history lives in
+the folder's `.covibe` folder, as it does in a repository.
+
+**Templates for folder work.** Three templates are made for it (Teams → New team):
+
+- **writing**: a writer edits the documents the goal names (Markdown or text; Word and PDF with the `docx` and
+  `pdf` skills), and an editor sends blocking notes back. Example: *"Add a section on pricing to proposal.md,
+  using the figures in notes/pricing.txt."*
+- **video-edit**: an editor surveys `raw/` and `references/` with ffprobe and frame grabs it looks at, writes an
+  edit list, renders to `final/` with ffmpeg (install it first: `brew install ffmpeg`), and a reviewer checks the
+  cut frame by frame. `raw/` and `references/` are outside every scope, so they stay untouched. Example: *"Cut a
+  60-second teaser from raw/ in the style of references/teaser.mp4."*
+- **research**: a researcher searches and reads sources (WebSearch, WebFetch) and writes a sourced report to
+  `research/`, and a fact-checker checks the claims against the sources.
+
+**Writing to Notion.** Install the **Notion** plugin from Plugins → Anthropic's directory and give it to the
+member (`plugins: [notion]`; the research template has the line ready). It connects to Notion's own MCP server
+(`https://mcp.notion.com/mcp`), which covibe lists as a remote server in its review before you install it. Then
+name the page in the goal: *"Research the market for home batteries in Germany and write it into the Notion page
+'Battery research'."* Members only get the Notion tools when they have the plugin. Sign in once on the plugin's page
+(see [Signing in to plugin servers](#signing-in-to-plugin-servers)). Without Notion tools the researcher writes to
+`research/`.
+
 ## The Git tab
 
 Each project's **Git** tab works with your own checkout (runs never touch it; their results are on `covibe/…` branches).
@@ -630,6 +695,7 @@ schemas/team.schema.json   JSON Schema for team files
 src/config/                strict YAML loading, validation, resolution into typed config
 src/engine/engine.ts       the workflow engine: steps, parallel branches, gates, loops
 src/engine/workspace.ts    git worktrees, commits, merges, out-of-scope discard
+src/engine/folder.ts       plain folders: snapshots, who changed what, copies of the originals, diff and undo
 src/engine/scope.ts        pre-tool-use write-scope checks
 src/engine/chat.ts         queue-or-resume chat
 src/engine/questions.ts    members' questions: the lead first, then you; pausing the run
@@ -641,7 +707,8 @@ src/server/site.ts         a run's files (or a member's folder) served as a webs
 src/events/store.ts        SQLite runs, events, sessions, inbox, questions, images members saw (node:sqlite, WAL)
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
 src/runner/backend.ts      per-agent environment for each backend
-src/connections/           Settings → Advanced: accounts and providers, Keychain keys, balancing, the OpenAI translator
+src/connections/           Settings → Advanced: accounts and providers, Keychain keys, balancing, the OpenAI translator;
+                           signing in to plugin MCP servers (mcp-auth.ts) and the proxy that adds the token (mcp-proxy.ts)
                            (Chat Completions; Responses for ChatGPT accounts in codex-proxy.ts, their sign-in in codex-auth.ts)
 src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.0.0.1, token)
 src/server/library.ts      projects and teams library, comment-preserving YAML edits

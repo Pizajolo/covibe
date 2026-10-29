@@ -36,7 +36,8 @@ type Tab = 'runs' | 'brain' | 'git';
 export function ProjectPage({ projectId, tab: tabParam }: { projectId: string; tab?: string }) {
   const { overview } = useData();
   const project = overview?.projects.find((p) => p.id === projectId);
-  const tab: Tab = tabParam === 'brain' || tabParam === 'git' ? tabParam : 'runs';
+  const plain = project?.kind === 'folder';
+  const tab: Tab = tabParam === 'brain' || (tabParam === 'git' && !plain) ? tabParam : 'runs';
   const [goal, setGoal] = useState(false);
   if (!overview) return <Toolbar title="Project" />;
   if (!project)
@@ -67,9 +68,11 @@ export function ProjectPage({ projectId, tab: tabParam }: { projectId: string; t
         <button className={tab === 'brain' ? 'on' : ''} onClick={() => go('projects', projectId, 'brain')}>
           <IconSparkle width={14} height={14} /> Brain
         </button>
-        <button className={tab === 'git' ? 'on' : ''} onClick={() => go('projects', projectId, 'git')}>
-          <IconBranch width={14} height={14} /> Git
-        </button>
+        {!plain && (
+          <button className={tab === 'git' ? 'on' : ''} onClick={() => go('projects', projectId, 'git')}>
+            <IconBranch width={14} height={14} /> Git
+          </button>
+        )}
       </nav>
       {tab === 'runs' ? <ProjectRuns projectId={projectId} /> : tab === 'git' ? <GitPanel projectId={projectId} /> : <Brain projectId={projectId} />}
       {goal && (

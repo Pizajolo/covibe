@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { del, get, post, put } from '../api';
 import { IconAlert, IconCheck, IconPlug, IconPlus, IconShield, IconTrash } from '../components/icons';
 import { Toolbar } from '../components/Toolbar';
-import { ChipsInput, Empty, Modal, useAction, useToast } from '../components/ui';
+import { ChipsInput, Copy, Empty, Modal, useAction, useToast } from '../components/ui';
 import { go, useLive } from '../data';
 import { ago } from '../format';
 
@@ -24,11 +24,21 @@ interface Program {
   env?: string[];
 }
 
+interface SignIn {
+  signedIn: boolean;
+  at?: string;
+  problem?: string;
+  pending?: boolean;
+  error?: string;
+}
+
 interface Remote {
   kind: 'mcp' | 'hook';
   name: string;
   url: string;
   env?: string[];
+  /** A server covibe can sign in to, and whether it is. */
+  signIn?: SignIn;
 }
 
 interface Contents {
@@ -585,6 +595,7 @@ function PluginDetail({ name, sandbox, onChanged }: { name: string; sandbox?: Sa
           <div className="card card-pad">
             <ContentsView contents={value.contents} />
           </div>
+          {value.contents.remotes.some((r) => r.signIn) && <SignIns plugin={name} remotes={value.contents.remotes.filter((r) => r.signIn)} onChange={() => void reload()} />}
           {value.contents.programs.length > 0 && (
             <div className="card card-pad col" style={{ gap: 10 }}>
               <div className="row">
@@ -641,6 +652,103 @@ export function PluginPicker({ value, onChange, inherited = [] }: { value: strin
             </option>
           ))}
       </select>
+    </div>
+  );
+}
+
+/**
+ * Sign covibe in to a plugin's remote servers (Notion's, say). The browser
+ * does the sign-in; covibe keeps the tokens, and members reach the server
+ * through covibe, which adds them.
+ */
+function SignIns({ plugin, remotes, onChange }: { plugin: string; remotes: Remote[]; onChange: () => void }) {
+  const toast = useToast();
+  const [login, setLogin] = useState<{ server: string; url: string; opened: boolean } | null>(null);
+  const poll = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearInterval(poll.current), []);
+  const path = (server: string) => `/api/plugins/${encodeURIComponent(plugin)}/sign-in/${encodeURIComponent(server)}`;
+
+  /** Watch the sign-in until the browser finishes it (or it fails, or 10 minutes pass). */
+  const watch = (server: string) => {
+    window.clearInterval(poll.current);
+    const end = Date.now() + 10 * 60_000;
+    poll.current = window.setInterval(async () => {
+      const st = await get<SignIn>(path(server)).catch(() => undefined);
+      if (!st || (st.pending && Date.now() < end)) return;
+      window.clearInterval(poll.current);
+      setLogin(null);
+      onChange();
+      if (st.error) toast(`Sign-in failed: ${st.error}`, true);
+      else if (st.signedIn) toast(`Signed in to ${server}`);
+    }, 2000);
+  };
+  const [signIn, starting] = useAction(async (server: string) => {
+    const res = await post<{ needed: boolean; url?: string; opened?: boolean }>(path(server));
+    if (!res.needed) {
+      toast(`${server} needs no sign-in`);
+      return;
+    }
+    setLogin({ server, url: res.url!, opened: !!res.opened });
+    if (res.opened) toast('Your browser opened: finish signing in there');
+    watch(server);
+  });
+  const [signOut] = useAction(async (server: string) => {
+    await del(path(server));
+    toast(`Signed out of ${server}`);
+    onChange();
+  });
+
+  return (
+    <div className="card card-pad col" style={{ gap: 10 }}>
+      <h3 style={{ margin: 0 }}>Sign-in</h3>
+      <span className="tiny faint">
+        Servers that need an account (such as Notion) sign in here, in your browser. covibe keeps the sign-in with its other keys, and members reach the server
+        through covibe, which adds it: they never see it.
+      </span>
+      {remotes.map((r) => {
+        const st = r.signIn!;
+        const waiting = login?.server === r.name;
+        return (
+          <div key={r.name} className="row" style={{ gap: 10 }}>
+            <div className="grow col" style={{ gap: 2 }}>
+              <span className="small">
+                <strong>{r.name}</strong> <span className="mono faint">{r.url}</span>
+              </span>
+              <span className="tiny faint" style={st.problem ? { color: 'var(--warn)' } : undefined}>
+                {waiting
+                  ? 'Waiting for you to finish signing in…'
+                  : st.problem
+                    ? st.problem
+                    : st.signedIn
+                      ? `Signed in ${st.at ? ago(st.at) : ''}`
+                      : 'Not signed in: members cannot use it until you sign in'}
+              </span>
+            </div>
+            {st.signedIn && !waiting && (
+              <button className="btn sm ghost" onClick={() => void signOut(r.name)}>
+                Sign out
+              </button>
+            )}
+            <button className={`btn sm ${st.signedIn ? '' : 'primary'}`} disabled={starting || waiting} onClick={() => void signIn(r.name)}>
+              {st.signedIn || st.problem ? 'Sign in again' : 'Sign in'}
+            </button>
+          </div>
+        );
+      })}
+      {login && (
+        <div className="banner info small">
+          <IconAlert />
+          <span className="grow col" style={{ gap: 6 }}>
+            {login.opened ? 'Finish signing in in your browser. If it did not open, open this page:' : 'Open this page in a browser on this Mac to sign in:'}
+            <span className="row" style={{ gap: 6 }}>
+              <a className="btn sm" href={login.url} target="_blank" rel="noreferrer">
+                Open sign-in page
+              </a>
+              <Copy text={login.url} label="Copy link" />
+            </span>
+          </span>
+        </div>
+      )}
     </div>
   );
 }

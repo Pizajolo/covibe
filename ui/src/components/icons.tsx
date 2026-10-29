@@ -30,6 +30,7 @@ export const IconBolt = base(<path d="M9 1.8 3.5 9h4l-1 5.2L12.5 7h-4z" />);
 export const IconGauge = base(<><path d="M2.5 11a5.5 5.5 0 1 1 11 0" /><path d="M8 11 10.5 6.8" /></>);
 export const IconBranch = base(<><circle cx="4.5" cy="3.5" r="1.5" /><circle cx="4.5" cy="12.5" r="1.5" /><circle cx="11.5" cy="5.5" r="1.5" /><path d="M4.5 5v6M11.5 7c0 2.5-2 3-5 4" /></>);
 export const IconCopy = base(<><rect x="5" y="5" width="8.5" height="8.5" rx="1.5" /><path d="M3 10.5V3.8A1.3 1.3 0 0 1 4.3 2.5H11" /></>);
+export const IconUndo = base(<path d="M5.5 3.5 2.5 6.5l3 3M2.5 6.5h7a3.5 3.5 0 0 1 0 7H6.5" />);
 export const IconTrash = base(<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.3a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8.3" />);
 export const IconFile = base(<><path d="M4 2.5h5l3 3v8H4z" /><path d="M9 2.5v3h3" /></>);
 export const IconCode = base(<path d="m5.5 4.5-3 3.5 3 3.5M10.5 4.5l3 3.5-3 3.5" />);

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { desktop, get, post, type ChatItem, type DiffResult, type RunDetail, type RunEvent, type RunSummary } from '../api';
+import { desktop, get, post, type ChatItem, type DiffResult, type RunDetail, type RunEvent, type RunSummary, type UndoResult } from '../api';
 import { Composer } from '../components/Composer';
 import { deskNote, DeskPill, deskState, OfficeLegend, OfficeStage, Portrait, questionDesk, useFigures, type DeskState } from '../components/Office';
 import {
@@ -22,6 +22,7 @@ import {
   IconSpinner,
   IconStop,
   IconTrash,
+  IconUndo,
   IconX,
 } from '../components/icons';
 import { BrowserPreview, viewSrc } from '../components/BrowserView';
@@ -67,6 +68,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
   const [chatWith, setChatWith] = useState<string | undefined>();
   const [continueOpen, setContinueOpen] = useState(false);
   const [ship, setShip] = useState(false);
+  const [undoOpen, setUndoOpen] = useState(false);
   // Once a run you are watching succeeds, ask what to do with its result (once per run).
   const summary = detail?.summary;
   useEffect(() => {
@@ -121,6 +123,11 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
             <IconTrash /> Free disk space
           </button>
         )}
+        {!isAsk && run.folder && !run.folder.undone && run.status !== 'running' && run.filesChanged.length > 0 && (
+          <button className="btn" onClick={() => setUndoOpen(true)} title="Put your folder back the way it was before this run">
+            <IconUndo /> Undo changes
+          </button>
+        )}
         {!isAsk && run.status === 'succeeded' && run.branch && (
           <button className="btn primary" onClick={() => setShip(true)} title="Merge, push or open a pull request for the result">
             <IconBranch /> Ship result
@@ -143,7 +150,8 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
             <Fact label={`${money(run.costUsd)} est.`} title="Estimated API-equivalent cost" />
             <Fact label={`${tokens(run.tokens)} tokens`} />
             {!isAsk && <Fact label={`${run.filesChanged.length} files changed`} />}
-            {run.worktreesRemoved && <Fact label="worktrees removed" title="Removed to free disk space; chat restores them when needed" />}
+            {run.worktreesRemoved && !run.folder && <Fact label="worktrees removed" title="Removed to free disk space; chat restores them when needed" />}
+            {run.folder && <Fact icon={<IconFolder />} label={run.folder.undone ? 'undone' : 'in your folder'} title={run.folder.undone ? 'Its changes were undone' : 'The team worked directly in your folder (no git)'} />}
             {run.branch && (
               <span className="row tiny faint" style={{ gap: 2 }}>
                 <IconBranch width={13} height={13} />
@@ -219,6 +227,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
       </div>
 
       {ship && <ShipDialog projectId={projectId} run={run} onClose={() => setShip(false)} />}
+      {undoOpen && <UndoDialog projectId={projectId} run={run} onClose={() => setUndoOpen(false)} onDone={reload} />}
       {continueOpen && (
         <Modal title="New goal on this result" onClose={() => setContinueOpen(false)} wide>
           <p className="small muted">The team starts from the branch {run.branch}, so it can build on what this run produced.</p>
@@ -359,7 +368,12 @@ function Banner({ run }: { run: RunSummary }) {
       <div className="banner good">
         <IconCheck />
         <div>
-          <strong>All gates passed.</strong> {run.branch ? `The result is on branch ${run.branch}; review it under Changes, then Ship result to merge, push or open a pull request.` : ''}
+          <strong>All gates passed.</strong>{' '}
+          {run.branch
+            ? `The result is on branch ${run.branch}; review it under Changes, then Ship result to merge, push or open a pull request.`
+            : run.folder && !run.folder.undone && run.filesChanged.length
+              ? 'The team worked directly in your folder. Review what it changed under Changes; Undo changes puts the folder back the way it was.'
+              : ''}
         </div>
       </div>
     );
@@ -686,7 +700,9 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'run.restarted': return { cls: 'good', text: `Restarted as run ${d.run_id}` };
     case 'agent.view': return { cls: 'tool', text: `Looked at ${d.file ? String(d.file).split('/').pop() : `an image from ${d.tool}`}` };
     case 'scope.denied': return { cls: 'warn', text: `Blocked ${d.tool}: ${d.reason}` };
-    case 'scope.violation': return { cls: 'warn', text: `Discarded out-of-scope changes: ${(d.files as string[]).join(', ')}` };
+    case 'scope.violation': return { cls: 'warn', text: d.kept ? `Changed outside its write scope (left in your folder; Undo changes reverts it): ${(d.files as string[]).join(', ')}` : `Discarded out-of-scope changes: ${(d.files as string[]).join(', ')}` };
+    case 'files.changed': return { cls: '', text: `Changed ${(d.files as string[]).join(', ')}` };
+    case 'files.undone': return { cls: 'good', text: `Undone: ${(d.restored as string[]).length} restored, ${(d.removed as string[]).length} removed${(d.skipped as unknown[]).length ? `, ${(d.skipped as unknown[]).length} left as they are` : ''}` };
     case 'git.commit': return { cls: '', text: `Committed ${String(d.commit).slice(0, 8)}: ${(d.files as string[]).join(', ')}` };
     case 'git.merge': return { cls: '', text: `Merged into ${d.into}` };
     case 'message.queued': return { cls: '', text: `Message from ${d.from ?? e.agent} to ${d.to}: ${d.text}` };
@@ -885,7 +901,9 @@ function Chat({ detail, projectId, selected, onSelect, onSent, single }: { detai
               ? DELIVERY[delivery].help(agent)
               : run.kind === 'ask'
                 ? `${agent} answers now, read-only, and remembers this conversation.`
-                : `${agent} answers now. It resumes its session with full memory; file changes it makes are merged into ${run.branch ?? 'the run'}.${run.worktreesRemoved ? ' Its worktree was cleaned up and is restored first.' : ''}`}
+                : run.folder
+                  ? `${agent} answers now. It resumes its session with full memory; file changes it makes go straight into your folder, and Undo changes covers them too.`
+                  : `${agent} answers now. It resumes its session with full memory; file changes it makes are merged into ${run.branch ?? 'the run'}.${run.worktreesRemoved ? ' Its worktree was cleaned up and is restored first.' : ''}`}
           </span>
         </div>
       </div>
@@ -951,8 +969,16 @@ function Changes({ projectId, run }: { projectId: string; run: RunSummary }) {
   const project = overview?.projects.find((p) => p.id === projectId);
   if (error) return <div className="banner bad" style={{ margin: 20 }}><IconAlert />{error}</div>;
   if (!diff) return <div style={{ padding: 20 }} className="faint">Loading changes…</div>;
-  if (diff.note) return <div className="banner info" style={{ margin: 20 }}><IconInfo />{diff.note}</div>;
-  if (!diff.files.length) return <Empty icon={<IconBranch />} title="No changes yet">Files the team changes show up here as they are merged.</Empty>;
+  if (diff.note && !diff.files.length) return <div className="banner info" style={{ margin: 20 }}><IconInfo />{diff.note}</div>;
+  if (!diff.files.length)
+    return run.folder ? (
+      <Empty icon={<IconFolder />} title={diff.undoneAt ? 'Undone' : 'No changes yet'}>
+        {diff.undoneAt ? `The run's changes were undone ${new Date(diff.undoneAt).toLocaleString()}.` : 'Files the team changes in your folder show up here after each turn.'}
+      </Empty>
+    ) : (
+      <Empty icon={<IconBranch />} title="No changes yet">Files the team changes show up here as they are merged.</Empty>
+    );
+  const folder = !!run.folder;
   const lines = diff.patch.split('\n');
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
@@ -962,7 +988,7 @@ function Changes({ projectId, run }: { projectId: string; run: RunSummary }) {
             <h2>
               {diff.files.length} file{diff.files.length > 1 ? 's' : ''} changed
             </h2>
-            <span className="hint mono">{diff.range}</span>
+            <span className="hint mono">{diff.range ?? (folder ? 'in your folder' : '')}</span>
             <div className="right">
               {run.branch && <Copy text={`git merge ${run.branch}`} label="Copy merge command" />}
               {desktop && project && (
@@ -972,11 +998,19 @@ function Changes({ projectId, run }: { projectId: string; run: RunSummary }) {
               )}
             </div>
           </div>
+          {(diff.note || diff.undoneAt) && (
+            <div className="banner info" style={{ margin: '0 14px 10px' }}>
+              <IconInfo />
+              {[diff.undoneAt && `The run's changes were undone ${new Date(diff.undoneAt).toLocaleString()}; these are what was left as it was.`, diff.note].filter(Boolean).join(' ')}
+            </div>
+          )}
           <table className="table">
             <tbody>
               {diff.files.map((f) => (
                 <tr key={f.path}>
+                  {f.status && <td className="tiny" style={{ width: 70, color: f.status === 'added' ? 'var(--good)' : f.status === 'deleted' ? 'var(--bad)' : undefined }}>{f.status}</td>}
                   <td className="mono">{f.path}</td>
+                  {f.by && <td className="tiny faint">{f.by.join(', ')}</td>}
                   <td className="r num" style={{ color: 'var(--good)' }}>+{f.additions}</td>
                   <td className="r num" style={{ color: 'var(--bad)' }}>−{f.deletions}</td>
                 </tr>
@@ -998,5 +1032,58 @@ function Changes({ projectId, run }: { projectId: string; run: RunSummary }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------- undo (plain folders)
+
+function UndoDialog({ projectId, run, onClose, onDone }: { projectId: string; run: RunSummary; onClose: () => void; onDone: () => Promise<unknown> | void }) {
+  const toast = useToast();
+  const [result, setResult] = useState<UndoResult | null>(null);
+  const [undo, undoing] = useAction(async () => {
+    const res = await post<UndoResult>(`/api/runs/${projectId}/${run.id}/undo`);
+    setResult(res);
+    await onDone();
+    if (!res.skipped.length) {
+      toast(`Undone: ${res.restored.length} file${res.restored.length === 1 ? '' : 's'} restored, ${res.removed.length} removed.`);
+      onClose();
+    }
+  });
+  if (result)
+    return (
+      <Modal title="Undone, with exceptions" onClose={onClose} footer={<button className="btn primary" onClick={onClose}>Done</button>}>
+        <p className="small">
+          {result.restored.length} file{result.restored.length === 1 ? '' : 's'} restored and {result.removed.length} removed. These were left as they are:
+        </p>
+        <ul className="small">
+          {result.skipped.map((s) => (
+            <li key={s.path}>
+              <span className="mono">{s.path}</span>: {s.reason}
+            </li>
+          ))}
+        </ul>
+      </Modal>
+    );
+  return (
+    <Modal
+      title="Undo this run's changes?"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn primary" disabled={undoing} onClick={() => void undo()}>
+            <IconUndo /> {undoing ? 'Undoing…' : 'Undo changes'}
+          </button>
+        </>
+      }
+    >
+      <p className="small">
+        The team worked directly in your folder and changed {run.filesChanged.length} file{run.filesChanged.length === 1 ? '' : 's'}. Undo puts them back the way they were when the run
+        started: changed and deleted files come back, files it added are removed.
+      </p>
+      <p className="small muted">
+        Nothing is thrown away: the run's versions are moved to covibe's folder for this run. A file you edited yourself after the run, or one too large to keep a copy of, is left as it is.
+      </p>
+    </Modal>
   );
 }

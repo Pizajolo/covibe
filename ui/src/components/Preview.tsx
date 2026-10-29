@@ -72,7 +72,7 @@ export function Preview({ projectId, run }: { projectId: string; run: RunSummary
   const { value: listing, error } = useLive(
     () => get<RunFiles>(`/api/runs/${projectId}/${run.id}/files`),
     [projectId, run.id],
-    (e) => e.projectId === projectId && e.event.runId === run.id && (e.event.type === 'git.merge' || e.event.type === 'git.commit' || e.event.type === 'run.finished'),
+    (e) => e.projectId === projectId && e.event.runId === run.id && (e.event.type === 'git.merge' || e.event.type === 'git.commit' || e.event.type === 'files.changed' || e.event.type === 'files.undone' || e.event.type === 'run.finished'),
   );
   const [site, setSite] = useState<PreviewSite | null>(null);
   const [siteError, setSiteError] = useState<string | null>(null);
@@ -182,7 +182,7 @@ export function Preview({ projectId, run }: { projectId: string; run: RunSummary
   };
   walk(tree, 0);
 
-  const sourceLabel = listing.source.kind === 'branch' ? listing.source.ref : 'your checkout';
+  const sourceLabel = listing.source.kind === 'branch' ? listing.source.ref : listing.source.kind === 'folder' ? 'your folder' : 'your checkout';
   const address = web ? (page?.path ?? src?.path ?? '') : selected ?? '';
   const send = (covibe: 'back' | 'forward' | 'reload') => frame.current?.contentWindow?.postMessage({ covibe }, origin ?? '*');
   const openOutside = () => {
@@ -196,7 +196,7 @@ export function Preview({ projectId, run }: { projectId: string; run: RunSummary
     <div className="split preview">
       <div className="split-list preview-tree">
         <div className="col" style={{ gap: 6, marginBottom: 6 }}>
-          <span className="tiny faint row" style={{ gap: 5 }} title={listing.source.kind === 'branch' ? 'Files as merged on the run’s result branch' : 'This run worked directly in your checkout'}>
+          <span className="tiny faint row" style={{ gap: 5 }} title={listing.source.kind === 'branch' ? 'Files as merged on the run’s result branch' : listing.source.kind === 'folder' ? 'This run worked directly in your folder' : 'This run worked directly in your checkout'}>
             <IconBranch width={12} height={12} /> <span className="mono ellipsis">{sourceLabel}</span>
           </span>
           <input className="input" placeholder="Filter files" value={filter} onChange={(e) => setFilter(e.target.value)} />

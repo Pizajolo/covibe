@@ -11,6 +11,7 @@ import { acceptIntoNote, brainLog, BrainError, curate, deleteNote, ensureBrain, 
 import { ask, chat } from '../engine/chat.js';
 import { cleanupWorktrees, worktreeReport } from '../engine/cleanup.js';
 import { buildInvocation, newRunId, startRun } from '../engine/engine.js';
+import { folderDiff, isFolderRun, undoFolderRun } from '../engine/folder.js';
 import { answerQuestion } from '../engine/questions.js';
 import { GithubError } from '../github.js';
 import { brainRoot } from '../home.js';
@@ -32,6 +33,8 @@ import {
 } from '../skills.js';
 import { CodexAuthError } from '../connections/codex-auth.js';
 import { ConnectionError, Connections, listModels, openInBrowser, startLogin, type NewConnection } from '../connections/store.js';
+import { McpAuthError, signInStatus, signOut, startSignIn } from '../connections/mcp-auth.js';
+import { stopMcpProxy } from '../connections/mcp-proxy.js';
 import { MAIN_ACCOUNT, type ProviderModel } from '../connections/types.js';
 import { backendEnv, BackendError } from '../runner/backend.js';
 import type { EnvironmentInfo, PlanUsage } from '../runner/types.js';
@@ -42,7 +45,7 @@ import { EventStore } from '../events/store.js';
 import type { DeliveryMode, RunEvent, RunRecord } from '../events/types.js';
 import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
-import type { AccountInfo, ConnectionsInfo, MemberInfo, PreviewSite, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UsageReport } from './api-types.js';
+import type { AccountInfo, ConnectionsInfo, DiffResult, MemberInfo, PreviewSite, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UndoResult, UsageReport } from './api-types.js';
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
 import * as gitops from './gitops.js';
 import { GitProblem, gitOverview, gitShow } from './gitops.js';
@@ -364,8 +367,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     return { load: () => library.load(listing.id) };
   };
 
-  /** Where a run's files are: its result branch, or your checkout when it worked there. */
+  /** The run worked directly in a plain folder (no git). */
+  const inFolder = (project: Project, run: RunRecord) => !run.branch && (project.kind === 'folder' || isFolderRun(project.path, run.id));
+
+  /** Where a run's files are: its result branch, or your checkout (or plain folder) when it worked there. */
   const filesOf = async (project: Project, run: RunRecord): Promise<{ source: SiteSource; kind: RunFiles['source'] }> => {
+    if (inFolder(project, run)) return { source: diskSource(project.path, 'your folder'), kind: { kind: 'folder' } };
     if (!run.branch) return { source: diskSource(project.path, 'your checkout'), kind: { kind: 'checkout' } };
     const exists = await exec('git', ['rev-parse', '--verify', '--quiet', `${run.branch}^{commit}`], { cwd: project.path }).then(() => true, () => false);
     if (!exists) throw new NotFound(`branch ${run.branch} no longer exists, so its files cannot be shown`);
@@ -637,6 +644,20 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     ['POST', '/api/plugins/:name/approve', (p) => withUsage(plugins.approvePlugin(p.name!))],
     ['POST', '/api/plugins/:name/update', async (p) => withUsage(await plugins.updatePlugin(p.name!))],
     ['DELETE', '/api/plugins/:name', (p) => (plugins.deletePlugin(p.name!), { ok: true })],
+    // Sign covibe in to a plugin's remote MCP server; the browser does the sign-in and the page watches its status.
+    ['POST', '/api/plugins/:name/sign-in/:server', async (p) => {
+      const target = plugins.signInTarget(p.name!, p.server!);
+      const { url, done } = await startSignIn(p.name!, p.server!, target);
+      void done.catch(() => undefined);
+      if (!url) return { needed: false };
+      return { needed: true, url, opened: await openInBrowser(url) };
+    }],
+    ['GET', '/api/plugins/:name/sign-in/:server', (p) => signInStatus(p.name!, p.server!)],
+    ['DELETE', '/api/plugins/:name/sign-in/:server', (p) => {
+      plugins.signInTarget(p.name!, p.server!);
+      signOut(p.name!, p.server!);
+      return withUsage(plugins.getPlugin(p.name!));
+    }],
 
     // ---- project brain
     ['GET', '/api/projects/:pid/brain', async (p) => {
@@ -794,8 +815,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     ['POST', '/api/projects/:pid/git/:op', (p, body) => gitOp(library.project(p.pid!).path, p.op!, (body ?? {}) as Record<string, unknown>)],
     ['POST', '/api/projects/:pid/git/:op/:sub', (p, body) => gitOp(library.project(p.pid!).path, `${p.op}/${p.sub}`, (body ?? {}) as Record<string, unknown>)],
     ['GET', '/api/projects', () => library.projects()],
-    ['POST', '/api/projects', (_p, body) => library.addProject(str(body, 'path'), { init: !!(body as { init?: unknown }).init })],
-    ['POST', '/api/projects/create', (_p, body) => library.createProject(str(body, 'parent'), str(body, 'name'))],
+    ['POST', '/api/projects', (_p, body) => library.addProject(str(body, 'path'), { init: !!(body as { init?: unknown }).init, folder: !!(body as { folder?: unknown }).folder })],
+    ['POST', '/api/projects/create', (_p, body) => library.createProject(str(body, 'parent'), str(body, 'name'), { folder: !!(body as { folder?: unknown }).folder })],
     ['POST', '/api/projects/clone', (_p, body) => library.cloneProject(str(body, 'url'), str(body, 'parent'), typeof (body as { name?: unknown }).name === 'string' ? String((body as { name: string }).name) : undefined)],
     ['DELETE', '/api/projects/:pid', (p) => (library.removeProject(p.pid!), { ok: true })],
 
@@ -991,8 +1012,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       await browserHub.close(run.id, p.agent!, 'closed by you');
       return { ok: true };
     }],
-    ['GET', '/api/runs/:pid/:rid/diff', async (p) => {
+    ['GET', '/api/runs/:pid/:rid/diff', async (p): Promise<DiffResult> => {
       const { project, run } = findRun(p.pid!, p.rid!);
+      if (isFolderRun(project.path, run.id)) return folderDiff(project.path, run.id);
+      if (inFolder(project, run)) return { files: [], patch: '', note: 'The copies kept for this run were removed to free disk space, so its changes can no longer be shown or undone.' };
       if (!run.branch) return { files: [], patch: '', note: 'This run worked directly in your checkout, so there is no separate branch to compare.' };
       const range = `${run.base ?? 'HEAD'}...${run.branch}`;
       try {
@@ -1009,6 +1032,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       } catch (err) {
         return { files: [], patch: '', note: `Could not diff ${range}: ${(err as Error).message.split('\n')[0]}` };
       }
+    }],
+    ['POST', '/api/runs/:pid/:rid/undo', async (p): Promise<UndoResult> => {
+      const { project, store, run } = findRun(p.pid!, p.rid!);
+      if (!isFolderRun(project.path, run.id)) throw new BadRequest('only a run in a plain folder can be undone; a run in a git repository leaves your checkout alone');
+      if (store.isLive(run) || busyIn(run.id).size) throw new BadRequest('the run is still working; stop it first');
+      const result = await undoFolderRun(project.path, run.id);
+      store.append(run.id, { type: 'files.undone', data: { restored: result.restored, removed: result.removed, skipped: result.skipped, kept_in: result.keptIn } });
+      return result;
     }],
   ];
 
@@ -1055,7 +1086,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           ? 409
           : err instanceof NotFound
             ? 404
-            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof BackendError
+            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof McpAuthError || err instanceof BackendError
               ? 400
               : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;
@@ -1089,6 +1120,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       for (const s of stores.values()) s.close();
       libraryStore.close();
       await connections.close();
+      await stopMcpProxy();
     },
   };
 }

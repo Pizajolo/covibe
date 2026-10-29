@@ -148,7 +148,7 @@ export class ClaudeSdkRunner implements AgentRunner {
             autoAllowBashIfSandboxed: true,
             allowUnsandboxedCommands: false,
             network: { allowedDomains: inv.sandbox.network },
-            filesystem: { allowWrite: inv.sandbox.allowWrite },
+            filesystem: { allowWrite: inv.sandbox.allowWrite, ...(inv.sandbox.denyWrite?.length ? { denyWrite: inv.sandbox.denyWrite } : {}) },
           }
         : undefined,
     };

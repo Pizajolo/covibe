@@ -88,7 +88,15 @@ export function formatEvent(e: RunEvent): string {
       text = yellow(`blocked ${toolSummary(String(d.tool), d.input)}: ${d.reason}`);
       break;
     case 'scope.violation':
-      text = yellow(`discarded out-of-scope changes: ${(d.files as string[]).join(', ')}`);
+      text = d.kept
+        ? yellow(`changed outside its write scope (left in the folder): ${(d.files as string[]).join(', ')}`)
+        : yellow(`discarded out-of-scope changes: ${(d.files as string[]).join(', ')}`);
+      break;
+    case 'files.changed':
+      text = dim(`changed ${(d.files as string[]).length} file${(d.files as string[]).length === 1 ? '' : 's'}: ${one((d.files as string[]).join(', '), 120)}`);
+      break;
+    case 'files.undone':
+      text = `undone: ${(d.restored as string[]).length} restored, ${(d.removed as string[]).length} removed${(d.skipped as unknown[]).length ? yellow(`, ${(d.skipped as unknown[]).length} left as they are`) : ''}`;
       break;
     case 'git.commit':
       text = dim(`committed ${String(d.commit).slice(0, 8)} (${(d.files as string[]).length} files)`);

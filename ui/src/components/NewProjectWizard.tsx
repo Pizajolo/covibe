@@ -26,7 +26,7 @@ export function NewProjectWizard({ onClose }: { onClose: () => void }) {
       wide
       title={
         <div className="col" style={{ gap: 6 }}>
-          <span>{step === 1 ? 'Where is the code?' : step === 2 ? `Who works on ${project?.name}?` : 'What should they do first?'}</span>
+          <span>{step === 1 ? 'Where is the work?' : step === 2 ? `Who works on ${project?.name}?` : 'What should they do first?'}</span>
           <div className="wizard-steps">
             {['Project', 'Team', 'First goal'].map((label, i) => (
               <span key={label} className={i + 1 === step ? 'on' : i + 1 < step ? 'done' : ''}>
@@ -113,15 +113,17 @@ function ProjectStep({ defaultParent, onDone }: { defaultParent: string; onDone:
   const [parent, setParent] = useState(defaultParent);
   const [name, setName] = useState('');
   const [needsGit, setNeedsGit] = useState<string | null>(null);
+  const [plain, setPlain] = useState(false);
 
-  const [submit, busy] = useAction(async (init?: boolean) => {
+  /** `as`: what to do with a folder that has no git yet: set git up, or use it as a plain folder. */
+  const [submit, busy] = useAction(async (as?: 'git' | 'folder') => {
     try {
       const p =
         source === 'open'
-          ? await post<Project>('/api/projects', { path, init: !!init })
+          ? await post<Project>('/api/projects', { path, init: as === 'git', folder: as === 'folder' })
           : source === 'clone'
             ? await post<Project>('/api/projects/clone', { url, parent, name: name || undefined })
-            : await post<Project>('/api/projects/create', { parent, name });
+            : await post<Project>('/api/projects/create', { parent, name, folder: plain });
       onDone(p);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) setNeedsGit(err.message);
@@ -136,7 +138,7 @@ function ProjectStep({ defaultParent, onDone }: { defaultParent: string; onDone:
         <button className={`choice ${source === 'open' ? 'on' : ''}`} onClick={() => (setSource('open'), setNeedsGit(null))}>
           <IconFolder />
           <strong>Open a folder</strong>
-          <span className="tiny faint">A project already on this Mac.</span>
+          <span className="tiny faint">Code, documents, footage: any folder on this Mac.</span>
         </button>
         <button className={`choice ${source === 'clone' ? 'on' : ''}`} onClick={() => setSource('clone')}>
           <IconBranch />
@@ -146,7 +148,7 @@ function ProjectStep({ defaultParent, onDone }: { defaultParent: string; onDone:
         <button className={`choice ${source === 'empty' ? 'on' : ''}`} onClick={() => setSource('empty')}>
           <IconPlus />
           <strong>Start from scratch</strong>
-          <span className="tiny faint">A new, empty project.</span>
+          <span className="tiny faint">A new, empty folder.</span>
         </button>
       </div>
 
@@ -174,6 +176,9 @@ function ProjectStep({ defaultParent, onDone }: { defaultParent: string; onDone:
             <input className="input" autoFocus value={name} placeholder="my-new-app" onChange={(e) => setName(e.target.value)} />
           </label>
           <FolderField label="Create it in" value={parent} onChange={setParent} />
+          <label className="check small" style={{ gridColumn: '1 / -1' }}>
+            <input type="checkbox" checked={plain} onChange={(e) => setPlain(e.target.checked)} /> Plain folder, without git (for documents, media or research rather than code)
+          </label>
         </div>
       )}
 
@@ -182,12 +187,25 @@ function ProjectStep({ defaultParent, onDone }: { defaultParent: string; onDone:
           <IconAlert />
           <div className="col" style={{ gap: 8 }}>
             <span>
-              {needsGit} Teams work on git branches, so covibe needs a repository with a first commit. It can run <span className="mono">git init</span> and commit what is in
-              the folder, leaving out <span className="mono">node_modules</span>, <span className="mono">.env</span> files and build folders.
+              {needsGit} Use it as it is, or set up git:
             </span>
-            <div>
-              <button className="btn primary sm" disabled={busy} onClick={() => void submit(true)}>
-                Set up git and add the project
+            <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>
+              <li>
+                <strong>Plain folder</strong> (documents, footage, research): the team works in the folder itself. covibe records what each member changes and keeps the
+                originals, so you can review a run and undo it.
+              </li>
+              <li>
+                <strong>Git</strong> (code): covibe runs <span className="mono">git init</span> and commits what is in the folder, leaving out{' '}
+                <span className="mono">node_modules</span>, <span className="mono">.env</span> files and build folders. Teams then work on their own branches and never touch
+                your files until you merge.
+              </li>
+            </ul>
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn primary sm" disabled={busy} onClick={() => void submit('folder')}>
+                Use it as a plain folder
+              </button>
+              <button className="btn sm" disabled={busy} onClick={() => void submit('git')}>
+                Set up git
               </button>
             </div>
           </div>

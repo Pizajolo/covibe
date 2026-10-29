@@ -11,7 +11,7 @@ import { covibeHome } from '../home.js';
 import type { AppSettings, EditOp, NotificationKind, NotifyChoice, Project, TeamFileInfo, TeamListing } from './api-types.js';
 
 /**
- * The desktop app's library: the projects (git repositories) you work on and
+ * The desktop app's library: the projects (git repositories or plain folders) you work on and
  * the teams you have defined. Teams are reusable across projects; each lives
  * in its own folder with its team.yaml, prompts and schemas.
  *
@@ -107,41 +107,47 @@ export class Library {
   }
 
   /**
-   * Add an existing folder. covibe needs git with at least one commit (each
-   * run branches off it); with `init`, a plain folder gets `git init` and a
-   * first commit of what is in it.
+   * Add an existing folder. In a git repository with at least one commit,
+   * each run branches off it; with `init`, a plain folder gets `git init` and
+   * a first commit of what is in it. With `folder`, a folder without git is
+   * added as it is: members then work in the folder itself, and a run can be
+   * undone instead of merged.
    */
-  addProject(path: string, opts: { init?: boolean } = {}): Project {
+  addProject(path: string, opts: { init?: boolean; folder?: boolean } = {}): Project {
     const dir = resolve(path.replace(/^~(?=$|\/)/, homedir()));
     if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new BadRequest(`${dir} is not a folder`);
     let top: string;
+    let kind: Project['kind'];
     try {
       top = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     } catch {
-      if (!opts.init) throw new NeedsGit(`${dir} is not a git repository yet.`);
-      initRepo(dir);
+      if (!opts.init && !opts.folder) throw new NeedsGit(`${dir} is not a git repository.`);
+      if (opts.init) initRepo(dir);
+      else kind = 'folder';
       top = dir;
     }
-    if (!hasCommit(top)) {
+    if (!kind && !hasCommit(top)) {
+      if (opts.folder) throw new BadRequest(`${top} is a git repository without commits, so it cannot be used as a plain folder. Set up git instead (it makes the first commit).`);
       if (!opts.init) throw new NeedsGit(`${top} has no commits yet.`);
       initRepo(top);
     }
     const config = this.read();
     const existing = config.projects.find((p) => p.path === top);
     if (existing) return existing;
-    const project: Project = { id: slug(basename(top)) + '-' + randomBytes(2).toString('hex'), name: basename(top), path: top, addedAt: new Date().toISOString() };
+    const project: Project = { id: slug(basename(top)) + '-' + randomBytes(2).toString('hex'), name: basename(top), path: top, addedAt: new Date().toISOString(), ...(kind ? { kind } : {}) };
     config.projects.push(project);
     this.write(config);
     return project;
   }
 
-  /** A new, empty project folder with a README and a first commit. */
-  createProject(parent: string, name: string): Project {
+  /** A new, empty project folder: with a README and a first commit, or (`folder`) a plain folder without git. */
+  createProject(parent: string, name: string, opts: { folder?: boolean } = {}): Project {
     const folder = name.trim().replace(/[/\\]/g, '-');
     if (!folder || folder.startsWith('.')) throw new BadRequest('give the project a name');
     const dir = join(resolve(parent.replace(/^~(?=$|\/)/, homedir())), folder);
     if (existsSync(dir) && readdirSync(dir).length) throw new BadRequest(`${dir} already exists and is not empty`);
     mkdirSync(dir, { recursive: true });
+    if (opts.folder) return this.addProject(dir, { folder: true });
     writeFileSync(join(dir, 'README.md'), `# ${folder}\n`);
     initRepo(dir);
     return this.addProject(dir);
@@ -429,7 +435,7 @@ function initRepo(dir: string) {
   run('commit', '-q', '--allow-empty', '-m', 'Initial commit');
 }
 
-/** The folder is fine but needs git first; the UI offers to set it up. */
+/** The folder has no git (or no commit yet); the UI offers to set git up or to use it as a plain folder. */
 export class NeedsGit extends Error {}
 export class NotFound extends Error {}
 export class BadRequest extends Error {}

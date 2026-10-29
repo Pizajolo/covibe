@@ -1,10 +1,11 @@
 import type { AgentConfig, TeamConfig } from '../config/types.js';
 import type { EventStore } from '../events/store.js';
 import type { DeliveryMode, RunRecord } from '../events/types.js';
+import { startMcpProxy } from '../connections/mcp-proxy.js';
 import type { Connections } from '../connections/store.js';
 import type { Env } from '../runner/backend.js';
 import type { AgentRunner } from '../runner/types.js';
-import { accountOf, buildInvocation, finishedData, isBalanced, newRunId, resolverOf } from './engine.js';
+import { accountOf, buildInvocation, collectEvents, finishedData, isBalanced, newRunId, resolverOf, writersOf } from './engine.js';
 import { readOnly } from './scope.js';
 import { Workspace } from './workspace.js';
 
@@ -57,7 +58,7 @@ export async function chat(opts: {
   store.append(runId, { type: 'chat.message', agent: agent.name, step: 'chat', data: { from: 'human', to: agent.name, text: opts.message } });
 
   const isolation = run.branch ? 'worktree' : 'none';
-  const workspace = await Workspace.attach(run.repo, runId, isolation, run.branch);
+  const workspace = await Workspace.attach(run.repo, runId, isolation, run.branch, writersOf(team));
   await workspace.restore(session.cwd);
   return converse({ store, runner: opts.runner, team, run, agent, prompt, cwd: session.cwd, resume: session.sessionId, env: opts.env, connections: opts.connections, workspace });
 }
@@ -106,6 +107,7 @@ async function converse(p: {
   workspace?: Workspace;
 }): Promise<ChatOutcome> {
   const { store, run, agent } = p;
+  await startMcpProxy().catch(() => undefined);
   const account = isBalanced(agent, p.connections) ? await p.connections!.pick() : undefined;
   const built = await resolverOf(p.connections).resolve(account ? { ...agent.backend, account } : agent.backend, p.env ?? process.env);
   const base = { step: 'chat', agent: agent.name };
@@ -115,6 +117,7 @@ async function converse(p: {
     repo: run.repo,
     cwd: p.cwd,
     root: run.branch ? p.cwd : run.repo,
+    folder: !!p.workspace?.folder,
     prompt: p.prompt,
     resume: p.resume,
     env: built.env,
@@ -130,9 +133,7 @@ async function converse(p: {
 
   if (result.ok && agent.writes && p.workspace) {
     const c = await p.workspace.collect(agent.name, agent.writeScope, `chat: ${agent.name}`);
-    if (c.reverted.length) store.append(run.id, { ...base, type: 'scope.violation', data: { files: c.reverted, scope: agent.writeScope ?? null } });
-    if (c.commit) store.append(run.id, { ...base, type: 'git.commit', data: { commit: c.commit, files: c.files } });
-    if (c.merged) store.append(run.id, { ...base, type: 'git.merge', data: { into: run.branch } });
+    for (const e of collectEvents(c, agent, run.branch)) store.append(run.id, { ...base, ...e });
   }
   return { mode: 'replied', text: result.text, ok: result.ok, error: result.error };
 }
