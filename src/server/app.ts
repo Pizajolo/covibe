@@ -33,6 +33,8 @@ import {
 } from '../skills.js';
 import { CodexAuthError } from '../connections/codex-auth.js';
 import { ConnectionError, Connections, listModels, openInBrowser, startLogin, type NewConnection } from '../connections/store.js';
+import { McpAuthError, signInStatus, signOut, startSignIn } from '../connections/mcp-auth.js';
+import { stopMcpProxy } from '../connections/mcp-proxy.js';
 import { MAIN_ACCOUNT, type ProviderModel } from '../connections/types.js';
 import { backendEnv, BackendError } from '../runner/backend.js';
 import type { EnvironmentInfo, PlanUsage } from '../runner/types.js';
@@ -642,6 +644,20 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     ['POST', '/api/plugins/:name/approve', (p) => withUsage(plugins.approvePlugin(p.name!))],
     ['POST', '/api/plugins/:name/update', async (p) => withUsage(await plugins.updatePlugin(p.name!))],
     ['DELETE', '/api/plugins/:name', (p) => (plugins.deletePlugin(p.name!), { ok: true })],
+    // Sign covibe in to a plugin's remote MCP server; the browser does the sign-in and the page watches its status.
+    ['POST', '/api/plugins/:name/sign-in/:server', async (p) => {
+      const target = plugins.signInTarget(p.name!, p.server!);
+      const { url, done } = await startSignIn(p.name!, p.server!, target);
+      void done.catch(() => undefined);
+      if (!url) return { needed: false };
+      return { needed: true, url, opened: await openInBrowser(url) };
+    }],
+    ['GET', '/api/plugins/:name/sign-in/:server', (p) => signInStatus(p.name!, p.server!)],
+    ['DELETE', '/api/plugins/:name/sign-in/:server', (p) => {
+      plugins.signInTarget(p.name!, p.server!);
+      signOut(p.name!, p.server!);
+      return withUsage(plugins.getPlugin(p.name!));
+    }],
 
     // ---- project brain
     ['GET', '/api/projects/:pid/brain', async (p) => {
@@ -1070,7 +1086,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           ? 409
           : err instanceof NotFound
             ? 404
-            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof BackendError
+            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof McpAuthError || err instanceof BackendError
               ? 400
               : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;
@@ -1104,6 +1120,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       for (const s of stores.values()) s.close();
       libraryStore.close();
       await connections.close();
+      await stopMcpProxy();
     },
   };
 }

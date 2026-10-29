@@ -63,7 +63,8 @@ describe('plugin library', () => {
       { kind: 'mcp', name: 'db', command: 'npx -y @example/db-mcp --key ${DB_KEY}', env: ['DB_URL', 'DB_KEY', 'DATABASE_URL'] },
       { kind: 'lsp', name: 'ts', command: 'typescript-language-server --stdio', env: [] },
     ]);
-    expect(p.contents.remotes).toEqual([{ kind: 'mcp', name: 'docs', url: 'https://mcp.example.com/mcp', env: ['DOCS_TOKEN'] }]);
+    // A remote server covibe can sign in to says whether it is.
+    expect(p.contents.remotes).toEqual([{ kind: 'mcp', name: 'docs', url: 'https://mcp.example.com/mcp', env: ['DOCS_TOKEN'], signIn: { signedIn: false } }]);
     expect(p.contents.ignored).toEqual(
       expect.arrayContaining([
         'settings.json (settings it would apply to Claude Code)',

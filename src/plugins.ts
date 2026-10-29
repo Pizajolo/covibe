@@ -20,6 +20,8 @@ import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } fr
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { signedInUrl, signInStatus, signOut, type McpSignInStatus } from './connections/mcp-auth.js';
+import { mcpProxyUrl } from './connections/mcp-proxy.js';
 import { checkout, forgetCheckout, git, parseGithub, sparse, type GithubRef } from './github.js';
 import { covibeHome } from './home.js';
 import { expandHome, shellQuote, type LaunchSpec, type SandboxPolicy } from './sandbox-policy.js';
@@ -63,6 +65,12 @@ export interface PluginRemote {
   url: string;
   /** Your environment variables it uses (in its address or headers). */
   env?: string[];
+  /**
+   * A remote MCP server covibe can sign in to (OAuth in the browser), and
+   * whether it is; members then reach it through covibe's proxy. Absent for
+   * hooks and for servers on the older SSE transport.
+   */
+  signIn?: McpSignInStatus;
 }
 
 export interface PluginDoc {
@@ -464,7 +472,10 @@ function prepare(r: PluginRecord): string {
   const mcp: Record<string, Json> = {};
   for (const [n, cfg] of Object.entries(r.mcpServers)) {
     if (typeof cfg.command !== 'string') {
-      mcp[n] = cfg;
+      // Signed in: the member's Claude Code goes through covibe's proxy, which adds the token.
+      // (Another covibe process may rewrite this with its own proxy; both work while they run.)
+      const proxied = canSignIn(cfg) && signedInUrl(r.name, n) === cfg.url ? mcpProxyUrl(r.name, n) : undefined;
+      mcp[n] = proxied ? { ...cfg, type: 'http', url: proxied } : cfg;
       continue;
     }
     spec.mcp[n] = { command: cfg.command, args: strings(cfg.args), env: Object.keys(isObj(cfg.env) ? cfg.env : {}) };
@@ -503,9 +514,29 @@ function toPlugin(r: PluginRecord): LibraryPlugin {
     everyone: !!r.everyone,
     policy: r.policy,
     approved: r.approved === fingerprint(r),
-    contents: { ...docsOf(files, r.manifest), programs, remotes, ignored: r.ignored },
+    contents: {
+      ...docsOf(files, r.manifest),
+      programs,
+      remotes: remotes.map((x) => (x.kind === 'mcp' && canSignIn(r.mcpServers[x.name] ?? {}) ? { ...x, signIn: signInStatus(r.name, x.name) } : x)),
+      ignored: r.ignored,
+    },
     updatedAt: r.updatedAt,
   };
+}
+
+/** A remote MCP server on the streamable HTTP transport (https, or http on this computer), which covibe's sign-in and proxy support. */
+function canSignIn(cfg: Json): boolean {
+  return typeof cfg.url === 'string' && /^(https:\/\/|http:\/\/(127\.0\.0\.1|localhost)[:/])/.test(cfg.url) && cfg.type !== 'sse';
+}
+
+/** A plugin's remote MCP server covibe can sign in to: its address, or an error saying why not. */
+export function signInTarget(name: string, server: string): string {
+  const r = readRecord(name);
+  if (!r) throw new PluginError(`plugin ${name} not found`);
+  const cfg = r.mcpServers[server];
+  if (!cfg || typeof cfg.command === 'string') throw new PluginError(`plugin ${name} has no remote server "${server}"`);
+  if (!canSignIn(cfg)) throw new PluginError(`covibe can only sign in to servers on https (or on this computer) that use the streamable HTTP transport; ${server} does not`);
+  return String(cfg.url);
 }
 
 export function listPlugins(): LibraryPlugin[] {
@@ -565,6 +596,8 @@ export function setPolicy(name: string, policy: unknown): LibraryPlugin {
 }
 
 export function deletePlugin(name: string) {
+  const r = readRecord(name);
+  for (const server of Object.keys(r?.mcpServers ?? {})) if (signInStatus(name, server).at) signOut(name, server);
   rmSync(pluginDir(name), { recursive: true, force: true });
   rmSync(dataDir(name), { recursive: true, force: true });
 }

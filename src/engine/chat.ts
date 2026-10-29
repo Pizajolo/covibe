@@ -1,6 +1,7 @@
 import type { AgentConfig, TeamConfig } from '../config/types.js';
 import type { EventStore } from '../events/store.js';
 import type { DeliveryMode, RunRecord } from '../events/types.js';
+import { startMcpProxy } from '../connections/mcp-proxy.js';
 import type { Connections } from '../connections/store.js';
 import type { Env } from '../runner/backend.js';
 import type { AgentRunner } from '../runner/types.js';
@@ -106,6 +107,7 @@ async function converse(p: {
   workspace?: Workspace;
 }): Promise<ChatOutcome> {
   const { store, run, agent } = p;
+  await startMcpProxy().catch(() => undefined);
   const account = isBalanced(agent, p.connections) ? await p.connections!.pick() : undefined;
   const built = await resolverOf(p.connections).resolve(account ? { ...agent.backend, account } : agent.backend, p.env ?? process.env);
   const base = { step: 'chat', agent: agent.name };

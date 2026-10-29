@@ -15,6 +15,9 @@ import { EventStore } from './events/store.js';
 import { bold, dim, formatEvent, formatRun, green, QUIET_EVENTS, red, yellow } from './format.js';
 import { ClaudeSdkRunner } from './runner/claude-sdk.js';
 import { Connections, loginCommand, openInBrowser } from './connections/store.js';
+import { startSignIn } from './connections/mcp-auth.js';
+import { stopMcpProxy } from './connections/mcp-proxy.js';
+import { listPlugins, signInTarget } from './plugins.js';
 
 /** Accounts and providers from Settings → Advanced, shared with the app. */
 function openConnections(runner: ClaudeSdkRunner): Connections {
@@ -40,6 +43,7 @@ Usage:
   covibe app [--port <n>] [--no-open]          Open the covibe app in your browser
   covibe connections                           List accounts and providers (Settings → Advanced)
   covibe login <account>                       Sign in one of those Claude or ChatGPT accounts
+  covibe login <plugin>                        Sign in to a plugin's servers (Notion, say) for your members
 
 Options:
   --repo <dir>   Repository or folder the team works on (default: current directory)
@@ -120,6 +124,7 @@ export async function main(argv: string[]): Promise<number> {
   } finally {
     // Members' browsers belong to this command; close them so the process can end.
     await browserHub.shutdown();
+    await stopMcpProxy();
   }
 }
 
@@ -331,6 +336,24 @@ async function log(id: string | undefined, values: { repo?: string; follow?: boo
   }
 }
 
+/** Sign covibe in to a plugin's remote MCP servers, one after the other, in the browser. */
+async function pluginLogin(plugin: string, servers: string[]): Promise<number> {
+  if (!servers.length) throw new Error(`plugin ${plugin} has no remote server covibe can sign in to`);
+  for (const server of servers) {
+    const { url, done } = await startSignIn(plugin, server, signInTarget(plugin, server));
+    if (!url) {
+      console.log(dim(`${server}: needs no sign-in`));
+      continue;
+    }
+    const opened = await openInBrowser(url);
+    console.log(`${bold(server)}: ${opened ? 'finish signing in in your browser. If it did not open, go to:' : 'open this page in a browser on this machine to sign in:'}`);
+    console.log(dim(url));
+    await done;
+    console.log(green(`Signed in to ${plugin}'s ${server} server. Members with the plugin reach it through covibe.`));
+  }
+  return 0;
+}
+
 async function changes(id: string | undefined, repo: string | undefined): Promise<number> {
   if (!id) throw new Error('usage: covibe changes <run>');
   const store = openStore(repo);
@@ -471,6 +494,8 @@ async function login(id: string | undefined): Promise<number> {
   if (!id) throw new Error('usage: covibe login <account>');
   const connections = new Connections();
   const account = connections.get(id);
+  const plugin = account ? undefined : listPlugins().find((p) => p.name === id);
+  if (plugin) return pluginLogin(plugin.name, plugin.contents.remotes.filter((r) => r.signIn).map((r) => r.name));
   if (account?.kind === 'codex') {
     // The browser does the sign-in and comes back to a callback on this machine.
     const { url, done } = await connections.codexSignIn(id);

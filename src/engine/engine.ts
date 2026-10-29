@@ -7,6 +7,7 @@ import type { Connections } from '../connections/store.js';
 import { MAIN_ACCOUNT } from '../connections/types.js';
 import { BackendError, plainBackends, type BackendEnv, type BackendResolver, type Env } from '../runner/backend.js';
 import { brainRoot } from '../home.js';
+import { startMcpProxy } from '../connections/mcp-proxy.js';
 import { resolvePlugins } from '../plugins.js';
 import { resolveSkills } from '../skills.js';
 import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent, CustomTool } from '../runner/types.js';
@@ -187,6 +188,8 @@ class Engine {
     const { steps } = this.team;
     // The brain must exist before members are pointed at it.
     await ensureBrain(this.workspace.repo).catch(() => undefined);
+    // Signed-in plugin servers are reached through it (see mcp-proxy.ts).
+    await startMcpProxy().catch(() => undefined);
     this.emit({
       type: 'run.started',
       data: {

@@ -1,7 +1,8 @@
 # Research on the web, checked and written up. The researcher writes the
 # report to research/ in the project folder. To have it write into Notion
-# instead, install the Notion plugin (Plugins → Anthropic's directory), sign
-# it in, uncomment `plugins` below, and name the Notion page in the goal.
+# instead, install the Notion plugin (Plugins → Anthropic's directory), press
+# Sign in on its page, uncomment `plugins` below, and name the Notion page in
+# the goal.
 version: 1
 name: research
 description: A researcher who searches the web and writes a sourced report (to research/ or a Notion page), and a fact-checker.

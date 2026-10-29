@@ -137,6 +137,7 @@ Your checkout is never touched. The result lands on the branch `covibe/<run-id>`
 | `covibe app [--port <n>] [--no-open]` | Serve the app UI in your browser |
 | `covibe connections` | List the Claude accounts, ChatGPT accounts and providers set up in Settings → Advanced |
 | `covibe login <account>` | Sign one of those accounts in: a Claude account runs `claude auth login` in its own config folder; a ChatGPT account opens OpenAI's sign-in in your browser |
+| `covibe login <plugin>` | Sign in to a plugin's remote servers (Notion, say) in your browser, for your members (see [Signing in to plugin servers](#signing-in-to-plugin-servers)) |
 
 Run ids accept a unique prefix. The event store lives in `<repo>/.covibe/covibe.db`; covibe writes its own
 `.gitignore` there. Worktrees live outside the repository, in `~/.covibe/worktrees/`.
@@ -256,6 +257,19 @@ curator get a `propose_brain_note` tool; their file tools are blocked from the b
 cannot write there. The curator may edit the brain directly. With `curate: after_run`, the curator reviews
 pending proposals at the end of a run, merging accepted ones into notes and recording a decision for each.
 Each review is a session of its own, so `min_proposals` lets proposals collect over several runs first.
+
+### Signing in to plugin servers
+
+Some plugins connect to a remote MCP server that needs your account, such as Notion's. Their page under
+**Plugins** has a **Sign-in** card with a **Sign in** button per server (on the command line: `covibe login
+<plugin>`). Your browser opens the service's own sign-in page; covibe registers itself as an OAuth client (with
+PKCE) and keeps the tokens with its other keys (the macOS Keychain, or `~/.covibe/secrets.json`).
+
+Members never get the tokens. Their Claude Code reaches a signed-in server through a proxy inside covibe, on
+127.0.0.1 with a random key in its address; the proxy adds the token, renews it when it runs out or the server
+refuses it, and passes everything else through as it is. If renewing fails, the card says so and asks you to sign
+in again. Signing out (or deleting the plugin) forgets the tokens, and members go back to the server's own
+address. covibe signs in to servers on https (or on this computer) that use MCP's streamable HTTP transport.
 
 ### How the pieces fit
 
@@ -520,9 +534,9 @@ the folder's `.covibe` folder, as it does in a repository.
 member (`plugins: [notion]`; the research template has the line ready). It connects to Notion's own MCP server
 (`https://mcp.notion.com/mcp`), which covibe lists as a remote server in its review before you install it. Then
 name the page in the goal: *"Research the market for home batteries in Germany and write it into the Notion page
-'Battery research'."* Members only get the Notion tools when they have the plugin. Notion's server signs in with
-OAuth in a browser, and covibe has no sign-in step for a plugin's remote server yet: the sign-in has to come from
-Claude Code itself, so check with a short run first. Without Notion tools the researcher writes to `research/`.
+'Battery research'."* Members only get the Notion tools when they have the plugin. Sign in once on the plugin's page
+(see [Signing in to plugin servers](#signing-in-to-plugin-servers)). Without Notion tools the researcher writes to
+`research/`.
 
 ## The Git tab
 
@@ -693,7 +707,8 @@ src/server/site.ts         a run's files (or a member's folder) served as a webs
 src/events/store.ts        SQLite runs, events, sessions, inbox, questions, images members saw (node:sqlite, WAL)
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
 src/runner/backend.ts      per-agent environment for each backend
-src/connections/           Settings → Advanced: accounts and providers, Keychain keys, balancing, the OpenAI translator
+src/connections/           Settings → Advanced: accounts and providers, Keychain keys, balancing, the OpenAI translator;
+                           signing in to plugin MCP servers (mcp-auth.ts) and the proxy that adds the token (mcp-proxy.ts)
                            (Chat Completions; Responses for ChatGPT accounts in codex-proxy.ts, their sign-in in codex-auth.ts)
 src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.0.0.1, token)
 src/server/library.ts      projects and teams library, comment-preserving YAML edits
