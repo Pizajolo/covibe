@@ -703,6 +703,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         elevenlabsKey: key('elevenlabsKey'),
       });
     }],
+    // A recording: whisper.cpp keeps its model loaded from the first click until it is closed.
+    ['POST', '/api/voice/sessions', () => voice.openSession()],
+    ['DELETE', '/api/voice/sessions/:id', (p) => (voice.closeSession(p.id!), { ok: true })],
     ['POST', '/api/voice/models/:id', (p) => voice.startDownload(p.id!)],
     ['DELETE', '/api/voice/models/:id', (p) => voice.deleteModel(p.id!)],
 
@@ -1106,8 +1109,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         return await streamBrowser(pid!, rid!, agent!, req, res);
       }
 
-      // A recording from the mic button: raw WAV, not JSON (it can be minutes long).
-      if (url.pathname === '/api/voice/transcribe' && req.method === 'POST') return send(res, 200, await voice.transcribe(await readRaw(req, 64 << 20)));
+      // A recording from the mic button, or a piece of one (?session=…): raw WAV, not JSON (it can be minutes long).
+      if (url.pathname === '/api/voice/transcribe' && req.method === 'POST') {
+        return send(res, 200, await voice.transcribe(await readRaw(req, 64 << 20), url.searchParams.get('session') ?? undefined));
+      }
 
       if (url.pathname === '/api/events' && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
@@ -1164,6 +1169,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       for (const res of sse) res.end();
       for (const res of streams) res.end();
       await browserHub.shutdown();
+      voice.close();
       await new Promise<void>((r) => server.close(() => r()));
       // Give aborted runs a moment to record their end.
       await new Promise((r) => setTimeout(r, 200));
