@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { loadTeam } from '../src/config/load.js';
 import { buildInvocation, runTeam } from '../src/engine/engine.js';
 import { EventStore } from '../src/events/store.js';
-import { parseGithub } from '../src/github.js';
+import { fetchLfs, parseGithub, sparse } from '../src/github.js';
 import { approvePlugin, deletePlugin, getPlugin, installFromDir, mcpToolRule, pluginsDir, resolvePlugins, sandboxStatus, setPolicy } from '../src/plugins.js';
 import { sandboxConfig, type LaunchSpec } from '../src/sandbox-policy.js';
 import { ScriptedRunner, tempDir, tempRepo, writeFiles } from './helpers.js';
@@ -157,6 +157,26 @@ describe('plugin library', () => {
     expect(parseGithub('https://github.com/anthropics/claude-plugins-official')).toEqual({ owner: 'anthropics', repo: 'claude-plugins-official', ref: undefined, path: '' });
     expect(parseGithub('https://github.com/o/r/blob/main/plugins/x/.claude-plugin/plugin.json')).toEqual({ owner: 'o', repo: 'r', ref: 'main', path: 'plugins/x' });
     expect(parseGithub('o/r/.claude-plugin/marketplace.json')).toEqual({ owner: 'o', repo: 'r', path: '' });
+  });
+
+  it('checks out repositories whose Git LFS files cannot be downloaded', async () => {
+    const pointer = 'version https://git-lfs.github.com/spec/v1\noid sha256:' + 'a'.repeat(64) + '\nsize 12817182\n';
+    const src = tempDir('covibe-lfs-src-');
+    writeFiles(src, { '.gitattributes': '*.mp4 filter=lfs diff=lfs merge=lfs -text\n', 'skill/SKILL.md': '---\nname: s\n---\n', 'skill/bg.mp4': pointer, 'other/x.mp4': pointer });
+    const g = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, stdio: 'pipe' });
+    g(src, 'init', '-q');
+    g(src, 'add', '-A');
+    g(src, 'commit', '-qm', 'lfs');
+    const dir = join(tempDir('covibe-lfs-'), 'clone');
+    g(src, 'clone', '-q', '--sparse', src, dir);
+    // Like a machine whose git-lfs fails: the smudge filter errors, and is required.
+    g(dir, 'config', 'filter.lfs.smudge', 'false');
+    g(dir, 'config', 'filter.lfs.process', 'false');
+    g(dir, 'config', 'filter.lfs.required', 'true');
+    await sparse(dir, ['']); // the whole repository, as for a plugin at its root
+    expect(readFileSync(join(dir, 'skill/bg.mp4'), 'utf8')).toBe(pointer);
+    expect(await fetchLfs(dir, ['skill'])).toEqual(['skill/bg.mp4']);
+    expect(await fetchLfs(dir, [''])).toEqual(['other/x.mp4', 'skill/bg.mp4']);
   });
 });
 

@@ -225,7 +225,9 @@ agents:
 **Skills.** Library skills live in `~/.covibe/skills-plugin/skills/<name>/SKILL.md` (with any files they use),
 packaged as a local Claude Code plugin. Each member gets exactly its skills (team defaults, its own, and
 library skills marked Everyone) through the SDK's `skills` filter, so other installed skills stay hidden from
-it. Skills installed from GitHub remember where they came from and can be updated.
+it. Skills installed from GitHub remember where they came from and can be updated. Files a repository keeps in Git LFS
+(videos, audio) are downloaded when git-lfs can and they come to at most 50 MB for what you install; otherwise they
+stay small pointer files, and a failing LFS download never stops the install. The same goes for plugins.
 
 **Plugins.** A Claude Code plugin can run programs on your computer: hooks (shell commands on events such as
 every tool call), MCP and LSP servers, and monitors. Claude Code runs those with your full permissions, outside
