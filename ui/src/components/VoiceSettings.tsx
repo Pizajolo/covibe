@@ -10,6 +10,7 @@ interface VoiceStatus {
   settings: { engine: Engine; language: string; model: string; whisperPath?: string; openaiConnection?: string; openaiModel?: string };
   local: {
     command?: string;
+    server?: string;
     models: { id: string; file: string; mb: number; note: string; downloaded: boolean }[];
     download?: { model: string; received: number; total?: number; error?: string; done?: boolean };
   };
@@ -107,6 +108,14 @@ export function VoiceSettings() {
             {value.local.command ? (
               <span className="small">
                 Found at <span className="mono">{value.local.command}</span>
+                {value.local.server ? (
+                  <span className="faint"> · its server keeps the model loaded while you talk, so the text follows a moment after each pause</span>
+                ) : (
+                  <span className="faint">
+                    {' '}
+                    · <span className="mono">whisper-server</span> is not next to it, so each pause loads the model again (slower)
+                  </span>
+                )}
               </span>
             ) : (
               <span className="small">

@@ -503,9 +503,10 @@ calls.
 
 ## Voice input
 
-The mic button sits next to the goal box (⌘N), member chats, team chat and the git helper. Click it, talk, and
-click again; the text is added to the box for you to check and send. Esc throws the recording away. The app
-records 16 kHz mono WAV and covibe turns it into text with the engine chosen in **Settings → Voice input**:
+The mic button sits next to the goal box (⌘N), member chats, team chat and the git helper. Click it and talk:
+each time you pause for about a second, what you said since the last pause is turned into text and added to the
+box, so the text follows a moment behind you. Click again to stop; Esc stops and throws away what is not in the
+box yet. Each piece goes as 16 kHz mono WAV to the engine chosen in **Settings → Voice input**:
 
 | Engine | What it needs | Where the recording goes |
 |---|---|---|
@@ -516,6 +517,9 @@ records 16 kHz mono WAV and covibe turns it into text with the engine chosen in 
 The whisper.cpp models are a one-time download into `~/.covibe/voice/models/`: **tiny** (75 MB), **base**
 (142 MB, the default; fast on any Mac, good for clear English), **small** (466 MB; clearly better for German,
 French and other languages, still quick on Apple silicon) and **large-v3-turbo** (547 MB, the most accurate).
+With whisper.cpp, the first click starts `whisper-server` (installed with `whisper-cli`), which loads the model
+once and keeps it loaded until the recording ends, so each pause turns into text without loading it again. If
+`whisper-server` is missing, each piece goes to `whisper-cli`, which loads the model every time (slower).
 On Apple silicon even small turns a short message into text in a second or two. Setting the language you speak
 helps with short recordings.
 
@@ -777,7 +781,7 @@ src/server/gitops.ts       git in the project's checkout: every operation the Gi
 src/server/git-helper.ts   the git helper: reads freely, proposes changes for you to run, edits only conflicted files
 ui/src/components/Office.tsx    the run as a pixel office (office-art.ts draws it, office-state.ts maps member states)
 src/mcp-config.ts          reading an MCP server you paste (address, command or JSON) and taking keys out of it
-src/voice.ts               voice input: whisper.cpp on this computer, OpenAI or ElevenLabs; settings and model downloads
+src/voice.ts               voice input: whisper.cpp on this computer (a whisper-server per recording), OpenAI or ElevenLabs; settings and model downloads
 src/main.ts                CLI
 ui/                        the app UI (React, Vite, CodeMirror)
 desktop/                   the macOS shell (Electron): window, menus, folder picker, quit guard, members' browser

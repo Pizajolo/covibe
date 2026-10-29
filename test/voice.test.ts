@@ -1,4 +1,4 @@
-import { chmodSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
@@ -78,6 +78,68 @@ describe('voice input', () => {
     expect(() => voice.update({ model: 'huge' })).toThrow(/unknown whisper.cpp model/);
     expect(voice.deleteModel('base').local.models.find((m) => m.id === 'base')!.downloaded).toBe(false);
     hub.close();
+  });
+
+  it('keeps the model loaded in whisper-server for a recording, and stops it when the recording ends', async () => {
+    const { home, voice } = setup();
+    const models = join(home, 'voice', 'models');
+    mkdirSync(models, { recursive: true });
+    writeFileSync(join(models, 'ggml-base.bin'), 'model');
+
+    // Stand-ins: whisper-cli would say "from the cli"; whisper-server loads for a moment (503), then answers each piece.
+    const dir = tempDir('covibe-bin-');
+    const cli = join(dir, 'whisper-cli');
+    writeFileSync(cli, `#!/bin/sh\nprintf ' from the cli\\n'\n`);
+    chmodSync(cli, 0o755);
+    const server = join(dir, 'whisper-server');
+    writeFileSync(
+      server,
+      `#!/usr/bin/env node
+const http = require('node:http');
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.writeFileSync(${JSON.stringify(join(home, 'server-args'))}, args.join(' '));
+const port = Number(args[args.indexOf('--port') + 1]);
+let health = 0, pieces = 0;
+http.createServer((req, res) => {
+  if (req.url === '/health') { res.writeHead(++health < 3 ? 503 : 200); return res.end('{}'); }
+  let body = '';
+  req.on('data', (c) => (body += c.toString('latin1')));
+  req.on('end', () => {
+    pieces++;
+    const ok = req.url === '/inference' && body.includes('name="response_format"') && body.includes('filename="speech.wav"');
+    res.writeHead(ok ? 200 : 400, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(ok ? { text: ' Piece ' + pieces + '. [BLANK_AUDIO]\\n' } : { error: 'bad request' }));
+  });
+}).listen(port, '127.0.0.1');
+`,
+    );
+    chmodSync(server, 0o755);
+    voice.update({ whisperPath: cli, language: 'en' });
+    expect(voice.status()).toMatchObject({ ready: true, local: { command: cli, server } });
+
+    const { id } = voice.openSession();
+    expect(await voice.transcribe(wav(), id)).toEqual({ text: 'Piece 1.', engine: 'local' });
+    expect(await voice.transcribe(wav(), id)).toEqual({ text: 'Piece 2.', engine: 'local' });
+    expect(readFileSync(join(home, 'server-args'), 'utf8')).toMatch(/^-m \S+ggml-base\.bin --host 127\.0\.0\.1 --port \d+ -t \d+ -l en$/);
+    const port = Number(/--port (\d+)/.exec(readFileSync(join(home, 'server-args'), 'utf8'))![1]);
+
+    // The recording ends: the server stops; pieces without a session use whisper-cli.
+    voice.closeSession(id);
+    let up = true;
+    for (let i = 0; i < 50 && up; i++) {
+      up = await fetch(`http://127.0.0.1:${port}/health`).then(() => true, () => false);
+      if (up) await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(up).toBe(false);
+    expect(await voice.transcribe(wav(), id)).toEqual({ text: 'from the cli', engine: 'local' });
+
+    // Without whisper-server, a session still works: each piece goes to whisper-cli.
+    rmSync(server);
+    expect(voice.status().local.server).toBeUndefined();
+    const other = voice.openSession();
+    expect(await voice.transcribe(wav(), other.id)).toEqual({ text: 'from the cli', engine: 'local' });
+    voice.close();
   });
 
   it("uses OpenAI's API with the key of a model provider from Settings, or its own", async () => {
