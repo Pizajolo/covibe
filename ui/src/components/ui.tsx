@@ -197,3 +197,28 @@ export function Copy({ text, label }: { text: string; label?: string }) {
     </button>
   );
 }
+
+/** A list of short values (domains, folders) edited as chips. */
+export function ChipsInput({ values, onChange, placeholder }: { values: string[]; onChange: (v: string[]) => void; placeholder: string }) {
+  const [v, setV] = useState('');
+  const add = () => {
+    const t = v.trim();
+    if (t && !values.includes(t)) onChange([...values, t]);
+    setV('');
+  };
+  return (
+    <div className="col" style={{ gap: 6 }}>
+      <div className="chips">
+        {values.map((x) => (
+          <span key={x} className="chip mono">
+            {x}
+            <button aria-label={`Remove ${x}`} onClick={() => onChange(values.filter((y) => y !== x))}>
+              ×
+            </button>
+          </span>
+        ))}
+      </div>
+      <input className="input mono" value={v} placeholder={placeholder} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} onBlur={add} />
+    </div>
+  );
+}

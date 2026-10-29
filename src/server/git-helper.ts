@@ -167,6 +167,7 @@ export async function gitHelp(opts: HelperStart): Promise<{ runId: string; done:
     limits: { max_turns: 60, timeout_min: 60 },
     writes: true,
     skills: [],
+    plugins: [],
     browser: false,
   };
   // Files the helper may edit: the ones with conflicts, refreshed after every command it runs.

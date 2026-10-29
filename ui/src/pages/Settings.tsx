@@ -276,6 +276,10 @@ export function Settings() {
                   Shell commands run in the macOS sandbox: they can write only in the member's own working copy, temp folders and package caches, and reach only the
                   domains the team allows. Change this per team (Team settings → Sandbox) or per member.
                 </li>
+                <li>
+                  Plugins' hooks and servers run in the sandbox too, each with its own permissions: no access to your home folder or your keys, and only the domains and folders you
+                  allowed for that plugin. An update that changes what a plugin runs waits for your approval.
+                </li>
                 <li>Messages to a working member can steer it between tool calls or stop its current turn; nothing else can take over a running member.</li>
               </ul>
             </div>

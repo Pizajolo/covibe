@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { desktop } from './api';
 import { Composer } from './components/Composer';
-import { IconFolder, IconGear, IconHome, IconPlus, IconRuns, IconSparkle, IconTeam } from './components/icons';
+import { IconFolder, IconGear, IconHome, IconPlug, IconPlus, IconRuns, IconSparkle, IconTeam } from './components/icons';
 import { ProjectPage } from './pages/ProjectPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { NewProjectWizard } from './components/NewProjectWizard';
@@ -10,6 +10,7 @@ import { SidebarUsage } from './components/Usage';
 import { Modal } from './components/ui';
 import { go, href, useData, useRoute } from './data';
 import { Home } from './pages/Home';
+import { Plugins } from './pages/Plugins';
 import { Projects } from './pages/Projects';
 import { RunView } from './pages/RunView';
 import { Runs } from './pages/Runs';
@@ -52,6 +53,7 @@ export function App() {
   else if (section === 'projects' && route[1]) page = <ProjectPage projectId={route[1]} tab={route[2]} />;
   else if (section === 'projects') page = <Projects />;
   else if (section === 'skills') page = <Skills tab={route[1]} name={route[2]} />;
+  else if (section === 'plugins') page = <Plugins tab={route[1]} name={route[2]} />;
   else if (section === 'settings') page = <Settings />;
   else page = <Home onNewGoal={() => setComposer(true)} />;
 
@@ -79,6 +81,7 @@ export function App() {
         {nav('teams', 'Teams', <IconTeam />, <span className="count">{overview?.teams.length ?? ''}</span>)}
         {nav('projects', 'Projects', <IconFolder />, <span className="count">{overview?.projects.length ?? ''}</span>)}
         {nav('skills', 'Skills', <IconSparkle />)}
+        {nav('plugins', 'Plugins', <IconPlug />)}
         {nav('settings', 'Settings', <IconGear />)}
 
         {running.length > 0 && (

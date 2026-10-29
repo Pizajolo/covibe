@@ -41,6 +41,12 @@ export interface AgentInvocation {
   readDirs?: string[];
   /** Skills the agent may use (SDK names, e.g. "covibe:pdf" or a built-in "dataviz"), and the plugin folders that hold them. */
   skills?: { names: string[]; pluginDirs: string[] };
+  /**
+   * Plugins from the library: folders to load (their hooks and servers already
+   * start through the sandbox launcher), their skills, and the permission
+   * rules for their MCP servers' tools.
+   */
+  plugins?: { dirs: string[]; skills: string[]; mcpTools: string[] };
   /** Tools covibe provides to this agent (proposing to the brain, editing a team…). */
   customTools?: CustomTool[];
   /**

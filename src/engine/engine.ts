@@ -7,6 +7,7 @@ import type { Connections } from '../connections/store.js';
 import { MAIN_ACCOUNT } from '../connections/types.js';
 import { BackendError, plainBackends, type BackendEnv, type BackendResolver, type Env } from '../runner/backend.js';
 import { brainRoot } from '../home.js';
+import { resolvePlugins } from '../plugins.js';
 import { resolveSkills } from '../skills.js';
 import type { AgentInvocation, AgentResult, AgentRunner, AgentStreamEvent, CustomTool } from '../runner/types.js';
 import { brainPrompt, commitBrain, curate, ensureBrain, proposeTool } from './brain.js';
@@ -193,10 +194,12 @@ class Engine {
     let reason: string | undefined;
     let limit: { resets_at: string | null } | undefined;
     try {
-      // An account or provider that is not set up fails the run now, not halfway.
+      // An account or provider that is not set up, or a plugin that cannot run
+      // (missing, waiting for approval, no OS sandbox), fails the run now, not halfway.
       for (const a of Object.values(this.team.agents)) {
         try {
           checkBackend(a.backend, this.opts.connections);
+          resolvePlugins(a.plugins);
         } catch (err) {
           throw new StepError(`${a.name}: ${(err as Error).message}`);
         }
@@ -753,6 +756,7 @@ export function buildInvocation(
     systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL), canRequest: tools.some((t) => t.name === REQUEST_TOOL) }), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
     readDirs: brain && !p.curating ? [brain] : undefined,
     skills: resolveSkills(agent.skills),
+    plugins: resolvePlugins(agent.plugins),
     customTools: tools.length ? tools : undefined,
     cwd: p.cwd,
     resumeSessionId: p.resume,

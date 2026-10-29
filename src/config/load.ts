@@ -147,6 +147,7 @@ interface RawAgent {
   limits?: Partial<Limits>;
   sandbox?: RawSandbox;
   skills?: string[];
+  plugins?: string[];
   browser?: boolean;
 }
 interface RawBranch {
@@ -179,6 +180,7 @@ interface RawTeam {
     setting_sources?: SettingSource[];
     sandbox?: RawSandbox;
     skills?: string[];
+    plugins?: string[];
     browser?: boolean;
   };
   brain?: { curator?: string; curate?: 'after_run' | 'manual'; min_proposals?: number };
@@ -273,6 +275,7 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
       writes: a.tools.some((t) => WRITE_TOOLS.has(t)),
       sandbox: resolveSandbox(a.tools, defaults.sandbox, a.sandbox),
       skills: [...new Set([...(defaults.skills ?? []), ...(a.skills ?? [])])],
+      plugins: [...new Set([...(defaults.plugins ?? []), ...(a.plugins ?? [])])],
       browser: a.browser ?? defaults.browser ?? false,
     };
     if (a.scope?.write && !agents[name].writes) {

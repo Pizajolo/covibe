@@ -7,8 +7,9 @@ import { IconAlert, IconArrowLeft, IconChat, IconArrowRight, IconCheck, IconCode
 import { useConnections } from '../components/Connections';
 import { ModelPicker, type ProviderChoice } from '../components/ModelPicker';
 import { Toolbar } from '../components/Toolbar';
+import { PluginPicker } from './Plugins';
 import { SkillPicker } from './Skills';
-import { Avatar, Empty, Modal, useAction, useToast } from '../components/ui';
+import { Avatar, ChipsInput, Empty, Modal, useAction, useToast } from '../components/ui';
 import { go, href, useData, useLive } from '../data';
 
 type Doc = Record<string, any>;
@@ -187,30 +188,6 @@ function TextField({ value, onCommit, placeholder, mono, type = 'text', multilin
   );
 }
 
-function ChipsInput({ values, onChange, placeholder }: { values: string[]; onChange: (v: string[]) => void; placeholder: string }) {
-  const [v, setV] = useState('');
-  const add = () => {
-    const t = v.trim();
-    if (t && !values.includes(t)) onChange([...values, t]);
-    setV('');
-  };
-  return (
-    <div className="col" style={{ gap: 6 }}>
-      <div className="chips">
-        {values.map((x) => (
-          <span key={x} className="chip mono">
-            {x}
-            <button aria-label={`Remove ${x}`} onClick={() => onChange(values.filter((y) => y !== x))}>
-              ×
-            </button>
-          </span>
-        ))}
-      </div>
-      <input className="input mono" value={v} placeholder={placeholder} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} onBlur={add} />
-    </div>
-  );
-}
-
 const num = (s: string) => (s.trim() === '' ? null : Number(s));
 
 type SandboxDefaults = TeamDetail['sandboxDefaults'];
@@ -281,7 +258,7 @@ function Members({ teamId, doc, edit, files, onFiles }: { teamId: string; doc: D
       </div>
       <div className="split-main">
         {current ? (
-          <MemberForm key={current} teamId={teamId} name={current} index={names.indexOf(current)} agent={agents[current]!} names={names} edit={edit} files={files} onFiles={onFiles} onDeleted={() => setSelected(undefined)} teamSkills={doc.defaults?.skills} teamBackend={doc.defaults?.backend} teamBrowser={doc.defaults?.browser === true} />
+          <MemberForm key={current} teamId={teamId} name={current} index={names.indexOf(current)} agent={agents[current]!} names={names} edit={edit} files={files} onFiles={onFiles} onDeleted={() => setSelected(undefined)} teamSkills={doc.defaults?.skills} teamPlugins={doc.defaults?.plugins} teamBackend={doc.defaults?.backend} teamBrowser={doc.defaults?.browser === true} />
         ) : (
           <Empty icon={<IconTeam />} title="No members" action={<button className="btn primary" onClick={() => setAdding(true)}><IconPlus /> Add member</button>} />
         )}
@@ -298,7 +275,7 @@ function roleLine(a: Doc): string {
   return `${model}${a.effort ? ` (${a.effort})` : ''}${a.backend?.account ? ` · ${a.backend.account} account` : ''} · ${writes ? (a.scope?.write ? `writes ${a.scope.write.join(', ') || 'nothing'}` : 'writes anywhere') : 'read-only'}`;
 }
 
-function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, onDeleted, teamSkills, teamBackend, teamBrowser }: { teamId: string; name: string; index: number; agent: Doc; names: string[]; edit: Edit; files: string[]; onFiles: () => void; onDeleted: () => void; teamSkills?: string[]; teamBackend?: Doc; teamBrowser?: boolean }) {
+function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, onDeleted, teamSkills, teamPlugins, teamBackend, teamBrowser }: { teamId: string; name: string; index: number; agent: Doc; names: string[]; edit: Edit; files: string[]; onFiles: () => void; onDeleted: () => void; teamSkills?: string[]; teamPlugins?: string[]; teamBackend?: Doc; teamBrowser?: boolean }) {
   const p = (...k: (string | number)[]) => ['agents', name, ...k];
   const tools: string[] = Array.isArray(agent.tools) ? agent.tools : [];
   const writes = tools.some((t) => WRITE_TOOLS.has(t));
@@ -407,6 +384,16 @@ function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, o
           onChange={(v) => void edit([{ op: 'set', path: p('skills'), value: v.length ? v : null }])}
         />
         <span className="tiny faint">Claude loads a skill when a task calls for it. Manage skills under Skills in the sidebar.</span>
+      </section>
+
+      <section className="form-section">
+        <h3>Plugins</h3>
+        <PluginPicker
+          value={Array.isArray(agent.plugins) ? agent.plugins : []}
+          inherited={(Array.isArray(teamPlugins) ? teamPlugins : []).map((n: string) => ({ name: n, why: 'from the team' }))}
+          onChange={(v) => void edit([{ op: 'set', path: p('plugins'), value: v.length ? v : null }])}
+        />
+        <span className="tiny faint">Skills, commands, hooks and MCP servers from your plugin library. Their hooks and servers run in the OS sandbox with each plugin's permissions.</span>
       </section>
 
       <section className="form-section">
@@ -1340,6 +1327,10 @@ function TeamSettings({ doc, edit }: { doc: Doc; edit: Edit }) {
         <section className="form-section">
           <h3>Skills for every member</h3>
           <SkillPicker value={Array.isArray(d.skills) ? d.skills : []} onChange={(v) => void edit([{ op: 'set', path: ['defaults', 'skills'], value: v.length ? v : null }])} />
+        </section>
+        <section className="form-section">
+          <h3>Plugins for every member</h3>
+          <PluginPicker value={Array.isArray(d.plugins) ? d.plugins : []} onChange={(v) => void edit([{ op: 'set', path: ['defaults', 'plugins'], value: v.length ? v : null }])} />
         </section>
         <section className="form-section">
           <h3>Project brain</h3>

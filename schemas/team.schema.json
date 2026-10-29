@@ -244,6 +244,15 @@
           },
           "description": "Skills by name: from your covibe skill library, or ones Claude Code already has (built-in or in the project's .claude/skills)."
         },
+        "plugins": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+          },
+          "description": "Plugins by name, from your covibe plugin library. Their hooks, MCP and LSP servers and monitors run in the OS sandbox with the permissions approved for each plugin."
+        },
         "browser": {
           "type": "boolean",
           "description": "Give the member covibe's browser: tools to open pages (a dev server, a site, or files in its working folder), read them as snapshots, click, type, take screenshots and read the console. People can watch it live in the app and take control. Default false."
@@ -341,6 +350,15 @@
             "pattern": "^[a-z0-9][a-z0-9:_-]{0,127}$"
           },
           "description": "Skills by name: from your covibe skill library, or ones Claude Code already has (built-in or in the project's .claude/skills)."
+        },
+        "plugins": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+          },
+          "description": "Plugins by name, from your covibe plugin library. Their hooks, MCP and LSP servers and monitors run in the OS sandbox with the permissions approved for each plugin."
         },
         "browser": {
           "type": "boolean",

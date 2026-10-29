@@ -69,6 +69,8 @@ export interface AgentConfig {
   sandbox?: SandboxConfig;
   /** Skill names (team defaults plus the agent's own). */
   skills: string[];
+  /** Plugin names from the plugin library (team defaults plus the agent's own). */
+  plugins: string[];
   /** Has covibe's browser tools (see browser/tools.ts). */
   browser: boolean;
 }
