@@ -2,7 +2,7 @@ import type { AgentConfig, TeamConfig } from '../config/types.js';
 import type { InboxMessage } from '../events/types.js';
 
 /** Role prompt plus the team protocol, appended to Claude Code's system prompt. */
-export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAsk?: boolean; canRequest?: boolean } = {}): string {
+export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAsk?: boolean; canRequest?: boolean; folder?: string } = {}): string {
   const teammates = Object.values(team.agents)
     .filter((a) => a.name !== agent.name)
     .map((a) => `- ${a.name}${a.description ? `: ${a.description}` : ''}`)
@@ -13,7 +13,7 @@ export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAs
         ? 'You may change any file in your workspace.'
         : 'You cannot change files.'
       : agent.writeScope.length
-        ? `You may only change files matching: ${agent.writeScope.join(', ')}. Writes elsewhere are blocked, and changes made by other means outside that scope are discarded.`
+        ? `You may only change files matching: ${agent.writeScope.join(', ')}. Writes elsewhere are blocked${opts.folder ? '' : ', and changes made by other means outside that scope are discarded'}.`
         : 'You cannot change files.';
   const lines = [
     `# Team protocol`,
@@ -45,14 +45,21 @@ export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAs
     const lead = team.lead && team.lead !== agent.name ? team.lead : undefined;
     lines.push(
       lead
-        ? `When you need a decision you cannot make from the goal, your task, the code or the project brain, ask ${lead} (the team lead) with the ask_question tool instead of guessing. If ${lead} cannot answer, it asks the human. You wait for the answer, which the tool returns. Look things up yourself before asking. When it is a choice between a few answers, pass them as options.`
+        ? `When you need a decision you cannot make from the goal, your task, the ${opts.folder ? 'files' : 'code'} or the project brain, ask ${lead} (the team lead) with the ask_question tool instead of guessing. If ${lead} cannot answer, it asks the human. You wait for the answer, which the tool returns. Look things up yourself before asking. When it is a choice between a few answers, pass them as options.`
         : 'When you need a decision only the human can make, ask with the ask_question tool instead of guessing. The whole team pauses until they answer, which the tool returns, so look things up and decide what you can yourself first. When it is a choice between a few answers, pass them as options.',
     );
   }
   lines.push(
     'Messages from the human or a teammate can arrive while you work, marked as such. Take them into account; a message from the human may change your task.',
   );
-  if (agent.writes) lines.push('covibe commits and merges your changes after your turn; do not run git commit, branch, merge or stash yourself.');
+  if (opts.folder) {
+    lines.push(
+      `You work directly in the person's own folder (${opts.folder}), not in a copy, and it is not a git repository. Its files may be documents, media or data rather than code; use the tools and skills that fit them.` +
+        (agent.writes
+          ? ' What you change is what they get. covibe records what you change and keeps the originals so they can undo the run, but treat their files with care: do not delete, move or overwrite their originals (source material such as footage, images or reference documents) unless the task asks for it, and put new results where the task says, or next to the originals under a clear name.'
+          : ''),
+    );
+  } else if (agent.writes) lines.push('covibe commits and merges your changes after your turn; do not run git commit, branch, merge or stash yourself.');
   if (agent.sandbox) {
     lines.push(
       `Shell commands run in a sandbox: they can write only in your working folder, temp folders and package caches, and reach only these domains: ${agent.sandbox.network.join(', ') || 'none'}. If a command fails because of the sandbox, report what you needed instead of working around it.`,

@@ -1314,7 +1314,8 @@ function TeamSettings({ doc, edit }: { doc: Doc; edit: Edit }) {
           <span className="tiny faint">
             {d.isolation === 'none'
               ? 'Members change your working copy directly. Only use this for read-only teams: shell commands are not limited to allowed paths in this mode.'
-              : 'Each member that writes code gets its own git worktree; covibe merges their work into a branch per run. Your checkout is never touched.'}
+              : 'Each member that writes code gets its own git worktree; covibe merges their work into a branch per run. Your checkout is never touched.'}{' '}
+            In a plain folder (a project without git), members always work in the folder itself; covibe records what each one changes so you can undo the run.
           </span>
         </section>
         <section className="form-section">

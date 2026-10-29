@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { Isolation } from '../config/types.js';
 import { worktreesRoot } from '../home.js';
+import { FolderRun, folderRunDir, folderRunIds, removeFolderRun, type FolderCollect, type Writer } from './folder.js';
 import { scopeMatcher } from './scope.js';
 
 const exec = promisify(execFile);
@@ -26,6 +27,13 @@ export interface CollectResult {
   /** Changed paths outside the write scope, discarded before merging. */
   reverted: string[];
   merged: boolean;
+  /** In a plain folder: how the files changed, and what changed outside the scope (left in place). */
+  folder?: FolderCollect;
+}
+
+/** True when `dir` is inside a git working tree. */
+export async function isGitRepo(dir: string): Promise<boolean> {
+  return git(dir, ['rev-parse', '--is-inside-work-tree']).then((out) => out.trim() === 'true', () => false);
 }
 
 /**
@@ -33,6 +41,10 @@ export interface CollectResult {
  * worktree and branch; the engine (not a model) commits each agent's work and
  * merges it into the run's integration branch, which read-only agents (manager,
  * QA) look at. In "none" mode everyone shares the repository checkout.
+ *
+ * A plain folder (no git) works like "none": everyone works in the folder
+ * itself, and `folder` records what each member changed so the run can be
+ * reviewed and undone (see folder.ts).
  */
 export class Workspace {
   private agentDirs = new Map<string, string>();
@@ -46,9 +58,13 @@ export class Workspace {
     readonly integrationDir: string,
     /** Branch holding the merged result (worktree mode). */
     readonly branch: string | undefined,
+    /** Set in a plain folder: the record of what the run changed. */
+    readonly folder?: FolderRun,
   ) {}
 
-  static async create(repo: string, runId: string, isolation: Isolation, base = 'HEAD'): Promise<Workspace> {
+  /** `writers`: the team's members that change files, for a plain folder's record. */
+  static async create(repo: string, runId: string, isolation: Isolation, base = 'HEAD', writers: Writer[] = []): Promise<Workspace> {
+    if (!(await isGitRepo(repo))) return new Workspace(repo, runId, 'none', repo, undefined, await FolderRun.start(repo, runId, writers));
     if (isolation === 'none') return new Workspace(repo, runId, isolation, repo, undefined);
     const top = (await git(repo, ['rev-parse', '--show-toplevel'])).trim();
     await git(top, ['rev-parse', '--verify', 'HEAD']).catch(() => {
@@ -65,7 +81,9 @@ export class Workspace {
   }
 
   /** Reopen the workspace of an earlier run (to chat with its agents after it finished). */
-  static async attach(repo: string, runId: string, isolation: Isolation, branch: string | undefined): Promise<Workspace> {
+  static async attach(repo: string, runId: string, isolation: Isolation, branch: string | undefined, writers: Writer[] = []): Promise<Workspace> {
+    const folder = FolderRun.open(repo, runId, writers);
+    if (folder) return new Workspace(repo, runId, 'none', repo, undefined, folder);
     if (isolation === 'none' || !branch) return new Workspace(repo, runId, 'none', repo, undefined);
     const base = runDir(repo, runId);
     const ws = new Workspace(repo, runId, isolation, join(base, '_integration'), branch);
@@ -108,6 +126,7 @@ export class Workspace {
 
   /** The directory an agent works in, brought up to date with the integration branch. */
   async prepare(agent: string, writes: boolean): Promise<string> {
+    if (this.folder && writes) this.folder.begin(agent);
     if (this.isolation === 'none' || !writes) return this.integrationDir;
     return this.exclusive(async () => {
       let dir = this.agentDirs.get(agent);
@@ -120,6 +139,11 @@ export class Workspace {
       }
       return dir;
     });
+  }
+
+  /** A member's turn is over (in a plain folder, changes in its scope are no longer left for it). */
+  release(agent: string) {
+    this.folder?.end(agent);
   }
 
   /**
@@ -146,6 +170,10 @@ export class Workspace {
    * and merge the result into the integration branch.
    */
   async collect(agent: string, writeScope: string[] | undefined, message: string): Promise<CollectResult> {
+    if (this.folder) {
+      const folder = await this.exclusive(() => this.folder!.collect(agent, writeScope));
+      return { files: folder.files, reverted: [], merged: false, folder };
+    }
     const dir = this.agentDirs.get(agent);
     if (this.isolation === 'none' || !dir) return { files: [], reverted: [], merged: false };
     return this.exclusive(async () => {
@@ -191,9 +219,16 @@ export interface RunWorktrees {
   sizeKb: number;
 }
 
-/** Runs of a repository that still have worktrees on disk, with their size. */
+/**
+ * Runs of a repository that still have worktrees on disk, with their size. In
+ * a plain folder: runs that keep copies of the original files (for undo).
+ */
 export async function listRunWorktrees(repo: string): Promise<RunWorktrees[]> {
   const out: RunWorktrees[] = [];
+  for (const runId of folderRunIds(repo)) {
+    const dir = folderRunDir(repo, runId);
+    out.push({ runId, dir, worktrees: ['original files (for undo)'], sizeKb: await diskUsageKb(dir) });
+  }
   for (const root of [worktreesRoot(repo), join(repo, '.covibe', 'worktrees')]) {
     if (!existsSync(root)) continue;
     for (const runId of readdirSync(root)) {
@@ -217,9 +252,16 @@ async function diskUsageKb(dir: string): Promise<number> {
 
 /**
  * Remove a run's worktrees from disk. Branches stay: the result branch is the
- * run's output, and agent branches let a later chat restore a worktree.
+ * run's output, and agent branches let a later chat restore a worktree. A
+ * plain folder's run loses its copies of the original files, so it can no
+ * longer be undone.
  */
 export async function removeRunWorktrees(repo: string, runId: string): Promise<{ removed: string[]; freedKb: number }> {
+  if (folderRunIds(repo).includes(runId)) {
+    const freedKb = await diskUsageKb(folderRunDir(repo, runId));
+    await removeFolderRun(repo, runId);
+    return { removed: ['original files'], freedKb };
+  }
   const dir = runDir(repo, runId);
   if (!existsSync(dir)) return { removed: [], freedKb: 0 };
   const freedKb = await diskUsageKb(dir);

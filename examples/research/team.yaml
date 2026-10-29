@@ -1,0 +1,44 @@
+# Research on the web, checked and written up. The researcher writes the
+# report to research/ in the project folder. To have it write into Notion
+# instead, install the Notion plugin (Plugins → Anthropic's directory), sign
+# it in, uncomment `plugins` below, and name the Notion page in the goal.
+version: 1
+name: research
+description: A researcher who searches the web and writes a sourced report (to research/ or a Notion page), and a fact-checker.
+
+defaults:
+  backend: { type: subscription }
+  max_parallel: 1
+  limits: { max_turns: 60, timeout_min: 45 }
+
+agents:
+  researcher:
+    description: Searches and reads sources, then writes the report.
+    prompt: prompts/researcher.md
+    model: opus
+    effort: high
+    tools: [Read, Write, Edit, Grep, Glob, WebSearch, WebFetch]
+    scope: { write: ["research/**"] }
+    # plugins: [notion]
+
+  checker:
+    description: Checks the report's claims against its sources; never edits.
+    prompt: prompts/checker.md
+    model: sonnet
+    effort: medium
+    tools: [Read, Grep, Glob, WebFetch]
+    # plugins: [notion]             # to read the report back from Notion
+    output_schema: schemas/review.json
+
+workflow:
+  on_gate_fail:
+    goto: research
+    max_loops: 2
+    feed: [check.findings]
+    then: escalate_to_human
+  steps:
+    - id: research
+      agent: researcher
+    - id: check
+      agent: checker
+      gate: "check.blocking_count = 0"

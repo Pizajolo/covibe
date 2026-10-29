@@ -21,6 +21,14 @@ export function repoKey(repo: string): string {
   return `${basename(repo)}-${createHash('sha1').update(repo).digest('hex').slice(0, 10)}`;
 }
 
+/**
+ * Where runs in a plain folder (no git) keep their record of what changed and
+ * the copies of the files as they were, so a run can be undone.
+ */
+export function folderRunsRoot(folder: string): string {
+  return join(covibeHome(), 'folder-runs', repoKey(folder));
+}
+
 /** The project brain: notes every member reads and only the curator writes. */
 export function brainRoot(repo: string): string {
   return join(covibeHome(), 'brains', repoKey(repo));

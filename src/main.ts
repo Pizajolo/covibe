@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import { ConfigError, loadTeam } from './config/load.js';
 import { chat } from './engine/chat.js';
 import { cleanupWorktrees } from './engine/cleanup.js';
+import { folderDiff, isFolderRun, undoFolderRun } from './engine/folder.js';
 import type { DeliveryMode, RunEvent } from './events/types.js';
 import { runTeam } from './engine/engine.js';
 import { browserHub } from './browser/hub.js';
@@ -32,6 +33,8 @@ Usage:
   covibe chat <run> <agent> <message...>       Talk to an agent of a run
         [--now | --interrupt]                 (live run: reach it while it works / stop it)
   covibe answer <run> [<question> <answer...>] Answer a member's question (without one: list them)
+  covibe changes <run>                         List what a run in a plain folder changed
+  covibe undo <run>                            Put a plain folder back the way it was before a run
   covibe clean [--older-than <days>] [--run <id>] [--dry-run]
                                                Remove worktrees of finished runs
   covibe app [--port <n>] [--no-open]          Open the covibe app in your browser
@@ -39,10 +42,13 @@ Usage:
   covibe login <account>                       Sign in one of those Claude or ChatGPT accounts
 
 Options:
-  --repo <dir>   Repository the team works on (default: current directory)
+  --repo <dir>   Repository or folder the team works on (default: current directory)
   --goal <text>  What the team should achieve (run)
   --goal-file <path>  Read the goal from a file (run)
   -h, --help     Show this help
+
+In a folder without git, members work in the folder itself. covibe records
+what each one changes and keeps the originals, so \`covibe undo\` can revert a run.
 
 A message to an agent of a live run is queued for its next turn; after the run
 has ended, the agent's session is resumed and it answers immediately.
@@ -91,6 +97,10 @@ export async function main(argv: string[]): Promise<number> {
         return await chatCommand(args, values.repo, values.interrupt ? 'interrupt' : values.now ? 'steer' : 'queue');
       case 'answer':
         return answerCommand(args, values.repo);
+      case 'changes':
+        return await changes(args[0], values.repo);
+      case 'undo':
+        return await undo(args[0], values.repo);
       case 'clean':
         return await clean(values);
       case 'app':
@@ -174,6 +184,10 @@ async function run(file: string | undefined, values: { repo?: string; goal?: str
     console.log('');
     console.log(`run ${bold(outcome.runId)}: ${outcome.status}${outcome.reason ? ` — ${outcome.reason}` : ''}`);
     if (outcome.branch) console.log(`result branch: ${bold(outcome.branch)}  ${dim(`(git diff HEAD...${outcome.branch})`)}`);
+    else if (isFolderRun(repoRoot(values.repo), outcome.runId)) {
+      const { files } = await folderDiff(repoRoot(values.repo), outcome.runId);
+      console.log(`changed ${bold(String(files.length))} file${files.length === 1 ? '' : 's'} in the folder  ${dim(`(covibe changes ${outcome.runId}; undo with covibe undo ${outcome.runId})`)}`);
+    }
     if (outcome.status === 'escalated') {
       console.log(yellow('The fix loop ran out of rounds. Review the feedback above, then talk to an agent:'));
       console.log(dim(`  covibe chat ${outcome.runId} <agent> "<instructions>"`));
@@ -312,6 +326,45 @@ async function log(id: string | undefined, values: { repo?: string; follow?: boo
       if (!values.follow || !store.isLive(current)) return 0;
       await new Promise((r) => setTimeout(r, 500));
     }
+  } finally {
+    store.close();
+  }
+}
+
+async function changes(id: string | undefined, repo: string | undefined): Promise<number> {
+  if (!id) throw new Error('usage: covibe changes <run>');
+  const store = openStore(repo);
+  try {
+    const run = store.findRun(id);
+    if (!run) throw new Error(`run ${id} not found`);
+    if (!isFolderRun(run.repo, run.id)) throw new Error(run.branch ? `run ${run.id} worked on a branch: git diff HEAD...${run.branch}` : `run ${run.id} has no record of changes`);
+    const diff = await folderDiff(run.repo, run.id);
+    if (diff.undoneAt) console.log(dim(`undone at ${diff.undoneAt}`));
+    if (!diff.files.length) console.log(dim('no changes'));
+    const mark = { added: green('A'), modified: yellow('M'), deleted: red('D') };
+    for (const f of diff.files) console.log(`${mark[f.status]} ${f.path}  ${dim(`${f.by.join(', ')}  +${f.additions} −${f.deletions}`)}`);
+    if (diff.note) console.log(yellow(diff.note));
+    return 0;
+  } finally {
+    store.close();
+  }
+}
+
+async function undo(id: string | undefined, repo: string | undefined): Promise<number> {
+  if (!id) throw new Error('usage: covibe undo <run>');
+  const store = openStore(repo);
+  try {
+    const run = store.findRun(id);
+    if (!run) throw new Error(`run ${id} not found`);
+    if (!isFolderRun(run.repo, run.id)) throw new Error(`only a run in a plain folder can be undone${run.branch ? `; this one left your checkout alone (its result is on ${run.branch})` : ''}`);
+    if (store.isLive(run)) throw new Error(`run ${run.id} is still working; stop it first`);
+    const result = await undoFolderRun(run.repo, run.id);
+    store.append(run.id, { type: 'files.undone', data: { restored: result.restored, removed: result.removed, skipped: result.skipped, kept_in: result.keptIn } });
+    for (const f of result.restored) console.log(`${green('restored')} ${f}`);
+    for (const f of result.removed) console.log(`${green('removed')}  ${f}`);
+    for (const s of result.skipped) console.log(yellow(`left ${s.path}: ${s.reason}`));
+    if (result.restored.length || result.removed.length) console.log(dim(`The run's versions are kept in ${result.keptIn}`));
+    return 0;
   } finally {
     store.close();
   }

@@ -71,6 +71,7 @@ export function summarizeRun(
   let reason: string | undefined;
   const files = new Set<string>();
   let worktreesRemoved = false;
+  let folder: RunSummary['folder'];
   const openCards = new Map<string, BoardCard>();
   const questions = new Map<number, QuestionView>();
   const requests = new Map<number, RequestView>();
@@ -87,6 +88,7 @@ export function summarizeRun(
     switch (e.type) {
       case 'run.started':
         for (const id of (d.steps as string[]) ?? []) step(id);
+        if (d.isolation === 'folder') folder = { undone: false };
         break;
       case 'run.finished':
         reason = d.reason;
@@ -257,7 +259,15 @@ export function summarizeRun(
         agent(e.agent!).inbox = Math.max(0, agent(e.agent!).inbox - 1);
         break;
       case 'git.commit':
+      case 'files.changed':
         for (const f of (d.files as string[]) ?? []) files.add(f);
+        break;
+      case 'scope.violation':
+        // In a plain folder, changes outside the scope stay in the folder.
+        if (d.kept) for (const f of (d.files as string[]) ?? []) files.add(f);
+        break;
+      case 'files.undone':
+        if (folder) folder.undone = true;
         break;
       case 'workspace.cleaned':
         worktreesRemoved = true;
@@ -375,6 +385,7 @@ export function summarizeRun(
     steps: stepOrder.map((id) => steps.get(id)!),
     filesChanged: [...files].sort(),
     worktreesRemoved,
+    ...(folder ? { folder } : {}),
     paused,
     questions: [...questions.values()],
     requests: [...requests.values()],

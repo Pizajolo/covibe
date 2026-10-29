@@ -26,6 +26,8 @@ export type EventType =
   | 'scope.violation'
   | 'git.commit'
   | 'git.merge'
+  | 'files.changed'
+  | 'files.undone'
   | 'message.queued'
   | 'message.delivered'
   | 'backend.warning'

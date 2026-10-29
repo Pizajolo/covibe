@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -93,6 +94,34 @@ describe('server', () => {
     const live = await api('POST', `/api/teams/${team.id}/validate`, { yaml: detail.yaml.replace('version: 1', 'version: 2') });
     expect(live.problems[0]).toMatch(/version/);
     await expect(api('GET', `/api/teams/${team.id}/file?path=../../config.json`)).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('works in a plain folder: adds it without git, shows what a run changed and undoes it', async () => {
+    const { api } = await setup();
+    const dir = tempDir('covibe-plain-');
+    writeFiles(dir, { 'src/a.js': 'original' });
+    await expect(api('POST', '/api/projects', { path: dir })).rejects.toMatchObject({ status: 409 });
+    const project = await api('POST', '/api/projects', { path: dir, folder: true });
+    expect(project.kind).toBe('folder');
+    const team = await api('POST', '/api/teams', { name: 'duo', template: 'build-and-review' });
+
+    const { runId } = await api('POST', '/api/runs', { project: project.id, team: team.id, goal: 'Change a' });
+    const done = await until(
+      () => api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`),
+      (d) => d.summary.status !== 'running',
+    );
+    expect(done.summary).toMatchObject({ status: 'succeeded', filesChanged: ['src/a.js'], folder: { undone: false } });
+    expect(done.summary.branch).toBeUndefined();
+    expect(readFileSync(join(dir, 'src/a.js'), 'utf8')).toBe('export const a = 1;');
+
+    const diff = await api('GET', `/api/runs/${project.id}/${runId}/diff`);
+    expect(diff.files).toEqual([expect.objectContaining({ path: 'src/a.js', status: 'modified', by: ['builder'] })]);
+    expect((await api('GET', `/api/runs/${project.id}/${runId}/files`)).source).toEqual({ kind: 'folder' });
+
+    const undone = await api('POST', `/api/runs/${project.id}/${runId}/undo`);
+    expect(undone).toMatchObject({ restored: ['src/a.js'], removed: [], skipped: [] });
+    expect(readFileSync(join(dir, 'src/a.js'), 'utf8')).toBe('original');
+    expect((await api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`)).summary.folder).toEqual({ undone: true });
   });
 
   it('starts a run, streams its state, chats with an agent afterwards and reports stats', async () => {

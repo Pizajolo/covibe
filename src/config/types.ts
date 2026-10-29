@@ -39,6 +39,8 @@ export interface SandboxConfig {
   network: string[];
   /** Extra absolute folders shell commands may write (besides the working folder and temp). */
   allowWrite: string[];
+  /** Absolute paths shell commands may not write, even inside the working folder (a plain folder outside the write scope). */
+  denyWrite?: string[];
 }
 
 export interface AgentConfig {

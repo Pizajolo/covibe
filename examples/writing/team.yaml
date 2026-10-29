@@ -1,0 +1,41 @@
+# A writer and an editor for documents in a folder (Markdown, text, Word or
+# PDF). Works in a plain folder, where the writer edits your files directly
+# and you can undo the run, or in a git repository.
+version: 1
+name: writing
+description: A writer and an editor for documents. The editor's blocking notes go back to the writer, at most twice.
+
+defaults:
+  backend: { type: subscription }
+  isolation: worktree               # in a plain folder, members always work in the folder itself
+  max_parallel: 1
+  limits: { max_turns: 40, timeout_min: 30 }
+
+agents:
+  writer:
+    description: Writes and edits the documents the goal is about.
+    prompt: prompts/writer.md
+    model: sonnet
+    tools: [Read, Edit, Write, Bash, Grep, Glob, WebSearch, WebFetch]
+    # skills: [docx, pdf]           # for Word or PDF documents (from the Skills page)
+
+  editor:
+    description: Reads the result against the goal and points out what must change; never edits.
+    prompt: prompts/editor.md
+    model: sonnet
+    effort: medium
+    tools: [Read, Grep, Glob]
+    output_schema: schemas/review.json
+
+workflow:
+  on_gate_fail:
+    goto: write
+    max_loops: 2
+    feed: [edit.findings]
+    then: escalate_to_human
+  steps:
+    - id: write
+      agent: writer
+    - id: edit
+      agent: editor
+      gate: "edit.blocking_count = 0"

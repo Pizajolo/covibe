@@ -14,6 +14,11 @@ export interface Project {
   name: string;
   path: string;
   addedAt: string;
+  /**
+   * A plain folder has no git: members work in the folder itself, and a run
+   * can be undone instead of merged. Unset = a git repository.
+   */
+  kind?: 'git' | 'folder';
 }
 
 export interface TeamFileInfo {
@@ -105,7 +110,7 @@ export interface Template {
 /** A run's files, as the Preview tab lists them. */
 export interface RunFiles {
   /** Where they come from: the run's result branch, or your checkout when the run worked there. */
-  source: { kind: 'branch'; ref: string } | { kind: 'checkout' };
+  source: { kind: 'branch'; ref: string } | { kind: 'checkout' } | { kind: 'folder' };
   files: { path: string; size: number; changed: boolean }[];
   /** Set when the listing was cut short. */
   truncated?: boolean;
@@ -130,10 +135,22 @@ export interface PreviewSite {
 }
 
 export interface DiffResult {
-  files: { path: string; additions: number; deletions: number }[];
+  /** status and by: a run in a plain folder (added, modified or deleted, and by whom). */
+  files: { path: string; additions: number; deletions: number; status?: 'added' | 'modified' | 'deleted'; by?: string[] }[];
   patch: string;
   range?: string;
   note?: string;
+  /** A run in a plain folder: its changes were undone at this time. */
+  undoneAt?: string;
+}
+
+/** What undoing a run in a plain folder did. */
+export interface UndoResult {
+  restored: string[];
+  removed: string[];
+  skipped: { path: string; reason: string }[];
+  /** Where the run's versions of those files were moved. */
+  keptIn: string;
 }
 
 /** waiting: has messages for its next turn. asking: waits for the answer to its question. */
@@ -261,6 +278,8 @@ export interface RunSummary {
   filesChanged: string[];
   /** The run's worktrees were removed to free disk space (chat recreates them on demand). */
   worktreesRemoved: boolean;
+  /** The run worked directly in a plain folder (no git); `undone`: its changes were undone. */
+  folder?: { undone: boolean };
   /** A question waits for you and the team is on hold until you answer it. */
   paused: boolean;
   questions: QuestionView[];

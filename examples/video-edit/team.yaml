@@ -1,0 +1,45 @@
+# Video editing in a plain folder with ffmpeg (install it first: brew install
+# ffmpeg). The folder layout it expects:
+#   raw/          your footage (never changed)
+#   references/   videos whose style, pacing or look to follow (never changed)
+#   final/        where the edited video goes
+# Rename the folders in the scopes below if yours are called differently.
+version: 1
+name: video-edit
+description: An editor that cuts your raw footage with ffmpeg, following reference videos, and a reviewer that checks the cut.
+
+defaults:
+  backend: { type: subscription }
+  max_parallel: 1
+  limits: { max_turns: 80, timeout_min: 90 }   # renders take a while
+
+agents:
+  editor:
+    description: Studies the footage and references, plans the cut and renders it to final/.
+    prompt: prompts/editor.md
+    model: opus
+    effort: high
+    tools: [Read, Write, Edit, Bash, Grep, Glob]
+    scope: { write: ["final/**", "work/**"] }   # raw/ and references/ stay as they are
+
+  reviewer:
+    description: Watches the result (frame by frame) against the goal and the references.
+    prompt: prompts/reviewer.md
+    model: sonnet
+    effort: medium
+    tools: [Read, Bash, Grep, Glob]
+    scope: { write: ["work/review/**"] }        # only its own frame grabs
+    output_schema: schemas/review.json
+
+workflow:
+  on_gate_fail:
+    goto: cut
+    max_loops: 2
+    feed: [review.findings]
+    then: escalate_to_human
+  steps:
+    - id: cut
+      agent: editor
+    - id: review
+      agent: reviewer
+      gate: "review.blocking_count = 0"
