@@ -5,14 +5,11 @@
 //   ~/.covibe/skills-plugin/.claude-plugin/plugin.json
 //   ~/.covibe/skills-plugin/skills/<name>/SKILL.md (+ any files it uses)
 //   ~/.covibe/skills-plugin/skills/<name>/.covibe-skill.json (where it came from)
-import { execFile } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { promisify } from 'node:util';
 import { parse as parseYamlText } from 'yaml';
+import { checkout, forgetCheckout, git, parseGithub, type GithubRef } from './github.js';
 import { covibeHome } from './home.js';
-
-const exec = promisify(execFile);
 export const SKILL_PLUGIN = 'covibe';
 const META = '.covibe-skill.json';
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -199,22 +196,7 @@ export function resolveSkills(requested: string[]): { names: string[]; pluginDir
 
 // ---------------------------------------------------------------- GitHub
 
-export interface GithubRef {
-  owner: string;
-  repo: string;
-  ref?: string;
-  path: string;
-}
-
-/** Accepts https://github.com/o/r, …/tree/<ref>/<path>, …/blob/<ref>/<path>/SKILL.md, or o/r[/path]. */
-export function parseGithub(input: string): GithubRef {
-  const s = input.trim().replace(/\.git$/, '').replace(/\/+$/, '');
-  const url = /^https?:\/\/github\.com\/([^/\s]+)\/([^/\s]+)(?:\/(?:tree|blob)\/([^/\s]+)(?:\/(.*))?)?$/.exec(s);
-  if (url) return { owner: url[1]!, repo: url[2]!, ref: url[3], path: (url[4] ?? '').replace(/\/?SKILL\.md$/, '') };
-  const short = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:\/(.*))?$/.exec(s);
-  if (short) return { owner: short[1]!, repo: short[2]!, path: (short[3] ?? '').replace(/\/?SKILL\.md$/, '') };
-  throw new SkillError('Use a GitHub URL like https://github.com/anthropics/skills/tree/main/skills/pdf, or owner/repo');
-}
+export { parseGithub, type GithubRef } from './github.js';
 
 export interface SkillCandidate {
   /** Folder of the skill inside the repository. */
@@ -222,33 +204,6 @@ export interface SkillCandidate {
   name: string;
   description: string;
   installed: boolean;
-}
-
-const checkouts = new Map<string, { dir: string; commit: string; at: number }>();
-
-async function git(cwd: string, args: string[]) {
-  try {
-    return (await exec('git', args, { cwd, maxBuffer: 32 << 20, timeout: 180_000 })).stdout;
-  } catch (err) {
-    const e = err as { stderr?: string; message: string };
-    throw new SkillError(`git ${args[0]}: ${(e.stderr || e.message).trim().split('\n').pop()}`);
-  }
-}
-
-/** A shallow, blobless, sparse clone: cheap even for big repositories. Reused for 10 minutes. */
-async function checkout(ref: GithubRef): Promise<{ dir: string; commit: string }> {
-  const key = `${ref.owner}/${ref.repo}@${ref.ref ?? ''}`;
-  const cached = checkouts.get(key);
-  if (cached && Date.now() - cached.at < 600_000 && existsSync(cached.dir)) return cached;
-  const dir = join(covibeHome(), 'cache', 'github', `${ref.owner}__${ref.repo}__${(ref.ref ?? 'default').replace(/[^\w.-]/g, '_')}`);
-  rmSync(dir, { recursive: true, force: true });
-  mkdirSync(dirname(dir), { recursive: true });
-  const args = ['clone', '-q', '--depth', '1', '--filter=blob:none', '--sparse', ...(ref.ref ? ['--branch', ref.ref] : []), `https://github.com/${ref.owner}/${ref.repo}.git`, dir];
-  await git(dirname(dir), args);
-  const commit = (await git(dir, ['rev-parse', 'HEAD'])).trim();
-  const entry = { dir, commit, at: Date.now() };
-  checkouts.set(key, entry);
-  return entry;
 }
 
 /** Find the skills in a GitHub location and read their name and description. */
@@ -303,8 +258,8 @@ export async function updateSkill(name: string): Promise<LibrarySkill> {
   const skill = listSkills().find((s) => s.name === name);
   if (!skill?.origin) throw new SkillError(`${name} was not installed from GitHub`);
   const { repo, ref, path } = skill.origin;
-  checkouts.delete(`${repo}@${ref ?? ''}`);
   const [owner, name_] = repo.split('/') as [string, string];
+  forgetCheckout({ owner, repo: name_, ref });
   const [installed] = await installGithub({ owner, repo: name_, ref, path }, [path]);
   return installed!;
 }

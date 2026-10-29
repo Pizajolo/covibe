@@ -102,13 +102,18 @@ export class ClaudeSdkRunner implements AgentRunner {
     const mcpServers: Options['mcpServers'] = {};
     if (inv.canMessage.length) mcpServers[TEAM_SERVER] = teamServer(inv);
     if (custom.length) mcpServers[COVIBE_SERVER] = customServer(custom);
-    const skillNames = inv.skills?.names ?? [];
+    const skillNames = [...(inv.skills?.names ?? []), ...(inv.plugins?.skills ?? [])];
     const tools = skillNames.length ? [...inv.tools, 'Skill'] : inv.tools;
+    const plugins = [
+      ...(inv.skills?.pluginDirs ?? []).map((path) => ({ type: 'local' as const, path, skipMcpDiscovery: true })),
+      // Their hooks and MCP servers start through covibe's sandbox launcher.
+      ...(inv.plugins?.dirs ?? []).map((path) => ({ type: 'local' as const, path })),
+    ];
 
     const options: Options = {
       cwd: inv.cwd,
       additionalDirectories: inv.readDirs,
-      plugins: inv.skills?.pluginDirs.map((path) => ({ type: 'local' as const, path, skipMcpDiscovery: true })),
+      plugins: plugins.length ? plugins : undefined,
       // Only the listed skills are visible to this agent.
       skills: skillNames.length ? skillNames : undefined,
       // A member waiting for an answer sits in a tool call (ask_question) or a
@@ -125,7 +130,7 @@ export class ClaudeSdkRunner implements AgentRunner {
       // Built-in tools are limited to the agent's list and pre-approved; anything
       // else is denied without prompting, since nobody is at the terminal.
       tools,
-      allowedTools: [...tools, ...(inv.canMessage.length ? [SEND_MESSAGE_TOOL] : []), ...custom.map((t) => `mcp__${COVIBE_SERVER}__${t.name}`)],
+      allowedTools: [...tools, ...(inv.canMessage.length ? [SEND_MESSAGE_TOOL] : []), ...custom.map((t) => `mcp__${COVIBE_SERVER}__${t.name}`), ...(inv.plugins?.mcpTools ?? [])],
       permissionMode: 'dontAsk',
       systemPrompt: { type: 'preset', preset: 'claude_code', append: inv.systemPrompt },
       settingSources: inv.settingSources,

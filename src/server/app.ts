@@ -12,7 +12,9 @@ import { ask, chat } from '../engine/chat.js';
 import { cleanupWorktrees, worktreeReport } from '../engine/cleanup.js';
 import { buildInvocation, newRunId, startRun } from '../engine/engine.js';
 import { answerQuestion } from '../engine/questions.js';
+import { GithubError } from '../github.js';
 import { brainRoot } from '../home.js';
+import * as plugins from '../plugins.js';
 import {
   ANTHROPIC_SKILLS,
   createSkill,
@@ -201,18 +203,22 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     if (c) return c.label;
     return ({ api_key: 'Anthropic API key', gateway: 'Gateway', bedrock: 'Amazon Bedrock', vertex: 'Google Vertex AI', subscription: 'Claude (your login)' } as Record<string, string>)[via] ?? via;
   };
-  /** Skill name → the team members that have it (directly or from team defaults). */
-  const skillUsage = () => {
+  /** Skill (or plugin) name → the team members that have it (directly or from team defaults). */
+  const usage = (field: 'skills' | 'plugins' = 'skills') => {
     const used = new Map<string, { team: string; agent: string }[]>();
     for (const t of library.teams()) {
-      const doc = rawDoc(library.readFile(t.id, 'team.yaml')) as { defaults?: { skills?: string[] }; agents?: Record<string, { skills?: string[] }> };
+      type Named = Partial<Record<typeof field, string[]>>;
+      const doc = rawDoc(library.readFile(t.id, 'team.yaml')) as { defaults?: Named; agents?: Record<string, Named> };
       for (const [agent, a] of Object.entries(doc.agents ?? {})) {
-        for (const s of new Set([...(doc.defaults?.skills ?? []), ...(a?.skills ?? [])])) (used.get(s) ?? used.set(s, []).get(s)!).push({ team: t.name, agent });
+        for (const s of new Set([...(doc.defaults?.[field] ?? []), ...(a?.[field] ?? [])])) (used.get(s) ?? used.set(s, []).get(s)!).push({ team: t.name, agent });
       }
     }
     return used;
   };
+  const skillUsage = () => usage('skills');
   let catalog: { at: number; data: Promise<Awaited<ReturnType<typeof scanGithub>>> } | undefined;
+  let pluginCatalog: { at: number; data: Promise<Awaited<ReturnType<typeof plugins.scanGithub>>> } | undefined;
+  const withUsage = (p: plugins.LibraryPlugin, used = usage('plugins')) => ({ ...p, usedBy: used.get(p.name) ?? [] });
 
   const storeFor = (project: Project): EventStore => {
     let s = stores.get(project.id);
@@ -607,6 +613,30 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       writeSkillFile(p.name!, 'SKILL.md', skillMd(p.name!, str(body, 'description'), typeof (body as { body?: unknown }).body === 'string' ? String((body as { body: string }).body) : bodyText));
       return getSkill(p.name!);
     }],
+
+    // ---- plugins (their programs run in the OS sandbox: see plugins.ts)
+    ['GET', '/api/plugins', () => {
+      const used = usage('plugins');
+      return { library: plugins.listPlugins().map((p) => withUsage(p, used)), sandbox: plugins.sandboxStatus() };
+    }],
+    ['GET', '/api/plugins/catalog', async () => {
+      if (!pluginCatalog || Date.now() - pluginCatalog.at > 3_600_000) {
+        pluginCatalog = { at: Date.now(), data: plugins.scanGithub(plugins.ANTHROPIC_PLUGINS) };
+        pluginCatalog.data.catch(() => (pluginCatalog = undefined));
+      }
+      const installed = new Set(plugins.listPlugins().map((p) => p.name));
+      const data = await pluginCatalog.data;
+      return { source: plugins.ANTHROPIC_PLUGINS, commit: data.commit, plugins: data.plugins.map((p) => ({ ...p, installed: installed.has(p.name) })) };
+    }],
+    ['POST', '/api/plugins/github/scan', (_p, body) => plugins.scanGithub(str(body, 'url'))],
+    ['POST', '/api/plugins/github/review', (_p, body) => plugins.reviewGithub(str(body, 'url'), str(body, 'id', true))],
+    ['POST', '/api/plugins/github/install', (_p, body) => plugins.installGithub(str(body, 'url'), str(body, 'id', true), (body as { policy?: unknown }).policy)],
+    ['GET', '/api/plugins/:name', (p) => withUsage(plugins.getPlugin(p.name!))],
+    ['PUT', '/api/plugins/:name/policy', (p, body) => withUsage(plugins.setPolicy(p.name!, (body as { policy?: unknown }).policy))],
+    ['PUT', '/api/plugins/:name/everyone', (p, body) => withUsage(plugins.setEveryone(p.name!, !!(body as { everyone?: unknown }).everyone))],
+    ['POST', '/api/plugins/:name/approve', (p) => withUsage(plugins.approvePlugin(p.name!))],
+    ['POST', '/api/plugins/:name/update', async (p) => withUsage(await plugins.updatePlugin(p.name!))],
+    ['DELETE', '/api/plugins/:name', (p) => (plugins.deletePlugin(p.name!), { ok: true })],
 
     // ---- project brain
     ['GET', '/api/projects/:pid/brain', async (p) => {
@@ -1025,7 +1055,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           ? 409
           : err instanceof NotFound
             ? 404
-            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof BackendError
+            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof BackendError
               ? 400
               : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;

@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { request } from 'node:http';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { installFromDir } from '../src/plugins.js';
 import { Library } from '../src/server/library.js';
 import { startServer, type CovibeServer } from '../src/server/app.js';
 import type { RunDetail, Stats, TeamDetail } from '../src/server/api-types.js';
@@ -366,7 +367,7 @@ describe('server', () => {
         call += 1;
         if (call === 1) {
           expect(inv.tools).toEqual(['Read', 'Grep', 'Glob']);
-          expect(inv.customTools!.map((t) => t.name)).toEqual(['get_team', 'read_team_file', 'save_team', 'list_skills', 'sandbox_defaults']);
+          expect(inv.customTools!.map((t) => t.name)).toEqual(['get_team', 'read_team_file', 'save_team', 'list_skills', 'list_plugins', 'sandbox_defaults']);
           expect(inv.prompt).toContain('A team for a Python API');
           const yaml = 'version: 1\nname: api-team\nagents:\n  dev:\n    prompt: prompts/dev.md\n    tools: [Read, Edit, Bash]\nworkflow:\n  steps:\n    - { id: build, agent: dev }\n';
           return {
@@ -425,6 +426,32 @@ describe('server', () => {
     await api('POST', '/api/skills/house-style/describe', { description: 'Updated.' });
     expect((await api('GET', '/api/skills/house-style')).skill.description).toBe('Updated.');
     await expect(api('POST', '/api/skills/github/scan', { url: 'nonsense' })).rejects.toThrow(/GitHub URL/);
+  });
+
+  it('manages library plugins over the API', async () => {
+    const { api } = await setup();
+    const src = tempDir('covibe-plugin-');
+    writeFiles(src, {
+      '.claude-plugin/plugin.json': JSON.stringify({ name: 'linter', description: 'Lints edits' }),
+      'hooks/hooks.json': JSON.stringify({ hooks: { PostToolUse: [{ matcher: 'Edit', hooks: [{ type: 'command', command: 'npx eslint --fix .' }] }] } }),
+    });
+    installFromDir(src, { approve: true });
+    const team = await api('POST', '/api/teams', { name: 'duo', template: 'build-and-review' });
+    await api('POST', `/api/teams/${team.id}/edit`, { ops: [{ op: 'set', path: ['agents', 'builder', 'plugins'], value: ['linter'] }] });
+
+    const list = await api('GET', '/api/plugins');
+    expect(list.sandbox).toHaveProperty('available');
+    expect(list.library).toEqual([
+      expect.objectContaining({ name: 'linter', approved: true, usedBy: [{ team: 'duo', agent: 'builder' }], policy: { network: ['registry.npmjs.org'], allowWrite: ['~/.npm'], writeWorkspace: false } }),
+    ]);
+    const saved = await api('PUT', '/api/plugins/linter/policy', { policy: { network: [], allowWrite: ['~/.npm'], writeWorkspace: true } });
+    expect(saved.policy).toEqual({ network: [], allowWrite: ['~/.npm'], writeWorkspace: true });
+    await expect(api('PUT', '/api/plugins/linter/policy', { policy: { network: ['not a domain'], allowWrite: [] } })).rejects.toMatchObject({ status: 400 });
+    expect((await api('PUT', '/api/plugins/linter/everyone', { everyone: true })).everyone).toBe(true);
+    await expect(api('POST', '/api/plugins/linter/update')).rejects.toThrow(/not installed from GitHub/);
+    await expect(api('POST', '/api/plugins/github/scan', { url: 'nonsense' })).rejects.toThrow(/GitHub URL/);
+    await api('DELETE', '/api/plugins/linter');
+    expect((await api('GET', '/api/plugins')).library).toEqual([]);
   });
 
   it('streams events over SSE', async () => {

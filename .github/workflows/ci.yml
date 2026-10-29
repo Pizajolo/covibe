@@ -17,5 +17,10 @@ jobs:
         env:
           # Tests and the build do not need the Electron binary.
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      # The OS sandbox plugins run in (test/plugins.test.ts runs real hooks in it).
+      # Ubuntu 24.04 restricts the unprivileged user namespaces bubblewrap needs.
+      - run: |
+          sudo apt-get install -y --no-install-recommends bubblewrap socat ripgrep
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: npm run typecheck
       - run: npm test

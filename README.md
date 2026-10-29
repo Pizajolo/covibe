@@ -57,6 +57,7 @@ To try the UI in a browser instead, run `covibe app`.
 | **Teams** | Create a team from a template (feature team, builder + reviewer, single assistant) and edit it: **Members** (role prompt, model, tools, which paths it may change, who it can message, who it can ask for work, report format, connection, limits), **Workflow** (a drag-and-drop graph: drag steps to reorder, drag members onto a step or between steps, drag a gate's ↺ handle onto an earlier step to set where failed work goes back; plus forms for gates and the fix loop), **Team settings** (connection, sandbox, limits), **YAML** (checked as you type), **Files** (prompts and report schemas). Form edits keep the comments and formatting of `team.yaml`. |
 | **Team chat** | Describe the team you need and an architect agent sets it up: it reads your project to fit the stack and folders, asks only if something important is unclear, and saves the team through a tool that refuses invalid files and hands the problems back to it. Keep talking to change it ("add a security reviewer", "use haiku for the tester"). Available in New project, New team, and every team's **Chat** tab. |
 | **Skills** | One library of skills for all teams: **write your own**, **add from GitHub** (a repository or a folder; private ones work if git can clone them), or install from **Anthropic's skills**. Claude Code's **built-in skills** are listed too. Give skills to a member, to every member of a team, or mark one **Everyone** to give it to all members of all teams. |
+| **Plugins** | Claude Code plugins (skills, slash commands, agents, hooks, MCP and LSP servers) from **Anthropic's directory** or **any GitHub repository or marketplace**. Before installing, covibe shows what a plugin runs on your computer and where it sends data, and you choose its sandbox: the websites it may reach and the folders it may write. Every hook and server it runs is confined to that sandbox. Give plugins to members like skills. |
 | **Projects** | Each project has **Runs**, **Brain** and **Git** tabs. **Git** works with your checkout (see [The Git tab](#the-git-tab)): fetch, pull, push, stage and commit, stashes, branches local and on the remote, merges and rebases with conflicts resolved file by file, a commit graph to revert, cherry-pick, branch, tag or reset from, remotes, any git command, and a **git helper** to chat with when something is stuck. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
 | **Settings → Advanced** | Sign in more **Claude accounts** (each in its own Claude Code folder), turn on **sharing work across them**, sign in **ChatGPT accounts** (the sign-in Codex uses) to put members on OpenAI's models within your ChatGPT plan, and add **model providers** with an API key (DeepSeek, Moonshot, Z.ai, OpenAI, OpenRouter, Groq, a local Ollama, or any Anthropic- or OpenAI-compatible API). Their models then appear in every team's model list. See [Accounts and providers](#accounts-and-providers). |
 | **Brain** | The project's shared notes. Every member reads them before working and can **propose** additions; only the team's **curator** (or you) writes. Review proposals yourself (accept into a new or existing note, or reject) or ask the curator. Edit notes directly; every change is in the brain's own git history. |
@@ -213,12 +214,36 @@ brain:
 agents:
   reviewer:
     skills: [code-review, pdf]   # library skills by name, or Claude Code built-ins
+    plugins: [hookify, aikido]   # from your plugin library (team defaults work the same way)
 ```
 
 **Skills.** Library skills live in `~/.covibe/skills-plugin/skills/<name>/SKILL.md` (with any files they use),
 packaged as a local Claude Code plugin. Each member gets exactly its skills (team defaults, its own, and
 library skills marked Everyone) through the SDK's `skills` filter, so other installed skills stay hidden from
 it. Skills installed from GitHub remember where they came from and can be updated.
+
+**Plugins.** A Claude Code plugin can run programs on your computer: hooks (shell commands on events such as
+every tool call), MCP and LSP servers, and monitors. Claude Code runs those with your full permissions, outside
+its shell sandbox. covibe does not let it: it keeps the plugin's own hook, server and monitor configuration to
+itself and gives Claude Code a copy of the plugin in which each of them starts through covibe's launcher
+(`src/plugin-sandbox.ts`). The launcher looks the real command up in a file the plugin cannot write and runs it
+in the OS sandbox ([Anthropic's sandbox runtime](https://github.com/anthropics/sandbox-runtime): Seatbelt on
+macOS, bubblewrap on Linux) with that plugin's policy:
+
+| | A plugin's programs |
+|---|---|
+| Read | Everything outside your home folder. In it, only the plugin, its data folder, language toolchains (`~/.nvm`, `~/.cargo`…) and the member's working folder: not `~/.ssh`, `~/.aws`, your other projects or Claude's settings |
+| Write | Their own data folder (`CLAUDE_PLUGIN_DATA`, which holds their `TMPDIR`) and folders you allow; the working folder only if you allow it, and never its `.git`, `.claude` or `.mcp.json` (what is there would run outside the sandbox) |
+| Network | Only the domains you allow (none by default; an `npx` or `uvx` server is offered its package registry) |
+| Environment | `PATH`, `HOME`, locale and the plugin's own folders, plus the variables a server declares in its config. Your API keys and tokens stay out |
+
+What a plugin sends to a remote MCP server or an HTTP hook leaves your computer, so the review lists those
+addresses separately. Settings a plugin would apply to Claude Code (`settings.json`) are left out. Installing
+records what the plugin runs; an update that changes it (a new hook, a different server command) stops the plugin
+from being given to members until you approve it on its page. If a member has a plugin that runs programs and
+the sandbox cannot start (on Linux it needs `bubblewrap`, `socat` and `ripgrep`), the run fails before it
+starts: a plugin never runs unconfined. Plugins live in `~/.covibe/plugins/<name>/`, their data in
+`~/.covibe/plugin-data/<name>/`.
 
 **The brain.** Each project's brain is a folder of Markdown notes in `~/.covibe/brains/<repo>-<hash>/`,
 outside the repository, and its own git repository (so every change has an author and history). Every member
@@ -269,6 +294,7 @@ The rules in the team file are enforced in code, not left to prompts:
 | Bounded loops | `max_loops`, `max_turns`, `timeout_min`, optional `max_budget_usd`, `max_parallel` |
 | Messaging | `send_message` only accepts the agent's `can_message` targets |
 | Requests | `request_work` only accepts the agent's `can_request` targets; the teammate's turn has its own tools, write scope and sandbox, and two members never wait on each other |
+| Plugins | Their hooks, MCP and LSP servers and monitors start only through covibe's sandbox launcher, with each plugin's approved network and write permissions and without your home folder or environment; an update that changes what a plugin runs waits for approval |
 | Browser | `browser_*` tools only for members with `browser: true`. A sandboxed member's browser reaches its `network` domains plus local addresses; `file://` pages are refused (its working folder is served over http instead) |
 
 **Worktrees.** With `isolation: worktree` (the default), the run gets an integration branch `covibe/<run-id>`, and

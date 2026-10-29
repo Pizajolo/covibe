@@ -8,6 +8,7 @@ import { eventSink, finishedData, newRunId } from '../engine/engine.js';
 import type { EventStore } from '../events/store.js';
 import { backendEnv, type Env } from '../runner/backend.js';
 import type { AgentRunner, CustomTool, EnvironmentInfo } from '../runner/types.js';
+import { listPlugins } from '../plugins.js';
 import { listSkills } from '../skills.js';
 import type { Library } from './library.js';
 
@@ -18,11 +19,11 @@ const GUIDE = `You are the team architect in covibe, a desktop app where a team 
 
 # How covibe teams work
 A team is one team.yaml (YAML 1.2) plus Markdown prompt files and optional JSON Schema report files, all relative to the team folder. covibe enforces the file in code, not by prompting:
-- Members (agents) each get a role prompt (prompts/<name>.md), a model (opus | sonnet | haiku or a model id), optionally effort (low | medium | high | xhigh | max; high for planning and hard building, medium for reviewing and testing, low for simple checks: lower effort uses far fewer tokens), cache_ttl (5m | 1h; 1h for members resumed after long waits, such as builders between fix rounds) and thinking (adaptive | off | a token budget), built-in tools (Read, Grep, Glob, Edit, Write, Bash, WebSearch, WebFetch), optional scope.write globs (paths it may change; omit = anything in its worktree, [] = nothing), can_message (teammates it may message), can_request (teammates it may ask to do work for it with request_work: they run a turn of their own, even without a workflow step, and reply; good for on-call specialists such as a designer the manager or a builder may call on when needed), output_schema (a JSON Schema file its structured report must match), skills (skill names), browser (true gives it covibe's browser to open, click through and screenshot web pages; for members who build or test websites and web apps), limits, backend.
+- Members (agents) each get a role prompt (prompts/<name>.md), a model (opus | sonnet | haiku or a model id), optionally effort (low | medium | high | xhigh | max; high for planning and hard building, medium for reviewing and testing, low for simple checks: lower effort uses far fewer tokens), cache_ttl (5m | 1h; 1h for members resumed after long waits, such as builders between fix rounds) and thinking (adaptive | off | a token budget), built-in tools (Read, Grep, Glob, Edit, Write, Bash, WebSearch, WebFetch), optional scope.write globs (paths it may change; omit = anything in its worktree, [] = nothing), can_message (teammates it may message), can_request (teammates it may ask to do work for it with request_work: they run a turn of their own, even without a workflow step, and reply; good for on-call specialists such as a designer the manager or a builder may call on when needed), output_schema (a JSON Schema file its structured report must match), skills (skill names), plugins (names from the plugin library; their hooks and servers run in the OS sandbox), browser (true gives it covibe's browser to open, click through and screenshot web pages; for members who build or test websites and web apps), limits, backend.
 - Each member that can write works in its own git worktree; covibe commits and merges. Shell commands are sandboxed (only its worktree, temp, package caches; only allowed domains).
 - workflow.steps run in order. A step is { id, agent } or { id, parallel: [{ agent, task }] }. task is a JSONata expression over earlier reports, e.g. "plan.tasks[owner = 'frontend']". A step's output is its member's structured report (or {text}) under the step id.
 - gate is a JSONata expression that must be literally true, e.g. "review.blocking_count = 0". When it fails, on_gate_fail { goto, max_loops, feed: [expressions], then: escalate_to_human | fail } loops back (workflow.on_gate_fail is the default for all gated steps). goto must be this or an earlier step.
-- defaults: backend ({ type: subscription } by default), model, isolation (worktree), max_parallel (2–3 to save plan limits), limits { max_turns, timeout_min }, sandbox { network: [domains], allow_write: [folders] }, skills (for every member).
+- defaults: backend ({ type: subscription } by default), model, isolation (worktree), max_parallel (2–3 to save plan limits), limits { max_turns, timeout_min }, sandbox { network: [domains], allow_write: [folders] }, skills and plugins (for every member).
 - backend: { type: subscription } is the user's own Claude login; { type: subscription, account: <id> } is another of their Claude accounts; { type: connection, connection: <id>, model: <model id> } runs the member on another provider's model (the model goes inside backend, and Claude Code's tools still work). Use only the accounts and providers listed under "Accounts and providers" below; other models are less reliable than Claude on long tool-heavy work, so suggest them for simpler roles (reviewing, testing) unless the user asks otherwise.
 - brain: { curator: <member> } makes that member maintain the project brain (shared notes everyone reads; others propose additions). The curator needs Write or Edit.
 - lead: <member> answers members' questions first (they ask with an ask_question tool); if the lead cannot answer, the question goes to the user and the run pauses. Defaults to a member named manager; null sends questions straight to the user. Make the planner the lead.
@@ -61,7 +62,7 @@ Full examples to read: ${EXAMPLES}feature-team, build-and-review, starter.
 - Write every prompt file a member references, and every schema file. Prompts: a few concrete paragraphs about the role, what it owns and what a good report looks like.
 - Always call get_team before changing an existing team. Save with save_team (the whole team.yaml plus any new or changed files). If it returns problems, fix them and save again. Never say the team is saved unless save_team said so.
 - After saving, explain the team in plain language: who does what, what they may change, and when work loops back. Keep it short.
-- Use list_skills to see which skills exist before assigning any.`;
+- Use list_skills to see which skills exist before assigning any, and list_plugins before assigning plugins. Only assign installed plugins; to add one, the user installs it on the Plugins page.`;
 
 export interface DesignStart {
   library: Library;
@@ -104,6 +105,7 @@ export async function design(opts: DesignStart & { runId?: string; message: stri
     limits: { max_turns: 40, timeout_min: 20 },
     writes: false,
     skills: [],
+    plugins: [],
     browser: false,
   };
   const tools = designerTools({ ...opts, teamId, runId });
@@ -207,6 +209,25 @@ function designerTools(opts: DesignStart & { teamId: string; runId: string }): C
           ...builtin.map((s) => `- ${s.name} (built into Claude Code): ${s.description}`),
         ];
         return lines.length ? lines.join('\n') : 'No skills available yet.';
+      },
+    },
+    {
+      name: 'list_plugins',
+      description: 'List the plugins installed in the covibe plugin library, with what each adds, so you can assign them to members.',
+      params: {},
+      run: () => {
+        const lines = listPlugins().map((p) => {
+          const c = p.contents;
+          const parts = [
+            c.skills.length && `${c.skills.length} skill(s)`,
+            c.commands.length && `${c.commands.length} command(s)`,
+            c.programs.filter((x) => x.kind === 'hook').length && 'hooks',
+            (c.programs.some((x) => x.kind === 'mcp') || c.remotes.some((x) => x.kind === 'mcp')) && `MCP servers (${[...c.programs, ...c.remotes].filter((x) => x.kind === 'mcp').map((x) => x.name).join(', ')})`,
+            c.programs.some((x) => x.kind === 'lsp') && 'a language server',
+          ].filter(Boolean);
+          return `- ${p.name}${p.everyone ? ' (already given to everyone)' : ''}${p.approved ? '' : ' (waits for the user to approve an update; do not assign yet)'}: ${p.description}${parts.length ? ` [${parts.join(', ')}]` : ''}`;
+        });
+        return lines.length ? lines.join('\n') : 'No plugins installed yet.';
       },
     },
     {
