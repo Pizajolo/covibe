@@ -8,7 +8,7 @@
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { parse as parseYamlText } from 'yaml';
-import { checkout, forgetCheckout, git, parseGithub, type GithubRef } from './github.js';
+import { checkout, fetchLfs, forgetCheckout, git, parseGithub, type GithubRef } from './github.js';
 import { covibeHome } from './home.js';
 export const SKILL_PLUGIN = 'covibe';
 const META = '.covibe-skill.json';
@@ -237,6 +237,7 @@ export async function installGithub(input: string | GithubRef, paths: string[]):
   if (!chosen.length) throw new SkillError('none of the selected skills were found');
   const { dir } = await checkout(ref);
   await git(dir, ['sparse-checkout', 'set', '--no-cone', ...chosen.map((s) => (s.path ? `/${s.path}/` : '/*'))]);
+  await fetchLfs(dir, chosen.map((s) => s.path));
   const repo = `${ref.owner}/${ref.repo}`;
   for (const s of chosen) {
     const dest = skillDir(s.name);

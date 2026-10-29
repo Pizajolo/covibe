@@ -1,6 +1,6 @@
 // Shallow GitHub checkouts, shared by the skill and plugin libraries.
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { covibeHome } from './home.js';
@@ -32,9 +32,13 @@ export function parseGithub(input: string): GithubRef {
   throw new GithubError('Use a GitHub URL like https://github.com/owner/repo/tree/main/folder, or owner/repo');
 }
 
-export async function git(cwd: string, args: string[]): Promise<string> {
+// Checkouts leave Git LFS files as pointers: a failing LFS download (no git-lfs, a used-up
+// quota, a proxy) must not fail the checkout. fetchLfs brings in the ones an install needs.
+const NO_LFS = ['-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', '-c', 'filter.lfs.required=false'];
+
+export async function git(cwd: string, args: string[], timeout = 180_000): Promise<string> {
   try {
-    return (await exec('git', args, { cwd, maxBuffer: 32 << 20, timeout: 180_000 })).stdout;
+    return (await exec('git', [...NO_LFS, ...args], { cwd, maxBuffer: 32 << 20, timeout })).stdout;
   } catch (err) {
     const e = err as { stderr?: string; message: string };
     throw new GithubError(`git ${args[0]}: ${(e.stderr || e.message).trim().split('\n').pop()}`);
@@ -72,4 +76,42 @@ export function forgetCheckout(ref: Pick<GithubRef, 'owner' | 'repo' | 'ref' | '
 /** Check out only these files and folders (repository-relative; a folder ends in /). */
 export async function sparse(dir: string, paths: string[]) {
   await git(dir, ['sparse-checkout', 'set', '--no-cone', ...paths.map((p) => (p === '' || p === '/' ? '/*' : `/${p.replace(/^\/+/, '')}`))]);
+}
+
+/** Most LFS content fetchLfs downloads; more than that is usually test media, not what a skill uses. */
+const LFS_LIMIT = 50 << 20;
+
+/** The size a Git LFS pointer file names, or undefined if the file is not one. */
+function pointerSize(path: string): number | undefined {
+  if (!existsSync(path)) return undefined;
+  const buf = Buffer.alloc(200);
+  const fd = openSync(path, 'r');
+  try {
+    const head = buf.subarray(0, readSync(fd, buf, 0, buf.length, 0)).toString('utf8');
+    const m = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\n(?:.*\n)*?size (\d+)$/m.exec(head);
+    return m ? Number(m[1]) : undefined;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Download the Git LFS files in these checked-out folders ('' for all), if git-lfs can and they
+ * are small enough together. Best effort: files it cannot get stay pointers. Returns those.
+ */
+export async function fetchLfs(dir: string, folders: string[]): Promise<string[]> {
+  const listed = (await git(dir, ['ls-files', '-z', '--', ...folders.map((f) => `:(attr:filter=lfs)${f.replace(/\/+$/, '')}`)])).split('\0').filter(Boolean);
+  const pointers = listed.flatMap((file) => {
+    const size = pointerSize(join(dir, file));
+    return size === undefined ? [] : [{ file, size }];
+  });
+  if (!pointers.length) return [];
+  if (pointers.reduce((n, p) => n + p.size, 0) <= LFS_LIMIT) {
+    try {
+      await git(dir, ['lfs', 'pull', `--include=${pointers.map((p) => p.file).join(',')}`], 120_000);
+    } catch {
+      // no git-lfs, or the download failed: keep the pointers
+    }
+  }
+  return pointers.map((p) => p.file).filter((f) => pointerSize(join(dir, f)) !== undefined);
 }

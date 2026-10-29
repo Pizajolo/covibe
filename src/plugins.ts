@@ -22,7 +22,7 @@ import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { signedInUrl, signInStatus, signOut, type McpSignInStatus } from './connections/mcp-auth.js';
 import { mcpProxyUrl } from './connections/mcp-proxy.js';
-import { checkout, forgetCheckout, git, parseGithub, sparse, type GithubRef } from './github.js';
+import { checkout, fetchLfs, forgetCheckout, git, parseGithub, sparse, type GithubRef } from './github.js';
 import { covibeHome } from './home.js';
 import { expandHome, shellQuote, type LaunchSpec, type SandboxPolicy } from './sandbox-policy.js';
 import { parseSkillMd, SKILL_PLUGIN } from './skills.js';
@@ -864,6 +864,7 @@ async function fetchPlugin(url: string, id: string): Promise<{ src: string; entr
   if (!hit.ref) throw new PluginError(`${hit.candidate.name} cannot be installed: ${hit.candidate.unsupported}`);
   const { dir, commit } = await checkout(hit.ref);
   await sparse(dir, [hit.ref.path ? `${hit.ref.path}/` : '']);
+  await fetchLfs(dir, [hit.ref.path]);
   const src = join(dir, hit.ref.path);
   if (!existsSync(src)) throw new PluginError(`${hit.candidate.from} was not found`);
   return { src, entry: hit.entry, origin: { repo: `${hit.ref.owner}/${hit.ref.repo}`, ref: hit.ref.ref, path: hit.ref.path, commit, marketplace: hit.marketplace } };
