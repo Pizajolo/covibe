@@ -878,3 +878,53 @@ button.link.mono:hover { color: var(--accent); }
 .mic-btn.recording svg { animation: mic-pulse 1.2s ease-in-out infinite; }
 @keyframes mic-pulse { 50% { opacity: 0.35; } }
 .chat-input .box .mic-btn { border-radius: 14px; }
+
+/* ---------- feedback on a run's result (Feedback.tsx, Viewers.tsx) */
+.feedback-panel { width: 290px; flex: none; border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; background: var(--surface); }
+.feedback-items { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+.feedback-item { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.feedback-item .badge { font-size: 10px; padding: 0 5px; border-radius: 8px; background: var(--accent-soft); color: var(--text); flex: none; }
+.feedback-spot { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--surface-2); font-size: 12px; }
+.feedback-summary { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; max-height: 40vh; overflow-y: auto; }
+.linkish { border: 0; background: none; padding: 0; text-align: left; color: var(--text); cursor: pointer; }
+.linkish:hover { color: var(--accent); text-decoration: underline; }
+.media-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.media-view .media { flex: 1; min-height: 0; width: 100%; background: #000; outline: none; }
+.media-view .media.audio { flex: none; background: none; margin: 40px auto 0; width: min(640px, 90%); }
+.media-actions { gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: var(--surface); flex: none; }
+.image-stage { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.image-wrap { position: relative; display: inline-block; line-height: 0; }
+.image-wrap img { max-width: 100%; max-height: calc(100vh - 320px); cursor: crosshair; user-select: none; touch-action: none; }
+.image-region { position: absolute; border: 2px solid #ff6a3d; background: rgba(255, 106, 61, 0.15); border-radius: 2px; pointer-events: none; }
+
+/* ---------- the App tab (AppPanel.tsx) */
+.app-tab { min-height: 0; }
+.app-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.app-head { display: flex; flex-direction: column; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface); flex: none; }
+.app-settings { display: flex; flex-direction: column; gap: 10px; }
+.app-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.app-field.small-field { max-width: 200px; }
+.app-body { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--surface-2); }
+.app-body > .preview-main { flex: 1; min-height: 0; }
+.app-log { margin: 0; padding: 10px 16px; font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; overflow: auto; max-height: 260px; background: var(--surface-2); border-bottom: 1px solid var(--border); color: var(--text-2); }
+.app-log.grow { max-height: none; flex: 1; border-bottom: 0; }
+.app-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); flex: none; }
+.app-dot.on { background: var(--good); }
+.app-dot.wait { background: var(--warn); }
+.app-dot.bad { background: var(--bad); }
+.tabs .app-dot { margin-left: 2px; }
+
+/* ---------- files given with a goal or a message (Attachments.tsx) */
+.attach-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.attach-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 240px; height: 26px; padding: 0 6px 0 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); font: 12px var(--font); color: var(--text); }
+.attach-chip img { width: 20px; height: 20px; object-fit: cover; border-radius: 3px; flex: none; }
+.attach-chip svg { flex: none; color: var(--text-3); }
+.attach-chip.bad { border-color: var(--bad); color: var(--bad); }
+.attach-x { border: 0; background: none; padding: 2px; display: inline-flex; color: var(--text-3); cursor: default; }
+.attach-x:hover { color: var(--text); }
+.attach-thumb { border: 1px solid var(--border); border-radius: 6px; padding: 0; background: var(--surface-2); line-height: 0; overflow: hidden; }
+.attach-thumb img { max-width: 160px; max-height: 110px; object-fit: cover; }
+.attach-chips.sent { margin-top: 6px; }
+.attach-chips.sent.compact { margin-top: 0; }
+.attach-chips.compact .attach-thumb img { max-width: 80px; max-height: 44px; }
+.drop-target { outline: 2px dashed var(--accent); outline-offset: -2px; border-radius: var(--radius); }

@@ -55,7 +55,13 @@ export type EventType =
   | 'browser.opened'
   | 'browser.page'
   | 'browser.control'
-  | 'browser.closed';
+  | 'browser.closed'
+  // A project's app (see apps/manager.ts) and feedback people left on a run's result.
+  | 'app.starting'
+  | 'app.ready'
+  | 'app.failed'
+  | 'app.stopped'
+  | 'feedback.sent';
 
 export interface RunEvent {
   id: number;

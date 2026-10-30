@@ -14,6 +14,8 @@ import { answerQuestion } from './engine/questions.js';
 import { EventStore } from './events/store.js';
 import { bold, dim, formatEvent, formatRun, green, QUIET_EVENTS, red, yellow } from './format.js';
 import { ClaudeSdkRunner } from './runner/claude-sdk.js';
+import { appHub } from './apps/manager.js';
+import { attachFiles } from './engine/attachments.js';
 import { Connections, loginCommand, openInBrowser } from './connections/store.js';
 import { startSignIn } from './connections/mcp-auth.js';
 import { stopMcpProxy } from './connections/mcp-proxy.js';
@@ -31,10 +33,11 @@ const USAGE = `covibe — YAML-defined agent teams on the Claude Agent SDK
 Usage:
   covibe validate [team.yaml]                  Check a team file against the schema
   covibe run [team.yaml] --goal "<text>"       Run the team's workflow on a goal
+        [--attach <file>]                     (files for the members; repeat it for more)
   covibe runs                                  List recent runs
   covibe log <run> [--follow] [--json]         Show a run's event log
   covibe chat <run> <agent> <message...>       Talk to an agent of a run
-        [--now | --interrupt]                 (live run: reach it while it works / stop it)
+        [--now | --interrupt] [--attach <file>]  (live run: reach it while it works / stop it)
   covibe answer <run> [<question> <answer...>] Answer a member's question (without one: list them)
   covibe changes <run>                         List what a run in a plain folder changed
   covibe undo <run>                            Put a plain folder back the way it was before a run
@@ -49,6 +52,7 @@ Options:
   --repo <dir>   Repository or folder the team works on (default: current directory)
   --goal <text>  What the team should achieve (run)
   --goal-file <path>  Read the goal from a file (run)
+  --attach <file>  Give the members a file with the goal or message (run, chat); repeat it for more
   -h, --help     Show this help
 
 In a folder without git, members work in the folder itself. covibe records
@@ -79,6 +83,7 @@ export async function main(argv: string[]): Promise<number> {
       'older-than': { type: 'string' },
       run: { type: 'string' },
       'dry-run': { type: 'boolean' },
+      attach: { type: 'string', multiple: true, short: 'a' },
     },
   });
   const [command, ...args] = positionals;
@@ -98,7 +103,7 @@ export async function main(argv: string[]): Promise<number> {
       case 'log':
         return await log(args[0], values);
       case 'chat':
-        return await chatCommand(args, values.repo, values.interrupt ? 'interrupt' : values.now ? 'steer' : 'queue');
+        return await chatCommand(args, values.repo, values.interrupt ? 'interrupt' : values.now ? 'steer' : 'queue', values.attach ?? []);
       case 'answer':
         return answerCommand(args, values.repo);
       case 'changes':
@@ -165,7 +170,7 @@ function validate(file: string | undefined): number {
   return 0;
 }
 
-async function run(file: string | undefined, values: { repo?: string; goal?: string; 'goal-file'?: string }): Promise<number> {
+async function run(file: string | undefined, values: { repo?: string; goal?: string; 'goal-file'?: string; attach?: string[] }): Promise<number> {
   const team = loadTeam(teamPath(file));
   const goal = values['goal-file'] ? readFileSync(values['goal-file'], 'utf8').trim() : values.goal;
   if (!goal) throw new Error('run needs --goal "<what to build>" or --goal-file <path>');
@@ -185,7 +190,7 @@ async function run(file: string | undefined, values: { repo?: string; goal?: str
   });
   try {
     const runner = new ClaudeSdkRunner();
-    const outcome = await runTeam({ team, repo: repoRoot(values.repo), goal, store, runner, signal: controller.signal, connections: openConnections(runner) });
+    const outcome = await runTeam({ team, repo: repoRoot(values.repo), goal, store, runner, signal: controller.signal, connections: openConnections(runner), files: values.attach?.map((f) => resolve(f)) });
     console.log('');
     console.log(`run ${bold(outcome.runId)}: ${outcome.status}${outcome.reason ? ` — ${outcome.reason}` : ''}`);
     if (outcome.branch) console.log(`result branch: ${bold(outcome.branch)}  ${dim(`(git diff HEAD...${outcome.branch})`)}`);
@@ -197,8 +202,16 @@ async function run(file: string | undefined, values: { repo?: string; goal?: str
       console.log(yellow('The fix loop ran out of rounds. Review the feedback above, then talk to an agent:'));
       console.log(dim(`  covibe chat ${outcome.runId} <agent> "<instructions>"`));
     }
+    // An app a member started runs in this process: in a terminal it stays up until you are done with it.
+    const app = appHub.list(repoRoot(values.repo), outcome.runId).find((a) => a.status === 'running');
+    if (app && process.stdin.isTTY && !controller.signal.aborted) {
+      console.log(`the app runs at ${bold(app.url)}  ${dim('(press Ctrl-C to stop it and exit)')}`);
+      process.off('SIGINT', onSigint);
+      await new Promise<void>((resolve) => process.once('SIGINT', () => resolve()));
+    }
     return outcome.status === 'succeeded' ? 0 : outcome.status === 'escalated' ? 2 : 1;
   } finally {
+    await appHub.shutdown();
     unsubscribe();
     prompter?.close();
     process.off('SIGINT', onSigint);
@@ -428,7 +441,7 @@ async function clean(values: { repo?: string; 'older-than'?: string; run?: strin
   }
 }
 
-async function chatCommand(args: string[], repo: string | undefined, delivery: DeliveryMode): Promise<number> {
+async function chatCommand(args: string[], repo: string | undefined, delivery: DeliveryMode, files: string[] = []): Promise<number> {
   const [id, agent, ...words] = args;
   if (!id || !agent || !words.length) throw new Error('usage: covibe chat <run> <agent> <message...>');
   const store = openStore(repo);
@@ -440,7 +453,9 @@ async function chatCommand(args: string[], repo: string | undefined, delivery: D
     const unsubscribe = live ? () => {} : store.subscribe((e) => e.type !== 'agent.text' && !QUIET_EVENTS.has(e.type) && console.log(formatEvent(e)));
     try {
       const runner = new ClaudeSdkRunner();
-      const outcome = await chat({ store, runner, team, runId: run.id, agent, message: words.join(' '), delivery, connections: openConnections(runner) });
+      if (!team.agents[agent]) throw new Error(`team ${team.name} has no member "${agent}"`);
+      const attachments = files.length ? attachFiles(files.map((f) => resolve(f)), run.repo, run.id, `chat-${Date.now()}`) : [];
+      const outcome = await chat({ store, runner, team, runId: run.id, agent, message: words.join(' '), delivery, connections: openConnections(runner), attachments });
       if (outcome.mode === 'queued') {
         const when =
           outcome.delivery === 'interrupt'

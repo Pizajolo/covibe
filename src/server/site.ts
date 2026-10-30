@@ -43,7 +43,10 @@ export const SITE_MIME: Record<string, string> = {
   '.pdf': 'application/pdf',
   '.mp4': 'video/mp4',
   '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.m4v': 'video/mp4',
   '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
   '.wav': 'audio/wav',
   '.ogg': 'audio/ogg',
   '.wasm': 'application/wasm',
@@ -202,6 +205,111 @@ function walk(root: string, max = 10_000): string[] {
  */
 export const PREVIEW_BRIDGE = `<script data-covibe-preview>(()=>{const p=window.parent;if(!p||p===window)return;const post=()=>p.postMessage({covibePreview:{path:location.pathname+location.search+location.hash,title:document.title}},'*');addEventListener('DOMContentLoaded',post);addEventListener('load',post);addEventListener('hashchange',post);addEventListener('popstate',post);for(const k of['pushState','replaceState']){const f=history[k];history[k]=function(...a){const r=f.apply(this,a);post();return r}}addEventListener('message',e=>{if(e.source!==p)return;const c=e.data&&e.data.covibe;if(c==='back')history.back();else if(c==='forward')history.forward();else if(c==='reload')location.reload()});addEventListener('click',e=>{const a=e.target&&e.target.closest&&e.target.closest('a[target]');if(a&&a.target!=='_self'&&a.origin===location.origin){e.preventDefault();location.href=a.href}},true)})()</script>`;
 
+/**
+ * Runs in a page shown inside the app: on {covibe: 'pick'} it highlights the
+ * element under the pointer and, on a click, tells the app which one it was
+ * (a selector, its text, where it is), so a person can leave feedback on it.
+ * Escape or {covibe: 'unpick'} ends it.
+ */
+function pickElements() {
+  const parent = window.parent;
+  if (!parent || parent === window) return;
+  let box: HTMLDivElement | undefined;
+  let picking = false;
+  const cssEscape = (s: string) => (window.CSS && CSS.escape ? CSS.escape(s) : s.replace(/[^\w-]/g, '\\$&'));
+  const selectorOf = (el: Element): string => {
+    const parts: string[] = [];
+    let at: Element | null = el;
+    while (at && at.nodeType === 1 && parts.length < 6) {
+      if (at.id) {
+        parts.unshift(`#${cssEscape(at.id)}`);
+        break;
+      }
+      let part = at.tagName.toLowerCase();
+      const cls = [...at.classList].filter((c) => /^[a-zA-Z][\w-]{0,30}$/.test(c)).slice(0, 2);
+      if (cls.length) part += cls.map((c) => `.${cssEscape(c)}`).join('');
+      const p: Element | null = at.parentElement;
+      if (p) {
+        const same = [...p.children].filter((c) => c.tagName === at!.tagName);
+        if (same.length > 1) part += `:nth-of-type(${same.indexOf(at) + 1})`;
+      }
+      parts.unshift(part);
+      if (at.tagName === 'BODY') break;
+      at = p;
+    }
+    return parts.join(' > ');
+  };
+  const show = (el: Element | null) => {
+    if (!box) return;
+    if (!el) {
+      box.style.display = 'none';
+      return;
+    }
+    const r = el.getBoundingClientRect();
+    Object.assign(box.style, { display: 'block', left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+  };
+  const stop = () => {
+    picking = false;
+    box?.remove();
+    box = undefined;
+    document.documentElement.style.cursor = '';
+  };
+  const target = (e: Event) => (e.target instanceof Element && e.target !== box ? e.target : null);
+  addEventListener('mousemove', (e) => picking && show(target(e)), true);
+  addEventListener(
+    'click',
+    (e) => {
+      if (!picking) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const el = target(e);
+      stop();
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const text = ((el as HTMLElement).innerText || el.getAttribute('alt') || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+      parent.postMessage(
+        {
+          covibePick: {
+            selector: selectorOf(el),
+            tag: el.tagName.toLowerCase(),
+            text,
+            path: location.pathname + location.search + location.hash,
+            title: document.title,
+            rect: { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height), viewportWidth: innerWidth, viewportHeight: innerHeight, scrollY: Math.round(scrollY) },
+          },
+        },
+        '*',
+      );
+    },
+    true,
+  );
+  addEventListener(
+    'keydown',
+    (e) => {
+      if (picking && e.key === 'Escape') {
+        stop();
+        parent.postMessage({ covibePick: null }, '*');
+      }
+    },
+    true,
+  );
+  addEventListener('message', (e) => {
+    if (e.source !== parent) return;
+    const c = e.data && (e.data as { covibe?: unknown }).covibe;
+    if (c === 'unpick') stop();
+    if (c !== 'pick' || picking) return;
+    picking = true;
+    box = document.createElement('div');
+    Object.assign(box.style, { position: 'fixed', zIndex: '2147483647', pointerEvents: 'none', border: '2px solid #ff6a3d', background: 'rgba(255,106,61,.12)', borderRadius: '3px', display: 'none' });
+    document.documentElement.appendChild(box);
+    document.documentElement.style.cursor = 'crosshair';
+  });
+}
+
+/** PREVIEW_BRIDGE plus element picking for feedback (see pickElements). */
+// `__name`: what esbuild (tsx, vitest) adds to functions it keeps the names of; tsc adds nothing.
+export const FEEDBACK_BRIDGE = `${PREVIEW_BRIDGE}<script data-covibe-pick>(()=>{const __name=(f)=>f;(${pickElements.toString()})()})()</script>`;
+
 /** Put a script at the very start of an HTML page (right after <head>, else first). */
 export function injectHtml(html: string, script: string): string {
   const head = /<head(\s[^>]*)?>/i.exec(html);
@@ -309,7 +417,23 @@ async function handle(site: SiteServer, req: IncomingMessage, res: ServerRespons
   }
   const type = SITE_MIME[extname(path).toLowerCase()] ?? 'application/octet-stream';
   if (opts.inject && type.startsWith('text/html')) data = Buffer.from(injectHtml(data.toString('utf8'), opts.inject));
-  res.writeHead(200, { 'content-type': type, 'content-length': data.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
+  // Video and audio players seek with byte ranges.
+  const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''));
+  if (range && (range[1] || range[2])) {
+    const size = data.length;
+    let start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
+    let end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+    if (start >= size || start > end) {
+      res.writeHead(416, { 'content-range': `bytes */${size}` });
+      return res.end();
+    }
+    start = Math.max(0, start);
+    end = Math.max(start, end);
+    res.writeHead(206, { 'content-type': type, 'content-length': end - start + 1, 'content-range': `bytes ${start}-${end}/${size}`, 'accept-ranges': 'bytes', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
+    return res.end(req.method === 'HEAD' ? undefined : data.subarray(start, end + 1));
+  }
+  res.writeHead(200, {
+    'accept-ranges': 'bytes', 'content-type': type, 'content-length': data.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
   res.end(req.method === 'HEAD' ? undefined : data);
 }
 

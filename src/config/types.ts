@@ -1,6 +1,7 @@
 // The typed model the engine runs on. Team files are YAML on disk; the loader
 // validates them against schemas/team.schema.json and resolves them into these
 // shapes (prompt text loaded, output schemas parsed, defaults applied).
+import type { AppConfig } from '../apps/config.js';
 
 export type BackendType = 'subscription' | 'api_key' | 'gateway' | 'bedrock' | 'vertex' | 'connection';
 
@@ -75,6 +76,8 @@ export interface AgentConfig {
   plugins: string[];
   /** Has covibe's browser tools (see browser/tools.ts). */
   browser: boolean;
+  /** Has the app tools: run the project's app (see apps/tools.ts). */
+  app: boolean;
 }
 
 export interface BrainConfig {
@@ -131,6 +134,8 @@ export interface TeamConfig {
   brain: BrainConfig;
   /** The member other members ask first when they need a decision; unset = questions go straight to the human. */
   lead?: string;
+  /** How to run the project's app (the `app:` section); unset = worked out from the project. */
+  app?: AppConfig;
 }
 
 export type JsonSchema = Record<string, unknown>;

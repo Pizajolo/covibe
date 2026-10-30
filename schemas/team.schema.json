@@ -74,6 +74,9 @@
           "description": "With curate: after_run, the curator reviews once at least this many proposals are waiting (default 1). Higher batches reviews and saves tokens."
         }
       }
+    },
+    "app": {
+      "$ref": "#/$defs/app"
     }
   },
   "$defs": {
@@ -257,6 +260,10 @@
           "type": "boolean",
           "description": "Give the member covibe's browser: tools to open pages (a dev server, a site, or files in its working folder), read them as snapshots, click, type, take screenshots and read the console. People can watch it live in the app and take control. Default false."
         },
+        "app": {
+          "type": "boolean",
+          "description": "Give the member the app tools (app_start, app_status, app_logs, app_stop): run the project's app (its dev server, a site) in the sandbox or in Docker, so it and the people watching can open it. Members without Bash can only start it the way the team file, the project or covibe's detection says. Default true for members with Bash or a browser."
+        },
         "cache_ttl": {
           "enum": [
             "5m",
@@ -363,6 +370,10 @@
         "browser": {
           "type": "boolean",
           "description": "Give the member covibe's browser: tools to open pages (a dev server, a site, or files in its working folder), read them as snapshots, click, type, take screenshots and read the console. People can watch it live in the app and take control. Default false."
+        },
+        "app": {
+          "type": "boolean",
+          "description": "Give the member the app tools (app_start, app_status, app_logs, app_stop): run the project's app (its dev server, a site) in the sandbox or in Docker, so it and the people watching can open it. Members without Bash can only start it the way the team file, the project or covibe's detection says. Default true for members with Bash or a browser."
         },
         "cache_ttl": {
           "enum": [
@@ -566,6 +577,81 @@
         }
       ],
       "description": "Extended thinking: adaptive (Claude decides when and how much), off, or a fixed token budget (older models)."
+    },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How to run the project's app (a web app's dev server, a site), for members' app tools and the App panel. Without it covibe works it out from the project (package.json, manage.py, index.html; in Docker a compose file or Dockerfile) or uses what last worked in the project.",
+      "properties": {
+        "runtime": {
+          "enum": [
+            "sandbox",
+            "docker"
+          ],
+          "description": "sandbox (default): the OS sandbox, writing only in the working folder and package caches and reaching only the sandbox's domains. docker: a container, from an image (the project mounted at /app), a Dockerfile or a compose file."
+        },
+        "setup": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Shell command run before every start, e.g. npm install."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Shell command that starts the app. It must listen on $PORT (in the sandbox on 127.0.0.1, in Docker on 0.0.0.0), e.g. npm run dev -- --port $PORT --host 127.0.0.1."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Sandbox: a fixed port instead of a free one. Docker: the port the app listens on inside the container (default 3000)."
+        },
+        "path": {
+          "type": "string",
+          "description": "The page to open first. Default /."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment variables for the app. Keep secrets out of the team file."
+        },
+        "ready_timeout_s": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 3600,
+          "description": "How long to wait for the app to answer, in seconds. Default 180."
+        },
+        "network": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Sandbox: domains the app may reach besides the team's sandbox list."
+        },
+        "image": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Docker: the image to run the command in. Default node:22-bookworm-slim."
+        },
+        "dockerfile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Docker: a Dockerfile to build and run, relative to the project."
+        },
+        "compose": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Docker: a compose file to bring up, relative to the project."
+        },
+        "service": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Docker compose: the service that serves the app."
+        }
+      }
     }
   }
 }

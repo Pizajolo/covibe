@@ -6,7 +6,7 @@ import { money } from '../format';
 import { PrDialog, useGit } from '../pages/GitView';
 import { IconBranch, IconCheck, IconUp } from './icons';
 import { Modal, useAction, useToast } from './ui';
-import { go } from '../data';
+import { go, href } from '../data';
 
 const SEEN_KEY = 'covibe-shipped';
 
@@ -156,6 +156,11 @@ export function ShipDialog({ projectId, run, onClose }: { projectId: string; run
           </div>
         )}
         <span className="tiny faint">Everything else (commit, switch branch, revert) is in the project's Git tab.</span>
+        <span className="tiny faint">
+          Not quite right?{' '}
+          <a href={href('runs', projectId, run.id, 'preview')} onClick={onClose}>Point at what should change</a> in its files or{' '}
+          <a href={href('runs', projectId, run.id, 'app')} onClick={onClose}>the running app</a>, then send your comments to the team as a new goal.
+        </span>
       </Modal>
       {pr && g && (
         <PrDialog

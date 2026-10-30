@@ -17,11 +17,14 @@ import { systemPrompt, turnPrompt } from './prompts.js';
 import { browserActivity } from './browser.js';
 import { browserHub } from '../browser/hub.js';
 import { browserTools } from '../browser/tools.js';
+import { appHub } from '../apps/manager.js';
+import { appTools } from '../apps/tools.js';
 import { ASK_TOOL, Deadline, LEAD_SCHEMA, leadPrompt, leadVerdict, QUESTION_STEP, questionOptions, RunPause, waitForAnswer, type LeadVerdict } from './questions.js';
 import { REQUEST_TOOL, RequestChains, requestPrompt } from './requests.js';
 import { makeToolChecker, readOnly } from './scope.js';
 import { denyWritePaths, type Writer } from './folder.js';
 import { Workspace, type CollectResult } from './workspace.js';
+import { attachFiles, attachmentNote, ensureAttachmentsDir, takeUploads, type Attachment } from './attachments.js';
 
 export interface RunOptions {
   team: TeamConfig;
@@ -38,6 +41,9 @@ export interface RunOptions {
   onLimit?: 'wait' | 'stop';
   /** Claude accounts and providers from Settings → Advanced (and balancing across accounts). */
   connections?: Connections;
+  /** Files given with the goal: uploads (by id, see attachments.ts) and files on this computer (the CLI's --attach). */
+  uploads?: string[];
+  files?: string[];
 }
 
 export interface RunOutcome {
@@ -116,6 +122,8 @@ export async function runTeam(opts: RunOptions): Promise<RunOutcome> {
  */
 export async function startRun(opts: RunOptions): Promise<{ runId: string; done: Promise<RunOutcome> }> {
   const runId = newRunId();
+  // Files that cannot be found fail the goal before anything is set up.
+  const attachments = [...takeUploads(opts.uploads ?? [], opts.repo, runId), ...attachFiles(opts.files ?? [], opts.repo, runId)];
   const workspace = await Workspace.create(opts.repo, runId, opts.team.isolation, opts.base, writersOf(opts.team));
   opts.store.createRun({
     id: runId,
@@ -126,7 +134,7 @@ export async function startRun(opts: RunOptions): Promise<{ runId: string; done:
     branch: workspace.branch,
     base: opts.base,
   });
-  return { runId, done: new Engine(opts, runId, workspace).run() };
+  return { runId, done: new Engine(opts, runId, workspace, attachments).run() };
 }
 
 /** The members that change files, and where (for a plain folder's record of changes). */
@@ -165,12 +173,16 @@ class Engine {
   private requests = 0;
   private costUsd = 0;
   private maxLoops: number | undefined;
+  /** The goal as members read it: with the files the human attached. */
+  private readonly goalText: string;
 
   constructor(
     private readonly opts: RunOptions,
     private readonly runId: string,
     private readonly workspace: Workspace,
+    private readonly attachments: Attachment[] = [],
   ) {
+    this.goalText = attachments.length ? `${opts.goal}\n\n${attachmentNote(attachments)}` : opts.goal;
     this.team = opts.team;
     this.store = opts.store;
     this.context = { goal: opts.goal, loop: 0, feedback: {} };
@@ -195,6 +207,7 @@ class Engine {
       data: {
         team: this.team.name,
         goal: this.opts.goal,
+        ...(this.attachments.length ? { attachments: this.attachments } : {}),
         // A plain folder: members work in it directly, and the run can be undone.
         isolation: this.workspace.folder ? 'folder' : this.team.isolation,
         ...(this.workspace.folder ? { folder: this.workspace.repo } : {}),
@@ -313,7 +326,7 @@ class Engine {
     try {
       const result = await this.work(agent, step.id, outputSchema, (messages) =>
         turnPrompt({
-          goal: this.opts.goal,
+          goal: this.goalText,
           stepId: step.id,
           loop: this.context.loop,
           maxLoops: this.maxLoops,
@@ -579,7 +592,7 @@ class Engine {
     this.emit({ ...base, type: 'request.sent', data: { id, to, request: text, context: context ?? null } });
     try {
       await this.pause.wait(this.opts.signal);
-      const result = await this.work(target, step, undefined, (messages) => requestPrompt({ goal: this.opts.goal, from: from.name, to, request: text, context, messages }), { id, from: from.name });
+      const result = await this.work(target, step, undefined, (messages) => requestPrompt({ goal: this.goalText, from: from.name, to, request: text, context, messages }), { id, from: from.name });
       const reply = result.text.trim() || '(no reply)';
       // A member working in a worktree of its own gets the teammate's changes right away.
       const synced = result.files.length && from.writes ? await this.workspace.refresh(from.name) : true;
@@ -622,7 +635,7 @@ class Engine {
         cwd,
         root: this.workspace.isolation === 'none' ? this.workspace.repo : cwd,
         folder: !!this.workspace.folder,
-        prompt: leadPrompt({ goal: this.opts.goal, lead: leadName, from, step, question, context, options }),
+        prompt: leadPrompt({ goal: this.goalText, lead: leadName, from, step, question, context, options }),
         resume: session?.sessionId,
         fork: true,
         env: built.env,
@@ -765,14 +778,33 @@ export function buildInvocation(
       }),
     );
   }
+  if (agent.app && p.repo && !p.curating) {
+    tools.push(
+      ...appTools({
+        hub: appHub,
+        team,
+        agent,
+        repo: p.repo,
+        runId,
+        folder: p.cwd,
+        signal: p.signal,
+        onEvent: (e) => emit({ ...base, type: e.type, data: e.data }),
+        keepAlive: () => {
+          const run = store.getRun(runId);
+          return !!run && store.isLive(run);
+        },
+      }),
+    );
+  }
   let sandbox = agent.sandbox && isCurator ? { ...agent.sandbox, allowWrite: [...agent.sandbox.allowWrite, brain!] } : agent.sandbox;
   // In a plain folder nothing can be thrown away after the turn, so shell commands are kept out of what the scope does not reach.
   if (sandbox && p.folder) sandbox = { ...sandbox, denyWrite: denyWritePaths(p.root, agent.writes ? agent.writeScope : []) };
   return {
     agentName: agent.name,
     prompt: p.prompt,
-    systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL), canRequest: tools.some((t) => t.name === REQUEST_TOOL), folder: p.folder ? p.root : undefined }), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
-    readDirs: brain && !p.curating ? [brain] : undefined,
+    systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL), canRequest: tools.some((t) => t.name === REQUEST_TOOL), app: tools.some((t) => t.name === 'app_start'), folder: p.folder ? p.root : undefined }), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
+    // The brain, and the files the human gave the run (its folder exists from the first turn, so files sent later in chat are readable too).
+    readDirs: [...(brain && !p.curating ? [brain] : []), ...(p.repo && !p.curating ? [ensureAttachmentsDir(p.repo, runId)] : [])],
     skills: resolveSkills(agent.skills),
     plugins: resolvePlugins(agent.plugins),
     customTools: tools.length ? tools : undefined,

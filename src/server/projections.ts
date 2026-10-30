@@ -404,7 +404,7 @@ export function chatThreads(events: RunEvent[], roots: string[] = []): Record<st
   for (const e of events) {
     const d = e.data as D;
     const base = { id: e.id, ts: e.ts, step: e.step };
-    if (e.type === 'chat.message' && d.from === 'human') push(d.to, { ...base, kind: 'human', text: d.text });
+    if (e.type === 'chat.message' && d.from === 'human') push(d.to, { ...base, kind: 'human', text: d.text, ...(d.attachments?.length ? { attachments: d.attachments } : {}) });
     else if (e.type === 'message.queued') {
       const from = d.from ?? e.agent;
       const item: ChatItem = {
@@ -413,6 +413,7 @@ export function chatThreads(events: RunEvent[], roots: string[] = []): Record<st
         text: from === 'human' ? d.text : `Message from ${from}: ${d.text}`,
         pending: true,
         delivery: d.mode ?? 'queue',
+        ...(from === 'human' && d.attachments?.length ? { attachments: d.attachments } : {}),
       };
       push(d.to, item);
       pending.set(d.id, item);

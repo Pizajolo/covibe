@@ -1,18 +1,22 @@
 // The Preview tab: a run's files as a tree, and the selected one shown the way
-// it is meant to be seen. Web pages, images and PDFs open in a frame served by
-// the run's own preview site (its own origin, see server/site.ts), so you can
-// click through a site the team built; Markdown is rendered; other files show
-// as text.
+// it is meant to be seen. Web pages and PDFs open in a frame served by the
+// run's own preview site (its own origin, see server/site.ts), so you can
+// click through a site the team built; videos, audio and images play here;
+// Markdown is rendered; office files open in their own app; other files show
+// as text. Every view takes feedback: a moment, an area, a passage, an
+// element (see Feedback.tsx).
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import { desktop, get, post, type PreviewSite, type RunFile, type RunFiles, type RunSummary } from '../api';
+import { desktop, get, post, type FeedbackItem, type PreviewSite, type RunFile, type RunFiles, type RunSummary } from '../api';
 import { useLive } from '../data';
 import { CodeEditor } from './CodeEditor';
-import { IconAlert, IconArrowLeft, IconArrowRight, IconBranch, IconEye, IconFile, IconFolder, IconLoop } from './icons';
+import { FeedbackPanel, useFeedback, type Anchor } from './Feedback';
+import { IconAlert, IconArrowLeft, IconArrowRight, IconBranch, IconChat, IconEye, IconFile, IconFolder, IconLoop } from './icons';
 import { Markdown } from './Markdown';
 import { Empty } from './ui';
+import { appName, AUDIO, IMAGE, ImageView, MediaView, OFFICE, OPENABLE, PDF, useOpenInApp, useSelectedText, VIDEO } from './Viewers';
 
 /** Shown in the frame, as a browser shows them. */
-const WEB = /\.(html?|svg|png|jpe?g|gif|webp|avif|ico|bmp|pdf|mp4|webm|mp3|wav|ogg)$/i;
+const WEB = /\.(html?|pdf)$/i;
 const MARKDOWN = /\.(md|markdown)$/i;
 const HTML = /\.html?$/i;
 
@@ -85,6 +89,12 @@ export function Preview({ projectId, run }: { projectId: string; run: RunSummary
   const [changedOnly, setChangedOnly] = useState(false);
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   const frame = useRef<HTMLIFrameElement>(null);
+  const feedback = useFeedback();
+  const [panel, setPanel] = useState(() => feedback.items.length > 0);
+  const [picking, setPicking] = useState(false);
+  /** A comment's moment to go to when its video opens. */
+  const [seek, setSeek] = useState<{ path: string; at: number; n: number } | undefined>();
+  const openInApp = useOpenInApp(projectId, run.id);
 
   useEffect(() => {
     setSite(null);
@@ -124,11 +134,21 @@ export function Preview({ projectId, run }: { projectId: string; run: RunSummary
     if (first) show(first);
   }, [listing, selected, show]);
 
-  // The page in the frame says where it is; follow it in the list.
+  // The page in the frame says where it is; follow it in the list. It also says which element you picked to comment on.
   useEffect(() => {
     if (!origin) return;
     const on = (e: MessageEvent) => {
       if (e.origin !== origin || e.source !== frame.current?.contentWindow) return;
+      const data = e.data as { covibePick?: PickedElement | null } | null;
+      if (data && 'covibePick' in data) {
+        setPicking(false);
+        const pick = data.covibePick;
+        if (pick) {
+          const file = fileOfPage(pick.path, paths) ?? selected ?? pick.path;
+          feedback.compose({ target: 'file', path: file, kind: 'page', element: { selector: pick.selector, tag: pick.tag, text: pick.text, title: pick.title } });
+        }
+        return;
+      }
       const info = (e.data as { covibePreview?: { path?: unknown; title?: unknown } } | null)?.covibePreview;
       if (!info || typeof info.path !== 'string') return;
       setPage({ path: info.path, title: typeof info.title === 'string' ? info.title : '' });
@@ -137,7 +157,7 @@ export function Preview({ projectId, run }: { projectId: string; run: RunSummary
     };
     window.addEventListener('message', on);
     return () => window.removeEventListener('message', on);
-  }, [origin, paths]);
+  }, [origin, paths, selected, feedback.compose]);
 
   if (error) return <div className="banner bad" style={{ margin: 20 }}><IconAlert />{error}</div>;
   if (!listing) return <div style={{ padding: 20 }} className="faint">Loading files…</div>;
@@ -149,6 +169,20 @@ export function Preview({ projectId, run }: { projectId: string; run: RunSummary
   const changedCount = files.filter((f) => f.changed).length;
   const file = files.find((f) => f.path === selected);
   const web = !!selected && WEB.test(selected);
+  const video = !!selected && VIDEO.test(selected);
+  const audio = !!selected && AUDIO.test(selected);
+  const image = !!selected && IMAGE.test(selected);
+  const office = !!selected && OFFICE.test(selected);
+  const fileUrl = (path: string) => siteUrl(`/${path.split('/').map(encodeURIComponent).join('/')}`);
+  const pick = () => {
+    setPicking(true);
+    frame.current?.contentWindow?.postMessage({ covibe: 'pick' }, origin ?? '*');
+  };
+  const showItem = (i: FeedbackItem) => {
+    if (i.target !== 'file' || !paths.has(i.path)) return;
+    show(i.path);
+    if (i.at !== undefined) setSeek((s) => ({ path: i.path, at: i.at!, n: (s?.n ?? 0) + 1 }));
+  };
 
   const rows: ReactElement[] = [];
   const walk = (n: Node, depth: number) => {
@@ -230,15 +264,54 @@ export function Preview({ projectId, run }: { projectId: string; run: RunSummary
             <span className="address mono ellipsis">{selected}</span>
           )}
           {file && <span className="tiny faint num">{kb(file.size)}</span>}
-          {site && selected && (
+          {selected && web && HTML.test(selected) && site && (
+            <button className={`btn sm ${picking ? 'primary' : 'ghost'}`} onClick={() => (picking ? (frame.current?.contentWindow?.postMessage({ covibe: 'unpick' }, origin ?? '*'), setPicking(false)) : pick())} title="Click an element of the page to comment on it (Esc cancels)">
+              <IconChat width={13} height={13} /> {picking ? 'Click an element…' : 'Comment on an element'}
+            </button>
+          )}
+          {selected && web && (
+            <button className="btn sm ghost" onClick={() => feedback.compose({ target: 'file', path: (HTML.test(selected) && page ? fileOfPage(page.path, paths) : undefined) ?? selected, kind: PDF.test(selected) ? 'pdf' : 'page' })}>
+              {HTML.test(selected) ? 'Comment on the page' : 'Comment on the PDF'}
+            </button>
+          )}
+          {selected && office && (
+            <button className="btn sm" onClick={() => void openInApp(selected)} title="Open it in its own app on this computer">
+              Open in {appName(selected)}
+            </button>
+          )}
+          {site && selected && (web || video || audio || image) && (
             <button className="btn sm ghost" onClick={openOutside} title="Open in your own browser">
               Open
             </button>
           )}
+          <button className={`btn sm ${panel ? '' : 'ghost'}`} onClick={() => setPanel((p) => !p)} title="Your comments on this result">
+            Feedback{feedback.items.length ? ` (${feedback.items.length})` : ''}
+          </button>
         </div>
         <div className="preview-body">
           {!selected ? (
             <Empty icon={<IconEye />} title="Pick a file">Web pages open as a site you can click through.</Empty>
+          ) : (video || audio || image) ? (
+            siteError ? (
+              <div className="banner bad" style={{ margin: 20 }}><IconAlert />{siteError}</div>
+            ) : site ? (
+              image ? <ImageView key={selected} src={fileUrl(selected)} path={selected} /> : <MediaView key={selected} src={fileUrl(selected)} path={selected} kind={video ? 'video' : 'audio'} seek={seek?.path === selected ? seek : undefined} />
+            ) : (
+              <div style={{ padding: 20 }} className="faint">Starting the preview…</div>
+            )
+          ) : office ? (
+            <Empty
+              icon={<IconFile />}
+              title={selected.split('/').pop() ?? selected}
+              action={
+                <div className="row" style={{ gap: 8, justifyContent: 'center' }}>
+                  <button className="btn primary" onClick={() => void openInApp(selected)}>Open in {appName(selected)}</button>
+                  <button className="btn" onClick={() => feedback.compose({ target: 'file', path: selected, kind: 'file' })}><IconChat width={14} height={14} /> Comment on it</button>
+                </div>
+              }
+            >
+              {file ? `${kb(file.size)} · ` : ''}Office files open in their own app on this computer. Leave your comments here for the team.
+            </Empty>
           ) : web ? (
             siteError ? (
               <div className="banner bad" style={{ margin: 20 }}><IconAlert />{siteError}</div>
@@ -255,32 +328,67 @@ export function Preview({ projectId, run }: { projectId: string; run: RunSummary
               <div style={{ padding: 20 }} className="faint">Starting the preview…</div>
             )
           ) : (
-            <FileText projectId={projectId} runId={run.id} path={selected} version={files.find((f) => f.path === selected)?.size} />
+            <FileText projectId={projectId} runId={run.id} path={selected} version={files.find((f) => f.path === selected)?.size} onComment={feedback.compose} onOpen={() => void openInApp(selected)} />
           )}
         </div>
       </div>
+      {panel && <FeedbackPanel onShow={showItem} onClose={() => setPanel(false)} />}
     </div>
   );
 }
 
-/** A non-web file: Markdown rendered (or as source), anything else as read-only text. */
-function FileText({ projectId, runId, path, version }: { projectId: string; runId: string; path: string; version?: number }) {
+/** What a page tells the app about the element you picked (see pickElements in server/site.ts). */
+interface PickedElement {
+  selector: string;
+  tag: string;
+  text: string;
+  path: string;
+  title: string;
+}
+
+/** A non-web file: Markdown rendered (or as source), anything else as read-only text. Select a passage to comment on it. */
+function FileText({ projectId, runId, path, version, onComment, onOpen }: { projectId: string; runId: string; path: string; version?: number; onComment: (a: Anchor) => void; onOpen: () => void }) {
   const { value: file, error } = useLive(() => get<RunFile>(`/api/runs/${projectId}/${runId}/file?path=${encodeURIComponent(path)}`), [projectId, runId, path, version]);
   const [source, setSource] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const selection = useSelectedText(box);
   if (error) return <div className="banner bad" style={{ margin: 20 }}><IconAlert />{error}</div>;
   if (!file) return <div style={{ padding: 20 }} className="faint">Loading…</div>;
-  if (file.binary) return <Empty icon={<IconFile />} title="Binary file">{path} ({kb(file.size)}) cannot be shown as text. Open it in your own browser to download it.</Empty>;
+  if (file.binary)
+    return (
+      <Empty
+        icon={<IconFile />}
+        title="Binary file"
+        action={
+          <div className="row" style={{ gap: 8, justifyContent: 'center' }}>
+            {OPENABLE.test(path) && <button className="btn" onClick={onOpen}>Open with its app</button>}
+            <button className="btn" onClick={() => onComment({ target: 'file', path, kind: 'file' })}><IconChat width={14} height={14} /> Comment on it</button>
+          </div>
+        }
+      >
+        {path} ({kb(file.size)}) cannot be shown as text.
+      </Empty>
+    );
   const md = MARKDOWN.test(path);
   return (
-    <div className="preview-text">
-      {md && (
-        <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 8 }}>
+    <div className="preview-text" ref={box}>
+      <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 8, gap: 8 }}>
+        <button
+          className={`btn sm ${selection ? 'primary' : ''}`}
+          // Keep the selection: a click on the button would clear it first.
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => onComment(selection ? { target: 'file', path, kind: 'text', quote: selection } : { target: 'file', path, kind: 'text' })}
+          title="Select a passage first to comment on it; otherwise the comment is on the whole file"
+        >
+          <IconChat width={13} height={13} /> {selection ? 'Comment on the selection' : 'Comment on the file'}
+        </button>
+        {md && (
           <div className="seg">
             <button className={!source ? 'on' : ''} onClick={() => setSource(false)}>Rendered</button>
             <button className={source ? 'on' : ''} onClick={() => setSource(true)}>Source</button>
           </div>
-        </div>
-      )}
+        )}
+      </div>
       {md && !source ? (
         <div className="card" style={{ padding: '6px 22px' }}>
           <Markdown text={file.content ?? ''} />

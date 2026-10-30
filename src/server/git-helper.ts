@@ -169,6 +169,7 @@ export async function gitHelp(opts: HelperStart): Promise<{ runId: string; done:
     skills: [],
     plugins: [],
     browser: false,
+    app: false,
   };
   // Files the helper may edit: the ones with conflicts, refreshed after every command it runs.
   let conflicts = new Set<string>();

@@ -276,6 +276,7 @@ function roleLine(a: Doc): string {
 }
 
 function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, onDeleted, teamSkills, teamPlugins, teamBackend, teamBrowser }: { teamId: string; name: string; index: number; agent: Doc; names: string[]; edit: Edit; files: string[]; onFiles: () => void; onDeleted: () => void; teamSkills?: string[]; teamPlugins?: string[]; teamBackend?: Doc; teamBrowser?: boolean }) {
+  const appDefault = (Array.isArray(agent.tools) && agent.tools.includes('Bash')) || (agent.browser ?? teamBrowser) === true;
   const p = (...k: (string | number)[]) => ['agents', name, ...k];
   const tools: string[] = Array.isArray(agent.tools) ? agent.tools : [];
   const writes = tools.some((t) => WRITE_TOOLS.has(t));
@@ -373,6 +374,24 @@ function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, o
         </div>
         <span className="tiny faint">
           covibe's browser: it can open its dev server or the pages it builds, click through them, take screenshots and read the console. You watch it live from its desk and can take control.
+        </span>
+      </section>
+
+      <section className="form-section">
+        <h3>Running the app</h3>
+        <div className="seg">
+          <button className={agent.app === undefined ? 'on' : ''} onClick={() => void edit([{ op: 'delete', path: p('app') }])}>
+            Default ({appDefault ? 'on' : 'off'})
+          </button>
+          <button className={agent.app === true ? 'on' : ''} onClick={() => void edit([{ op: 'set', path: p('app'), value: true }])}>
+            On
+          </button>
+          <button className={agent.app === false ? 'on' : ''} onClick={() => void edit([{ op: 'set', path: p('app'), value: false }])}>
+            Off
+          </button>
+        </div>
+        <span className="tiny faint">
+          The app tools: it can start the project's app (its dev server or site) in the sandbox or in Docker, read its log and stop it. It keeps running for teammates and for you (the run's App tab). On by default for members with Bash or a browser; members without Bash start it only the way the team file or the project says.
         </span>
       </section>
 
