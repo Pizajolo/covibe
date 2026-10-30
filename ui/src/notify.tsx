@@ -26,7 +26,7 @@ interface Notify {
 }
 
 const Ctx = createContext<Notify | null>(null);
-const NOTIFY_TYPES = /^(question\.|usage\.limit|run\.finished)/;
+const NOTIFY_TYPES = /^(question\.|usage\.limit|run\.finished|goal\.checked)/;
 const SEEN_KEY = 'covibe-notifications-seen';
 
 export const questionKey = (projectId: string, runId: string, id: number) => `${projectId}/${runId}/${id}`;
@@ -40,8 +40,10 @@ function readSeen(): string {
 }
 
 /** Bring the app forward and open what a notification is about. */
-export function openNotification(n: Pick<AppNotification, 'projectId' | 'runId' | 'questionId' | 'open'>, showQuestion: Notify['showQuestion']) {
+export function openNotification(n: Pick<AppNotification, 'projectId' | 'runId' | 'questionId' | 'open' | 'goalId'>, showQuestion: Notify['showQuestion']) {
   if (n.projectId === '_library') return;
+  // A backlog goal's questions are answered in the project's backlog.
+  if (n.goalId !== undefined) return go('projects', n.projectId, 'backlog');
   go('runs', n.projectId, n.runId);
   if (n.questionId !== undefined && n.open) showQuestion(n.projectId, n.runId, n.questionId);
 }
@@ -108,7 +110,7 @@ export function NotifyProvider({ children }: { children: ReactNode }) {
           openNotification(n, showRef.current);
           note.close();
         };
-      } else if (!away && n.bell && n.kind !== 'question') {
+      } else if (!away && n.bell && (n.kind !== 'question' || n.goalId !== undefined)) {
         toast(n.body ? `${n.title}: ${n.body}` : n.title, n.kind === 'error');
       }
     }

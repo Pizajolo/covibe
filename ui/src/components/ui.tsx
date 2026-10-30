@@ -19,7 +19,8 @@ export function RunStatusPill({ status, kind, paused, limited }: { status: RunSt
       : limited && status === 'running'
         ? { label: 'Waiting for the limit', cls: 'warn', icon: <IconClock /> }
         : RUN_STATUS[status];
-  const label = kind === 'ask' && status === 'succeeded' ? 'Answered' : kind === 'ask' && status === 'running' ? 'Thinking' : s.label;
+  const label =
+    kind === 'ask' && status === 'succeeded' ? 'Answered' : kind === 'check' && status === 'succeeded' ? 'Checked' : (kind === 'ask' || kind === 'check') && status === 'running' ? 'Thinking' : s.label;
   return (
     <span className={`pill ${s.cls}`}>
       {s.icon}

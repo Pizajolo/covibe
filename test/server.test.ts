@@ -341,8 +341,8 @@ describe('server', () => {
     const { api } = await setup();
     const on = { bell: true, push: true };
     const notifications = { question: on, limit: on, stopped: on, error: on, done: on };
-    expect(await api('GET', '/api/settings')).toEqual({ autoCleanDays: null, notifications });
-    expect(await api('PUT', '/api/settings', { autoCleanDays: 7 })).toEqual({ autoCleanDays: 7, notifications });
+    expect(await api('GET', '/api/settings')).toEqual({ autoCleanDays: null, backlogMaxUsage: 90, notifications });
+    expect(await api('PUT', '/api/settings', { autoCleanDays: 7 })).toEqual({ autoCleanDays: 7, backlogMaxUsage: 90, notifications });
     await expect(api('PUT', '/api/settings', { autoCleanDays: -1 })).rejects.toThrow(/between/);
     // Notification choices change one kind and one channel at a time.
     expect((await api('PUT', '/api/settings', { notifications: { done: { push: false } } })).notifications).toEqual({ ...notifications, done: { bell: true, push: false } });

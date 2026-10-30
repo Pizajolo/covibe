@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { desktop, get, put, type AppSettings, type NotificationKind, type NotifyChoice } from '../api';
+import { UsageThreshold } from '../components/Backlog';
 import { AdvancedSettings, useConnections } from '../components/Connections';
 import { IconInfo } from '../components/icons';
 import { ModelPicker } from '../components/ModelPicker';
@@ -79,6 +80,10 @@ function UsageLimits() {
           <input type="radio" name="on-limit" checked={mode === 'stop'} onChange={() => void save('stop')} />
           Stop the run; restart it from the run page, right away or when the limit resets
         </label>
+        <span className="small" style={{ marginTop: 6 }}>
+          Project backlogs:
+        </span>
+        <UsageThreshold />
       </div>
     </div>
   );

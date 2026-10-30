@@ -1,5 +1,5 @@
 // Shapes the HTTP API returns. The UI imports these types directly.
-import type { RunEvent, RunKind, RunStatus } from '../events/types.js';
+import type { CheckMode, Goal, GoalCheck, GoalQuestion, GoalState, RunEvent, RunKind, RunStatus } from '../events/types.js';
 import type { Effort, Thinking } from '../config/types.js';
 
 export type { Effort, Thinking } from '../config/types.js';
@@ -7,7 +7,7 @@ export type { EnvironmentInfo, ModelChoice, PlanUsage } from '../runner/types.js
 export type { Connection, ConnectionKind, ConnectionView, Pricing, ProviderModel } from '../connections/types.js';
 import type { ConnectionView } from '../connections/types.js';
 
-export type { RunEvent, RunKind, RunStatus };
+export type { CheckMode, Goal, GoalCheck, GoalQuestion, GoalState, RunEvent, RunKind, RunStatus };
 
 export interface Project {
   id: string;
@@ -19,6 +19,18 @@ export interface Project {
    * can be undone instead of merged. Unset = a git repository.
    */
   kind?: 'git' | 'folder';
+  /** How the project's backlog is worked off (see BacklogSettings); unset fields take the defaults. */
+  backlog?: Partial<BacklogSettings>;
+}
+
+export interface BacklogSettings {
+  /** Start the next goal on its own whenever the team is free (and the plan has room). Off = paused: goals start only when you start them. */
+  auto: boolean;
+  /** The team new goals go to, unless you pick another. */
+  team?: string;
+  check: CheckMode;
+  /** In a git project, each goal starts from the result of the last goal that succeeded (unless that is already in your branch). */
+  chain: boolean;
 }
 
 export interface TeamFileInfo {
@@ -53,6 +65,12 @@ export interface AppSettings {
   designerEffort?: Effort;
   /** When the plan's usage limit stops a member: wait for the reset and continue (default), or stop the run. */
   onLimit?: 'wait' | 'stop';
+  /**
+   * Backlogs do not start their next goal while your plan's 5-hour or weekly
+   * usage is at or above this percentage; they wait for it to reset (you can
+   * still start one yourself). null = never wait.
+   */
+  backlogMaxUsage: number | null;
   /** Which notifications show under the bell and which also go out as system notifications. */
   notifications: Record<NotificationKind, NotifyChoice>;
 }
@@ -84,6 +102,8 @@ export interface AppNotification {
   goal?: string;
   /** For a question: its id, and whether it still waits for you. */
   questionId?: number;
+  /** For a backlog goal the check has questions about. */
+  goalId?: number;
   open?: boolean;
   /** Show under the bell / send as a system notification, from the settings. */
   bell: boolean;
@@ -690,4 +710,26 @@ export interface GitProblemInfo {
   hint?: string;
   detail?: string;
   command?: string;
+}
+
+/** A backlog goal as the app shows it: where it stands, and its latest run. */
+export interface GoalView extends Goal {
+  status: 'checking' | 'needs_info' | 'ready' | 'running' | 'succeeded' | 'failed' | 'escalated';
+  run?: RunSummary;
+}
+
+/** Why the backlog's next goal has not started. */
+export type BacklogState =
+  | { kind: 'idle' }
+  | { kind: 'working'; goalId: number }
+  | { kind: 'paused' }
+  /** Plan usage is at or above Settings' threshold: the next goal starts after `until` (when known). */
+  | { kind: 'waiting'; until?: string; window: string; label: string; used: number; account?: string };
+
+export interface BacklogView {
+  settings: BacklogSettings;
+  /** The usage threshold from Settings (percent), or null. */
+  maxUsage: number | null;
+  goals: GoalView[];
+  state: BacklogState;
 }
