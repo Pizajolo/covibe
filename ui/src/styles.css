@@ -913,3 +913,18 @@ button.link.mono:hover { color: var(--accent); }
 .app-dot.wait { background: var(--warn); }
 .app-dot.bad { background: var(--bad); }
 .tabs .app-dot { margin-left: 2px; }
+
+/* ---------- files given with a goal or a message (Attachments.tsx) */
+.attach-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.attach-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 240px; height: 26px; padding: 0 6px 0 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); font: 12px var(--font); color: var(--text); }
+.attach-chip img { width: 20px; height: 20px; object-fit: cover; border-radius: 3px; flex: none; }
+.attach-chip svg { flex: none; color: var(--text-3); }
+.attach-chip.bad { border-color: var(--bad); color: var(--bad); }
+.attach-x { border: 0; background: none; padding: 2px; display: inline-flex; color: var(--text-3); cursor: default; }
+.attach-x:hover { color: var(--text); }
+.attach-thumb { border: 1px solid var(--border); border-radius: 6px; padding: 0; background: var(--surface-2); line-height: 0; overflow: hidden; }
+.attach-thumb img { max-width: 160px; max-height: 110px; object-fit: cover; }
+.attach-chips.sent { margin-top: 6px; }
+.attach-chips.sent.compact { margin-top: 0; }
+.attach-chips.compact .attach-thumb img { max-width: 80px; max-height: 44px; }
+.drop-target { outline: 2px dashed var(--accent); outline-offset: -2px; border-radius: var(--radius); }

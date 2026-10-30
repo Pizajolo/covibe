@@ -6,6 +6,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { api, get, post, type FeedbackItem, type FeedbackList, type RunSummary } from '../api';
 import { go, href, useLive } from '../data';
 import { IconAlert, IconChat, IconSend, IconTrash, IconX } from './icons';
+import { AttachButton, AttachmentChips, useAttachments } from './Attachments';
 import { MicButton, withSpoken } from './MicButton';
 import { Modal, useAction, useToast } from './ui';
 
@@ -227,9 +228,10 @@ export function FeedbackPanel({ onShow, onClose }: { onShow?: (item: FeedbackIte
 
 function SendDialog({ projectId, run, items, onClose }: { projectId: string; run: RunSummary; items: FeedbackItem[]; onClose: () => void }) {
   const [note, setNote] = useState('');
+  const files = useAttachments();
   const toast = useToast();
   const [send, busy] = useAction(async () => {
-    const started = await post<{ runId: string; projectId: string }>(`/api/runs/${projectId}/${run.id}/feedback/send`, { note });
+    const started = await post<{ runId: string; projectId: string }>(`/api/runs/${projectId}/${run.id}/feedback/send`, { note, attachments: files.ids });
     toast(`${run.team} is working on your feedback.`);
     onClose();
     go('runs', started.projectId, started.runId);
@@ -242,7 +244,7 @@ function SendDialog({ projectId, run, items, onClose }: { projectId: string; run
       footer={
         <>
           <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn primary" disabled={busy || (!items.length && !note.trim())} onClick={() => void send()}>
+          <button className="btn primary" disabled={busy || files.uploading || files.failed || (!items.length && !note.trim())} onClick={() => void send()}>
             <IconSend /> Start a new goal
           </button>
         </>
@@ -263,10 +265,12 @@ function SendDialog({ projectId, run, items, onClose }: { projectId: string; run
         </ol>
         <label className="col" style={{ gap: 6 }}>
           <span className="label">Anything else? (optional)</span>
-          <div className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
-            <textarea className="input grow" rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="An overall note for the team" />
+          <div className={`row ${files.dragging ? 'drop-target' : ''}`} style={{ gap: 6, alignItems: 'flex-start' }} {...files.drop}>
+            <textarea className="input grow" rows={3} value={note} onChange={(e) => setNote(e.target.value)} onPaste={files.onPaste} placeholder="An overall note for the team, and files that help: a mockup, a reference, a screenshot" />
+            <AttachButton files={files} />
             <MicButton onText={(t) => setNote((v) => withSpoken(v, t))} />
           </div>
+          <AttachmentChips files={files} />
         </label>
         {run.status === 'running' && (
           <div className="banner warn">

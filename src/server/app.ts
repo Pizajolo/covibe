@@ -52,7 +52,7 @@ import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Proj
 import * as gitops from './gitops.js';
 import { GitProblem, gitOverview, gitShow } from './gitops.js';
 import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, stepReports, summarizeRun, usageReport } from './projections.js';
-import { diskSource, FEEDBACK_BRIDGE, gitSource, isText, relPath, SiteServer, type SiteSource } from './site.js';
+import { diskSource, FEEDBACK_BRIDGE, gitSource, isText, relPath, SITE_MIME, SiteServer, type SiteSource } from './site.js';
 import { browserHub, type LiveTab } from '../browser/hub.js';
 import { AppConfigError, rememberedApp, resolveApp, type AppConfig, type AppSpec } from '../apps/config.js';
 import { appHub, AppError, tail, type AppState } from '../apps/manager.js';
@@ -60,6 +60,8 @@ import { AppView } from '../apps/view.js';
 import { expandHome } from '../sandbox-policy.js';
 import { Workspace } from '../engine/workspace.js';
 import { cleanItem, cleanItems, feedbackGoal, readFeedback, writeFeedback } from './feedback.js';
+import { AttachmentError, attachmentsDir, saveUpload, takeUploads, type Attachment } from '../engine/attachments.js';
+import { withFiles } from '../engine/chat.js';
 import { covibeHome } from '../home.js';
 import type { BrowserProvider } from '../browser/types.js';
 
@@ -309,11 +311,15 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     );
   };
 
+  /** The files given with a run's goal (or question). */
+  const attachmentsOf = (store: EventStore, runId: string): Attachment[] =>
+    ((store.events(runId).find((e) => e.type === 'run.started')?.data.attachments as Attachment[] | undefined) ?? []);
+
   /** Start a goal in the background and keep its stop handle. */
-  const launch = async (project: Project, team: TeamConfig, goal: string, base?: string) => {
+  const launch = async (project: Project, team: TeamConfig, goal: string, base?: string, files: { uploads?: string[]; files?: string[] } = {}) => {
     const controller = new AbortController();
     const onLimit = library.settings().onLimit ?? 'wait';
-    const { runId, done } = await startRun({ team, repo: project.path, goal, store: storeFor(project), runner, signal: controller.signal, base, onLimit, connections });
+    const { runId, done } = await startRun({ team, repo: project.path, goal, store: storeFor(project), runner, signal: controller.signal, base, onLimit, connections, ...files });
     const key = `${project.id}/${runId}`;
     active.set(key, controller);
     done.catch(() => undefined).finally(() => active.delete(key));
@@ -327,7 +333,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const restartRun = async (project: Project, run: RunRecord) => {
     const team = teamForRun(run).load();
     const keep = run.branch && (await exec('git', ['rev-parse', '--verify', '--quiet', `${run.branch}^{commit}`], { cwd: project.path }).then(() => true, () => false));
-    const started = await launch(project, team, run.goal, keep ? run.branch : run.base);
+    // The files given with the goal go with it again.
+    const files = attachmentsOf(storeFor(project), run.id).map((a) => a.path).filter((p) => existsSync(p));
+    const started = await launch(project, team, run.goal, keep ? run.branch : run.base, { files });
     storeFor(project).append(run.id, { type: 'run.restarted', data: { run_id: started.runId } });
     return started;
   };
@@ -1044,7 +1052,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const project = library.project(str(body, 'project'));
       const team = library.load(str(body, 'team'));
       const base = typeof (body as { base?: unknown }).base === 'string' && (body as { base: string }).base ? (body as { base: string }).base : undefined;
-      return launch(project, team, str(body, 'goal'), base);
+      return launch(project, team, str(body, 'goal'), base, { uploads: uploadIds(body) });
     }],
     ['POST', '/api/runs/:pid/:rid/restart', async (p, body) => {
       const { project, store, run } = findRun(p.pid!, p.rid!);
@@ -1085,25 +1093,29 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       }
     }],
     ['POST', '/api/runs/:pid/:rid/chat', async (p, body) => {
-      const { store, run } = findRun(p.pid!, p.rid!);
+      const { project, store, run } = findRun(p.pid!, p.rid!);
       const team = teamForRun(run).load();
       const agent = str(body, 'agent');
       const message = str(body, 'message');
       const requested = (body as { delivery?: unknown }).delivery;
       const delivery: DeliveryMode = requested === 'steer' || requested === 'interrupt' ? requested : 'queue';
-      if (store.isLive(run)) return chat({ store, runner, team, runId: run.id, agent, message, delivery, connections });
+      if (!team.agents[agent]) throw new BadRequest(`team ${team.name} has no member "${agent}"`);
+      // Files sent with the message go to a folder of their own in the run's.
+      const ids = uploadIds(body);
+      const attachments = ids.length ? takeUploads(ids, project.path, run.id, `chat-${Date.now()}`) : [];
+      if (store.isLive(run)) return chat({ store, runner, team, runId: run.id, agent, message, delivery, connections, attachments });
       if (!store.getSession(run.id, agent)) throw new BadRequest(`${agent} has not worked on this run yet, so there is no conversation to continue. Ask it a question instead.`);
       const key = `${run.id}/${agent}`;
       if (answering.has(key)) {
         // It is answering an earlier message: hand this one to it while it works.
         const mode: DeliveryMode = delivery === 'interrupt' ? 'interrupt' : 'steer';
-        const m = store.enqueue(run.id, agent, 'human', message, mode);
-        store.append(run.id, { type: 'message.queued', agent, step: 'chat', data: { id: m.id, to: agent, from: 'human', text: message, mode } });
+        const m = store.enqueue(run.id, agent, 'human', withFiles(message, attachments), mode);
+        store.append(run.id, { type: 'message.queued', agent, step: 'chat', data: { id: m.id, to: agent, from: 'human', text: message, mode, ...(attachments.length ? { attachments } : {}) } });
         return { mode: 'queued', messageId: m.id, delivery: mode };
       }
       answering.add(key);
       // The answer streams in as events; don't hold the request open for it.
-      void chat({ store, runner, team, runId: run.id, agent, message, connections })
+      void chat({ store, runner, team, runId: run.id, agent, message, connections, attachments })
         .catch((err) => store.append(run.id, { type: 'agent.error', agent, step: 'chat', data: { ok: false, error: (err as Error).message } }))
         .finally(() => answering.delete(key));
       return { mode: 'answering' };
@@ -1111,7 +1123,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     ['POST', '/api/ask', async (_p, body) => {
       const project = library.project(str(body, 'project'));
       const team = library.load(str(body, 'team'));
-      const { runId, done } = await ask({ store: storeFor(project), runner, team, repo: project.path, agent: str(body, 'agent'), question: str(body, 'question'), connections });
+      const ids = uploadIds(body);
+      const { runId, done } = await ask({ store: storeFor(project), runner, team, repo: project.path, agent: str(body, 'agent'), question: str(body, 'question'), connections, attach: ids.length ? (rid) => takeUploads(ids, project.path, rid) : undefined });
       done.catch(() => undefined);
       return { runId, projectId: project.id };
     }],
@@ -1287,7 +1300,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const team = teamForRun(run).load();
       const keep = run.branch && (await exec('git', ['rev-parse', '--verify', '--quiet', `${run.branch}^{commit}`], { cwd: project.path }).then(() => true, () => false));
       if (run.branch && !keep) throw new BadRequest(`branch ${run.branch} no longer exists, so there is no result to build on`);
-      const started = await launch(project, team, feedbackGoal(run.goal, list.items, note), run.branch ?? undefined);
+      const started = await launch(project, team, feedbackGoal(run.goal, list.items, note), run.branch ?? undefined, { uploads: uploadIds(body) });
       writeFeedback(project.path, run.id, { items: [], sent: [...list.sent, { runId: started.runId, at: new Date().toISOString(), count: list.items.length }] });
       store.append(run.id, { type: 'feedback.sent', data: { run_id: started.runId, count: list.items.length } });
       return started;
@@ -1304,6 +1317,16 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const launched = await openInBrowser(file);
       if (!launched) throw new BadRequest(`could not open ${path}: no app on this computer opens it`);
       return { path: file, copy, launched };
+    }],
+    // ---- files people gave a run
+    ['GET', '/api/runs/:pid/:rid/attachment', (p, _b, q) => {
+      const { project, run } = findRun(p.pid!, p.rid!);
+      const rel = relPath(q.get('path') ?? '');
+      if (!rel) throw new BadRequest('"path" names a file given to the run');
+      const file = join(attachmentsDir(project.path, run.id), rel);
+      if (!existsSync(file) || !statSync(file).isFile()) throw new NotFound(`${rel} is not one of the run's files`);
+      if (statSync(file).size > 64 << 20) throw new BadRequest(`${rel} is too large to show here; open it from ${file}`);
+      return new Raw(readFileSync(file), SITE_MIME[extname(file).toLowerCase()] ?? 'application/octet-stream');
     }],
     ['GET', '/api/runs/:pid/:rid/diff', async (p): Promise<DiffResult> => {
       const { project, run } = findRun(p.pid!, p.rid!);
@@ -1352,6 +1375,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         return await streamBrowser(pid!, rid!, agent!, req, res);
       }
 
+      // A file for a goal, a question or a chat message: raw bytes, streamed to disk (it can be footage).
+      if (url.pathname === '/api/uploads' && req.method === 'POST') {
+        return send(res, 200, await saveUpload(url.searchParams.get('name') ?? 'file', req));
+      }
+
       // A recording from the mic button, or a piece of one (?session=…): raw WAV, not JSON (it can be minutes long).
       if (url.pathname === '/api/voice/transcribe' && req.method === 'POST') {
         return send(res, 200, await voice.transcribe(await readRaw(req, 64 << 20), url.searchParams.get('session') ?? undefined));
@@ -1384,7 +1412,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           ? 409
           : err instanceof NotFound
             ? 404
-            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof McpAuthError || err instanceof BackendError || err instanceof VoiceError || err instanceof AppError || err instanceof AppConfigError
+            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof McpAuthError || err instanceof BackendError || err instanceof VoiceError || err instanceof AppError || err instanceof AppConfigError || err instanceof AttachmentError
               ? 400
               : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;
@@ -1605,4 +1633,13 @@ function serveStatic(root: string, pathname: string, res: ServerResponse) {
   const immutable = file.includes(`${sep}assets${sep}`);
   res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream', 'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache' });
   res.end(readFileSync(file));
+}
+
+/** The uploads a request names (see /api/uploads): `attachments`, a list of ids. */
+function uploadIds(body: unknown): string[] {
+  const list = (body as { attachments?: unknown } | null)?.attachments;
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) throw new BadRequest('"attachments" is a list of upload ids');
+  if (list.length > 50) throw new BadRequest('at most 50 files at a time');
+  return list as string[];
 }

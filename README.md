@@ -54,6 +54,7 @@ To try the UI in a browser instead, run `covibe app`.
 |---|---|
 | **Home** | Today's and this week's estimated spend, tokens, members working now, run outcomes, gate pass rate; your plan's 5-hour and weekly usage as Claude Code reports it, with reset countdowns (also at the bottom of the sidebar); spend per day and per team member; live runs and recent ones. Give a new goal or ask a question right there (⌘N anywhere). |
 | **Run** | Every member with its status (working, done, has messages, stopped), what it is doing right now, and its cost. Tabs: **Office** (the team as a pixel office: a desk and name plate per member; they sleep when idle, type when working, raise a hand when they ask the lead or you, and wait with hands off the keyboard while the run is paused; a member driving a browser gets a browser button above its desk that opens its browser live, or what it saw (see [Preview and live browser](#preview-and-live-browser)); click a desk for the member's details, chat and activity), **Plan** (the manager's plan, readable: its summary and every task by owner with what "done" means and how far that member is; below it, the requests members made of each other and every other step's latest report, such as the review's findings; called **Reports** when the team has no planning step), **Board** (a column per workflow step, a card per member and fix round, gate results; a card on a teammate's request says whose), **Chat** (one thread per member), **Activity** (the full timeline, with problems pinned on top), **Changes** (the diff of the result branch), **Preview** (the result's files: web pages open as a site you can click through, videos and audio play, images and PDFs show, Markdown is rendered, office files open in Word, Excel or PowerPoint, everything else shows as text; see [Feedback on the result](#feedback-on-the-result)), **App** (the project's app running in the sandbox or in Docker, to use live; see [Running the app](#running-the-app)). Stop a run, start a **new goal on this result**, or **send feedback**: comments you pinned on a moment of a video, an area of an image, a passage or an element of a page or the app, sent as a new goal. When a run succeeds, covibe asks what to do with its result: **merge** it into your branch (and push), **open a pull request**, or just **push** the branch (**Ship result** brings that back later). |
+| **Files** | Give the team images and documents with a goal, a question or a chat message: the paperclip, drop them on the box, or paste a screenshot (see [Files for the team](#files-for-the-team)). |
 | **Voice input** | A mic button next to the goal box and every chat: talk, and the text appears in the box. It runs on your Mac with whisper.cpp, or uses OpenAI or ElevenLabs (see [Voice input](#voice-input)). |
 | **Chat** | While a member is working, choose **Now** (it reads your message between tool calls and adjusts), **Stop and redirect** (it ends its current turn and answers you first) or **Next turn**. After the run, the member resumes its session and answers right away; anything it changes is scope-checked and merged into the run's branch. |
 | **Ask a question** | A read-only session with one member in your project: it can read the code but not change it. Follow-up questions continue the same session. |
@@ -127,10 +128,10 @@ Your checkout is never touched. The result lands on the branch `covibe/<run-id>`
 | Command | What it does |
 |---|---|
 | `covibe validate [team.yaml]` | Strict YAML parse, JSON Schema validation and cross-reference checks |
-| `covibe run [team.yaml] --goal "…"` | Run the workflow. Exit code 0 = succeeded, 2 = escalated to you, 1 = failed |
+| `covibe run [team.yaml] --goal "…" [--attach <file>…]` | Run the workflow, with files for the members. Exit code 0 = succeeded, 2 = escalated to you, 1 = failed |
 | `covibe runs` | List recent runs in this repository |
 | `covibe log <run> [--follow] [--json]` | Print a run's event log. `--json` prints the raw events, one per line |
-| `covibe chat <run> <agent> <message…> [--now \| --interrupt]` | Talk to an agent (see [Chat](#chat)) |
+| `covibe chat <run> <agent> <message…> [--now \| --interrupt] [--attach <file>…]` | Talk to an agent (see [Chat](#chat)) |
 | `covibe answer <run> [<question> <answer…>]` | Answer a member's question; without a question id, list the ones waiting for you (see [Questions](#questions)) |
 | `covibe changes <run>` | List what a run in a [plain folder](#plain-folders) changed, and who changed it |
 | `covibe undo <run>` | Put a plain folder back the way it was before a run |
@@ -502,6 +503,30 @@ on an escalated run.
 Teammates' `send_message` messages use the same inbox, in steer mode: a working teammate reads them between tool
 calls.
 
+## Files for the team
+
+Give members images, documents, footage or data with a goal, a question, a chat message (also while a member works)
+or your feedback: click the paperclip, drop files on the box, or paste a screenshot. On the command line, add
+`--attach <file>` (as often as you like) to `covibe run` and `covibe chat`.
+
+The files are kept with the run, outside the project (`~/.covibe/attachments/<project>/<run>/`), so they are never
+committed, and every member of the run may read that folder. What members read names each file and where it is:
+
+```
+# Goal
+Rebuild the landing page to match the mockup and use our logo
+
+The human attached 2 files with the goal:
+- ~/.covibe/attachments/shop-1a2b3c4d5e/20261030-070353-ffaa/mockup.png (image, 412 KB)
+- ~/.covibe/attachments/shop-1a2b3c4d5e/20261030-070353-ffaa/logo.svg (image, 3 KB)
+```
+
+Members look at images and PDFs with the Read tool, which shows them as they are; office documents with the `docx`,
+`xlsx` or `pptx` skill; video and audio with ffprobe and ffmpeg. To use a file in the project (a logo, a photo), a
+member with a shell copies it in. The run shows the files given with its goal under its header, and the ones you
+sent in chat with your messages. A run restarted after a limit gets its goal's files again. Uploads are at most 1 GB
+each, and ones never sent are removed after a day.
+
 ## Voice input
 
 The mic button sits next to the goal box (⌘N), member chats, team chat and the git helper. Click it and talk:
@@ -867,6 +892,7 @@ src/apps/                  running a project's app: what to run (config.ts), the
                            (launcher.ts, policy.ts), sandbox and Docker processes, state and logs (manager.ts), members'
                            tools (tools.ts), the view the App tab shows it through (view.ts)
 src/server/feedback.ts     comments pinned on a run's result, and the goal that sends them to the team
+src/engine/attachments.ts  files people give a run: uploads, the run's folder outside the project, what members are told
 src/events/store.ts        SQLite runs, events, sessions, inbox, questions, images members saw (node:sqlite, WAL)
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
 src/runner/backend.ts      per-agent environment for each backend

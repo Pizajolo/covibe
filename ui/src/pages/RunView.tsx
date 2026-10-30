@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { desktop, get, post, type ChatItem, type DiffResult, type RunDetail, type RunEvent, type RunSummary, type UndoResult } from '../api';
+import { desktop, get, post, type ChatItem, type SentFile, type DiffResult, type RunDetail, type RunEvent, type RunSummary, type UndoResult } from '../api';
 import { Composer } from '../components/Composer';
 import { MicButton, withSpoken } from '../components/MicButton';
+import { AttachButton, AttachmentChips, SentFiles, useAttachments } from '../components/Attachments';
 import { deskNote, DeskPill, deskState, OfficeLegend, OfficeStage, Portrait, questionDesk, useFigures, type DeskState } from '../components/Office';
 import {
   IconAlert,
@@ -113,6 +114,8 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
     setChatWith(agent);
     setTab('chat');
   };
+  // The files given with the goal (or question).
+  const goalFiles = (detail.events.find((e) => e.type === 'run.started')?.data.attachments as SentFile[] | undefined) ?? [];
   // The app's latest state, from its events.
   const appEvent = [...detail.events].reverse().find((e) => e.type.startsWith('app.'));
   const appRunning = appEvent?.type === 'app.ready' || appEvent?.type === 'app.starting';
@@ -167,6 +170,12 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
               </span>
             )}
           </div>
+          {goalFiles.length > 0 && !isAsk && (
+            <div className="row wrap" style={{ gap: 8 }}>
+              <span className="tiny faint">Given with the goal:</span>
+              <SentFiles projectId={projectId} runId={run.id} files={goalFiles} compact />
+            </div>
+          )}
           <LimitBanner run={run} projectId={projectId} onChange={reload} />
           <Banner run={run} />
           {!isAsk && tab !== 'office' && (
@@ -841,6 +850,7 @@ function Chat({ detail, projectId, selected, onSelect, onSent, single }: { detai
   const working = state?.status === 'working' || answering;
   const [text, setText] = useState('');
   const [choice, setChoice] = useState<Delivery | null>(null);
+  const files = useAttachments();
   const toast = useToast();
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -851,9 +861,10 @@ function Chat({ detail, projectId, selected, onSelect, onSent, single }: { detai
   const delivery: Delivery = working ? (choice ?? 'steer') : 'queue';
 
   const [send, sending] = useAction(async () => {
-    if (!agent || !text.trim()) return;
-    const res = await post<{ mode: string; delivery?: Delivery }>(`/api/runs/${projectId}/${run.id}/chat`, { agent, message: text.trim(), delivery });
+    if (!agent || !text.trim() || files.uploading || files.failed) return;
+    const res = await post<{ mode: string; delivery?: Delivery }>(`/api/runs/${projectId}/${run.id}/chat`, { agent, message: text.trim(), delivery, attachments: files.ids });
     setText('');
+    files.clear();
     if (res.mode === 'queued') toast(DELIVERY[res.delivery ?? 'queue'].toast(agent));
     onSent();
   });
@@ -881,7 +892,7 @@ function Chat({ detail, projectId, selected, onSelect, onSent, single }: { detai
       <div className="chat-main">
         <div className="thread">
           {!items.length && <Empty icon={<IconChat />} title={`Nothing from ${agent} yet`}>Its messages, tool use and your conversation show up here.</Empty>}
-          <ThreadItems items={items} />
+          <ThreadItems items={items} projectId={projectId} runId={run.id} />
           {working && (
             <div className="note-line row" style={{ gap: 6 }}>
               <IconSpinner width={12} height={12} /> {agent} is {state?.activity && !answering ? state.activity : 'thinking'}…
@@ -889,7 +900,8 @@ function Chat({ detail, projectId, selected, onSelect, onSent, single }: { detai
           )}
           <div ref={end} />
         </div>
-        <div className="chat-input">
+        <div className={`chat-input ${files.dragging ? 'drop-target' : ''}`} {...files.drop}>
+          <AttachmentChips files={files} />
           <div className="box">
             <textarea
               value={text}
@@ -907,9 +919,11 @@ function Chat({ detail, projectId, selected, onSelect, onSent, single }: { detai
                   void send();
                 }
               }}
+              onPaste={files.onPaste}
             />
+            {(hasSession || queueMode) && <AttachButton files={files} title={`Send ${agent} images or documents (or drop them here, or paste an image)`} />}
             <MicButton disabled={!hasSession && !queueMode} onText={(t) => setText((prev) => withSpoken(prev, t))} />
-            <button className="btn primary icon-btn" disabled={!text.trim() || sending} onClick={() => void send()} aria-label="Send" style={{ borderRadius: 14 }}>
+            <button className="btn primary icon-btn" disabled={!text.trim() || sending || files.uploading || files.failed} onClick={() => void send()} aria-label="Send" style={{ borderRadius: 14 }}>
               <IconSend />
             </button>
           </div>
@@ -949,7 +963,7 @@ function Chat({ detail, projectId, selected, onSelect, onSent, single }: { detai
 }
 
 /** Messages as bubbles; runs of tool calls collapse into one line. */
-function ThreadItems({ items }: { items: ChatItem[] }) {
+function ThreadItems({ items, projectId, runId }: { items: ChatItem[]; projectId: string; runId: string }) {
   const groups = useMemo(() => {
     const out: (ChatItem | ChatItem[])[] = [];
     for (const it of items) {
@@ -968,7 +982,10 @@ function ThreadItems({ items }: { items: ChatItem[] }) {
           <ToolGroup key={`t${g[0]!.id}`} items={g} />
         ) : g.kind === 'human' ? (
           <div key={g.id} className="col" style={{ gap: 2, alignItems: 'flex-end' }}>
-            <div className={`msg human ${g.pending ? 'pending' : ''}`}>{g.text}</div>
+            <div className={`msg human ${g.pending ? 'pending' : ''}`}>
+              {g.text}
+              {g.attachments && <SentFiles projectId={projectId} runId={runId} files={g.attachments} />}
+            </div>
             <span className="msg-meta right">{g.pending ? DELIVERY[g.delivery ?? 'queue'].pending : clock(g.ts)}</span>
           </div>
         ) : g.kind === 'agent' ? (

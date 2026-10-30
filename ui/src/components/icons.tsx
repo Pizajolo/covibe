@@ -51,3 +51,4 @@ export const IconEye = base(<><path d="M1.8 8S4 3.8 8 3.8 14.2 8 14.2 8 12 12.2 
 export const IconPlug = base(<><path d="M6 2v3M10 2v3" /><path d="M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0z" /><path d="M8 11v3" /></>);
 export const IconMic = base(<><rect x="6" y="1.8" width="4" height="8" rx="2" /><path d="M3.8 7.5a4.2 4.2 0 0 0 8.4 0M8 11.7v2.5M5.8 14.2h4.4" /></>);
 export const IconShield = base(<path d="M8 1.8 13 3.8V8c0 2.9-2.1 5.1-5 6.2C5.1 13.1 3 10.9 3 8V3.8z" />);
+export const IconClip = base(<path d="M13 7.6 8.1 12.5a3.2 3.2 0 0 1-4.6-4.6l5.3-5.3a2.1 2.1 0 0 1 3 3l-5.3 5.3a1 1 0 0 1-1.5-1.5L9.7 4.7" />);

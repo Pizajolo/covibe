@@ -389,6 +389,17 @@ export interface ChatItem {
   pending?: boolean;
   /** How a human message is delivered: next turn, while working, or by interrupting. */
   delivery?: 'queue' | 'steer' | 'interrupt';
+  /** Files sent with a human message. */
+  attachments?: SentFile[];
+}
+
+/** A file a person gave a run (see engine/attachments.ts). */
+export interface SentFile {
+  name: string;
+  /** Where it is on this computer. */
+  path: string;
+  size: number;
+  kind: 'image' | 'pdf' | 'video' | 'audio' | 'document' | 'text' | 'file';
 }
 
 /** A member as the team file defines it (member details in the office). */

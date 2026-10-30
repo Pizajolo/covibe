@@ -78,8 +78,8 @@ describe('project brain', () => {
     const t = team();
     const runner = new ScriptedRunner({
       builder: (inv) => {
-        // Everyone reads the brain and is told how it works.
-        expect(inv.readDirs).toEqual([brainRoot(repo)]);
+        // Everyone reads the brain and is told how it works (and the files given to the run).
+        expect(inv.readDirs).toEqual([brainRoot(repo), expect.stringMatching(/\/attachments\/.+\/\d{8}-\d{6}-[0-9a-f]{4}$/)]);
         expect(inv.systemPrompt).toContain('# Project brain');
         expect(inv.systemPrompt).toContain('README.md: Project brain');
         expect(inv.systemPrompt).toContain('librarian curates the brain');
