@@ -275,8 +275,14 @@ refuses it, and passes everything else through as it is. If renewing fails, the 
 in again. Signing out (or deleting the plugin) forgets the tokens, and members go back to the server's own
 address. covibe signs in to servers on https (or on this computer) that use MCP's streamable HTTP transport.
 
-covibe normally registers itself with the server's sign-in service. Some services do not allow that and say so
-when you click **Sign in** (GitHub and Slack, for example). For those, create an OAuth app in the service's
+covibe normally registers itself with the server's sign-in service. Services that do not allow that but accept a
+*client metadata document* (ElevenLabs, for example) are signed in to with covibe's instead: its address is
+covibe's client id, the service reads covibe's name and callback (`http://127.0.0.1:47815/callback`) from it, and
+nothing needs setting up. The document is [`docs/oauth/client-metadata.json`](docs/oauth/client-metadata.json),
+fetched from this repository on GitHub; to publish a copy elsewhere, set `COVIBE_CLIENT_METADATA_URL` to its https
+address and make its `client_id` that same address.
+
+Other services allow neither and say so when you click **Sign in** (GitHub and Slack, for example). For those, create an OAuth app in the service's
 developer settings with the callback address `http://127.0.0.1:47815/callback`, then enter its client id (and
 secret, if it has one) under **Use your own OAuth app** on the plugin's page. The id is kept in
 `~/.covibe/mcp-clients.json` and the secret with your keys.

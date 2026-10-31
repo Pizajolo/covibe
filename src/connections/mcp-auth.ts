@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
-import { auth, extractWWWAuthenticateParams, type OAuthClientProvider, type OAuthDiscoveryState } from '@modelcontextprotocol/sdk/client/auth.js';
+import { auth, discoverOAuthServerInfo, extractWWWAuthenticateParams, type OAuthClientProvider, type OAuthDiscoveryState } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { covibeHome } from '../home.js';
 import { defaultSecrets, type SecretStore } from './secrets.js';
@@ -15,9 +15,12 @@ import { defaultSecrets, type SecretStore } from './secrets.js';
 // reaches the server through covibe's local proxy (mcp-proxy.ts), which adds
 // the token and refreshes it.
 //
-// Some servers do not let covibe register itself. For those you create an
-// OAuth app in the service's developer settings, with CALLBACK_URL as its
-// callback, and give covibe its client id (and secret, if it has one).
+// Some servers do not let covibe register itself. Those that take a client
+// metadata document instead (ElevenLabs's, say) get covibe's: its address is
+// the client id, and the server reads covibe's name and callback from it.
+// For the rest you create an OAuth app in the service's developer settings,
+// with CALLBACK_URL as its callback, and give covibe its client id (and
+// secret, if it has one).
 
 export class McpAuthError extends Error {}
 
@@ -44,6 +47,31 @@ interface IndexEntry {
 /** The callback address of sign-ins with your own OAuth app: it must match what the app has registered. */
 export const CALLBACK_PORT = 47815;
 export const CALLBACK_URL = `http://127.0.0.1:${CALLBACK_PORT}/callback`;
+
+/**
+ * Where covibe's client metadata document is published: servers that take one
+ * (instead of registering covibe) use this address as covibe's client id and
+ * fetch it. It must be public https, and the document's client_id must be this
+ * address exactly (see clientMetadataDocument). COVIBE_CLIENT_METADATA_URL
+ * points at a copy published elsewhere.
+ */
+export const DEFAULT_CLIENT_METADATA_URL = 'https://raw.githubusercontent.com/Pizajolo/covibe/main/docs/oauth/client-metadata.json';
+
+export function clientMetadataUrl(): string {
+  return process.env.COVIBE_CLIENT_METADATA_URL?.trim() || DEFAULT_CLIENT_METADATA_URL;
+}
+
+/** covibe's client metadata document, to publish at `url`: sign-ins with it come back to CALLBACK_URL. */
+export function clientMetadataDocument(url = clientMetadataUrl()) {
+  return {
+    client_id: url,
+    client_name: 'covibe',
+    redirect_uris: [CALLBACK_URL],
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none',
+  };
+}
 
 /** Your own OAuth app for a server (no secret: that stays with the keys). */
 export interface McpClientStatus {
@@ -217,6 +245,8 @@ class Client implements OAuthClientProvider {
     private readonly server: string,
     private readonly saved: Saved,
     private readonly stateValue?: string,
+    /** Set when the server takes covibe's client metadata document instead of registering it. */
+    readonly clientMetadataUrl?: string,
   ) {}
 
   get redirectUrl() {
@@ -337,20 +367,23 @@ export async function startSignIn(plugin: string, server: string, serverUrl: str
   const need = await probe(serverUrl);
   if (!need.needed) return { done: Promise.resolve() };
 
-  // With your own OAuth app the callback address is fixed (the app has it registered); otherwise any free port.
   const own = ownClient(plugin, server);
+  // Without your own app, a server that takes a client metadata document gets covibe's.
+  const metadataUrl = own ? undefined : await takesMetadataDocument(serverUrl, need.resourceMetadataUrl).then((yes) => (yes ? clientMetadataUrl() : undefined));
+  // With your own OAuth app or covibe's metadata document the callback address is fixed (it is registered there); otherwise any free port.
+  const fixed = !!own || !!metadataUrl;
   const callback = createServer();
   await new Promise<void>((resolve, reject) => {
     callback.once('error', (err: NodeJS.ErrnoException) =>
-      reject(err.code === 'EADDRINUSE' && own ? new McpAuthError(`port ${CALLBACK_PORT} for the sign-in callback is in use (another sign-in in progress?); try again in a moment`) : err),
+      reject(err.code === 'EADDRINUSE' && fixed ? new McpAuthError(`port ${CALLBACK_PORT} for the sign-in callback is in use (another sign-in in progress?); try again in a moment`) : err),
     );
-    callback.listen(own ? CALLBACK_PORT : 0, '127.0.0.1', () => resolve());
+    callback.listen(fixed ? CALLBACK_PORT : 0, '127.0.0.1', () => resolve());
   });
-  const redirectUrl = own ? CALLBACK_URL : `http://127.0.0.1:${(callback.address() as AddressInfo).port}/callback`;
+  const redirectUrl = fixed ? CALLBACK_URL : `http://127.0.0.1:${(callback.address() as AddressInfo).port}/callback`;
   const state = randomBytes(24).toString('base64url');
   // Registered afresh for this callback address: some servers hold a client to the exact address it registered.
   const saved: Saved = { serverUrl, redirectUrl, ...(own ? { client: own } : {}) };
-  const client = new Client(plugin, server, saved, state);
+  const client = new Client(plugin, server, saved, state, metadataUrl);
   const options = { serverUrl, resourceMetadataUrl: need.resourceMetadataUrl, scope: need.scope };
   let first: Awaited<ReturnType<typeof auth>>;
   try {
@@ -419,6 +452,17 @@ export async function startSignIn(plugin: string, server: string, serverUrl: str
   });
 
   return { url: client.authorizationUrl.href, done };
+}
+
+/** Whether the server's authorization server takes a client metadata document as the client id. */
+async function takesMetadataDocument(serverUrl: string, resourceMetadataUrl?: URL): Promise<boolean> {
+  try {
+    const info = await discoverOAuthServerInfo(serverUrl, { resourceMetadataUrl });
+    return info.authorizationServerMetadata?.client_id_metadata_document_supported === true;
+  } catch {
+    // auth() discovers again and reports what went wrong.
+    return false;
+  }
 }
 
 function close(server: Server) {
