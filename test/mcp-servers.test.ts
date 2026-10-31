@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { CALLBACK_URL, clientStatus, setClient, signInStatus, startSignIn } from '../src/connections/mcp-auth.js';
+import { CALLBACK_URL, DEFAULT_CLIENT_METADATA_URL, clientMetadataDocument, clientStatus, setClient, signInStatus, startSignIn } from '../src/connections/mcp-auth.js';
 import { mcpProxyUrl, startMcpProxy, stopMcpProxy } from '../src/connections/mcp-proxy.js';
 import { pluginKeys, readKeys } from '../src/connections/plugin-keys.js';
 import { parseMcpInput, splitCommand } from '../src/mcp-config.js';
@@ -191,5 +191,75 @@ describe('signing in with your own OAuth app', () => {
     deletePlugin('workspace');
     expect(clientStatus('workspace', 'workspace')).toEqual({ hasSecret: false, callbackUrl: CALLBACK_URL });
     server.close();
+  });
+});
+
+describe('signing in with covibe\'s client metadata document', () => {
+  it('publishes the document the default client id points at', () => {
+    expect(JSON.parse(readFileSync(join(import.meta.dirname, '..', 'docs', 'oauth', 'client-metadata.json'), 'utf8'))).toEqual(clientMetadataDocument(DEFAULT_CLIENT_METADATA_URL));
+  });
+
+  it('uses the document\'s address as the client id when the server takes one instead of registering covibe', async () => {
+    const metadataUrl = 'https://example.com/covibe/client-metadata.json';
+    process.env.COVIBE_CLIENT_METADATA_URL = metadataUrl;
+    const tokenRequests: URLSearchParams[] = [];
+    const readBody = async (req: IncomingMessage) => {
+      let s = '';
+      for await (const c of req) s += c;
+      return s;
+    };
+    const server = createServer(async (req, res) => {
+      const url = new URL(req.url!, base);
+      const json = (status: number, body: unknown, headers: Record<string, string> = {}) => {
+        res.writeHead(status, { 'content-type': 'application/json', ...headers });
+        res.end(JSON.stringify(body));
+      };
+      if (url.pathname === '/mcp') {
+        await readBody(req);
+        return json(401, { error: 'unauthorized' }, { 'www-authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/mcp"` });
+      }
+      if (url.pathname.startsWith('/.well-known/oauth-protected-resource')) return json(200, { resource: `${base}/mcp`, authorization_servers: [base] });
+      if (url.pathname === '/.well-known/oauth-authorization-server')
+        // No registration_endpoint, but a client metadata document will do: like ElevenLabs's.
+        return json(200, {
+          issuer: base,
+          authorization_endpoint: `${base}/authorize`,
+          token_endpoint: `${base}/token`,
+          response_types_supported: ['code'],
+          code_challenge_methods_supported: ['S256'],
+          token_endpoint_auth_methods_supported: ['none'],
+          client_id_metadata_document_supported: true,
+        });
+      if (url.pathname === '/authorize') {
+        expect(url.searchParams.get('client_id')).toBe(metadataUrl);
+        expect(url.searchParams.get('redirect_uri')).toBe(CALLBACK_URL);
+        const back = new URL(url.searchParams.get('redirect_uri')!);
+        back.searchParams.set('code', 'the-code');
+        back.searchParams.set('state', url.searchParams.get('state')!);
+        res.writeHead(302, { location: back.href });
+        return res.end();
+      }
+      if (url.pathname === '/token') {
+        tokenRequests.push(new URLSearchParams(await readBody(req)));
+        return json(200, { access_token: 'access-1', token_type: 'Bearer', expires_in: 3600, refresh_token: 'refresh-1' });
+      }
+      json(404, {});
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      addMcpServer({ config: `${base}/mcp`, name: 'voices' }, POLICY);
+      const { url, done } = await startSignIn('voices', 'voices', signInTarget('voices', 'voices'));
+      expect(await (await fetch(url!)).text()).toContain('Signed in');
+      await done;
+      expect(signInStatus('voices', 'voices').signedIn).toBe(true);
+      expect(tokenRequests[0]!.get('client_id')).toBe(metadataUrl);
+      expect(tokenRequests[0]!.get('redirect_uri')).toBe(CALLBACK_URL);
+      deletePlugin('voices');
+    } finally {
+      delete process.env.COVIBE_CLIENT_METADATA_URL;
+      server.close();
+    }
   });
 });
