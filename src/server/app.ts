@@ -118,6 +118,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const library = opts.library ?? new Library();
   const runner = opts.runner ?? new ClaudeSdkRunner();
   const connections = opts.connections ?? new Connections(library.home);
+  library.providerFor ??= (model) => connections.providerFor(model);
   const voice = opts.voice ?? new Voice(library.home, connections.secrets, connections);
   if (runner.usage && !connections.usageReader) connections.usageReader = (env) => runner.usage!(env);
   const token = opts.token ?? randomBytes(24).toString('hex');

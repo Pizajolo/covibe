@@ -22,6 +22,12 @@ import { stopMcpProxy } from './connections/mcp-proxy.js';
 import { listPlugins, signInTarget } from './plugins.js';
 
 /** Accounts and providers from Settings → Advanced, shared with the app. */
+/** Team files resolve models that only a provider offers against the connections in Settings → Advanced. */
+const withProviders = () => {
+  const connections = new Connections();
+  return { providerFor: (model: string) => connections.providerFor(model) };
+};
+
 function openConnections(runner: ClaudeSdkRunner): Connections {
   const connections = new Connections();
   connections.usageReader = (env) => runner.usage(env);
@@ -157,7 +163,7 @@ function openStore(repo: string | undefined) {
 }
 
 function validate(file: string | undefined): number {
-  const team = loadTeam(teamPath(file));
+  const team = loadTeam(teamPath(file), withProviders());
   console.log(green(`✓ ${team.file}`));
   console.log(`  team ${bold(team.name)}: ${Object.keys(team.agents).length} agents, ${team.steps.length} steps, isolation ${team.isolation}, max ${team.maxParallel} in parallel`);
   for (const a of Object.values(team.agents)) {
@@ -171,7 +177,7 @@ function validate(file: string | undefined): number {
 }
 
 async function run(file: string | undefined, values: { repo?: string; goal?: string; 'goal-file'?: string; attach?: string[] }): Promise<number> {
-  const team = loadTeam(teamPath(file));
+  const team = loadTeam(teamPath(file), withProviders());
   const goal = values['goal-file'] ? readFileSync(values['goal-file'], 'utf8').trim() : values.goal;
   if (!goal) throw new Error('run needs --goal "<what to build>" or --goal-file <path>');
 
@@ -448,7 +454,7 @@ async function chatCommand(args: string[], repo: string | undefined, delivery: D
   try {
     const run = store.findRun(id);
     if (!run) throw new Error(`run ${id} not found`);
-    const team = loadTeam(run.teamFile);
+    const team = loadTeam(run.teamFile, withProviders());
     const live = store.isLive(run);
     const unsubscribe = live ? () => {} : store.subscribe((e) => e.type !== 'agent.text' && !QUIET_EVENTS.has(e.type) && console.log(formatEvent(e)));
     try {
