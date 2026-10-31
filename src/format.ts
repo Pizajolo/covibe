@@ -163,6 +163,9 @@ export function formatEvent(e: RunEvent): string {
     case 'run.restarted':
       text = green(`↻ restarted as run ${d.run_id}`);
       break;
+    case 'run.continued':
+      text = green(`▶ continued from step ${d.from_step}${d.kind === 'round' ? ` with another fix round (${d.loop})` : ''}`);
+      break;
     case 'run.restart_scheduled':
       text = dim(`↻ restart scheduled for ${new Date(String(d.at)).toLocaleString()}`);
       break;

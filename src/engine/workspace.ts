@@ -48,6 +48,12 @@ export async function isGitRepo(dir: string): Promise<boolean> {
  */
 export class Workspace {
   private agentDirs = new Map<string, string>();
+  /**
+   * Continuing a stopped run: a member's folder may hold the unfinished work
+   * of its turn, which can be in the way of bringing it up to date. Then it
+   * keeps its own work and is brought up to date when that work is merged.
+   */
+  resuming = false;
   private lock: Promise<unknown> = Promise.resolve();
 
   private constructor(
@@ -135,7 +141,14 @@ export class Workspace {
         await git(this.repo, ['worktree', 'add', '-q', '-b', this.agentBranch(agent), dir, this.branch!]);
         this.agentDirs.set(agent, dir);
       } else {
-        await git(dir, ['merge', '-q', '--no-edit', this.branch!], commitEnv('covibe'));
+        // Cleaned up since (an earlier run being continued): check its branch out again.
+        if (!existsSync(dir)) await this.addExisting(dir, this.agentBranch(agent));
+        try {
+          await git(dir, ['merge', '-q', '--no-edit', this.branch!], commitEnv('covibe'));
+        } catch (err) {
+          if (!this.resuming) throw err;
+          await git(dir, ['merge', '--abort']).catch(() => undefined);
+        }
       }
       return dir;
     });

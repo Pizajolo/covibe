@@ -97,6 +97,13 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
     await reload();
   });
 
+  const [carryOn, continuing] = useAction(async () => {
+    await post(`/api/runs/${projectId}/${runId}/continue`);
+    toast('Continuing where the run stopped.');
+    await reload();
+    await refresh();
+  });
+
   const [stop, stopping] = useAction(async () => {
     await post(`/api/runs/${projectId}/${runId}/stop`);
     toast('Stopping… the current turn is cancelled.');
@@ -127,6 +134,11 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
         {run.status === 'running' && detail.canStop && (
           <button className="btn danger" onClick={() => void stop()} disabled={stopping}>
             <IconStop /> Stop
+          </button>
+        )}
+        {canContinue(run) && (
+          <button className="btn primary" onClick={() => void carryOn()} disabled={continuing} title="Run the step it stopped in again: its members pick up where they left off, finished steps are kept">
+            <IconPlay /> Continue
           </button>
         )}
         {!isAsk && run.status !== 'running' && run.branch && !run.worktreesRemoved && (
@@ -177,7 +189,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
               <SentFiles projectId={projectId} runId={run.id} files={goalFiles} compact />
             </div>
           )}
-          <LimitBanner run={run} projectId={projectId} onChange={reload} />
+          <LimitBanner run={run} projectId={projectId} onChange={reload} onContinue={carryOn} continuing={continuing} />
           <Banner run={run} />
           {!isAsk && tab !== 'office' && (
             <div className="members">
@@ -304,7 +316,12 @@ function QuestionsWaiting({ run, projectId }: { run: RunSummary; projectId: stri
 }
 
 /** The plan's usage limit: a countdown while members wait for the reset, or restarting a run it stopped. */
-function LimitBanner({ run, projectId, onChange }: { run: RunSummary; projectId: string; onChange: () => Promise<unknown> }) {
+/** A workflow run that stopped (an error, Stop, a limit) or ran out of fix rounds: it can carry on where it stopped. */
+function canContinue(run: RunSummary): boolean {
+  return run.kind === 'workflow' && (run.status === 'failed' || run.status === 'escalated') && !run.restart?.runId;
+}
+
+function LimitBanner({ run, projectId, onChange, onContinue, continuing }: { run: RunSummary; projectId: string; onChange: () => Promise<unknown>; onContinue: () => unknown; continuing: boolean }) {
   const toast = useToast();
   const [restart, restarting] = useAction(async (when: 'now' | 'reset' | 'cancel') => {
     const res = await post<{ runId?: string; at?: string }>(`/api/runs/${projectId}/${run.id}/restart`, { when });
@@ -357,7 +374,7 @@ function LimitBanner({ run, projectId, onChange }: { run: RunSummary; projectId:
             Restarts on its own in <strong className="num">{countdown(run.restart.at)}</strong>, from this run's result.
           </>
         ) : (
-          'Restart it to carry on from its result (the branch keeps what the team committed).'
+          'Continue it to pick up where it stopped, or restart the goal from its result (the branch keeps what the team committed).'
         )}
       </div>
       {!run.restart?.runId && (
@@ -374,8 +391,11 @@ function LimitBanner({ run, projectId, onChange }: { run: RunSummary; projectId:
               </button>
             )
           )}
-          <button className="btn sm primary" disabled={restarting} onClick={() => void restart('now')}>
+          <button className="btn sm" disabled={restarting} onClick={() => void restart('now')}>
             Restart now
+          </button>
+          <button className="btn sm primary" disabled={continuing} onClick={() => void onContinue()}>
+            Continue now
           </button>
         </div>
       )}
@@ -390,8 +410,8 @@ function Banner({ run }: { run: RunSummary }) {
       <div className="banner warn">
         <IconAlert />
         <div>
-          <strong>The fix loop ran out of rounds.</strong> {run.reason}. Open <em>Chat</em> to tell a member what to do (it resumes with full memory), or start a
-          new goal on this result.
+          <strong>The fix loop ran out of rounds.</strong> {run.reason}. <em>Continue</em> gives it one more round, or open <em>Chat</em> to tell a member what to do
+          first (it resumes with full memory), or start a new goal on this result.
         </div>
       </div>
     );
@@ -400,7 +420,12 @@ function Banner({ run }: { run: RunSummary }) {
       <div className="banner bad">
         <IconX />
         <div>
-          <strong>The run stopped.</strong> {run.reason ?? 'See Activity for details.'}
+          <strong>The run stopped.</strong> {run.reason ?? 'See Activity for details.'}{' '}
+          {run.kind === 'workflow' && (
+            <span className="faint">
+              <em>Continue</em> runs the step it stopped in again: its members pick up where they left off. Tell a member something first in <em>Chat</em> if it needs it.
+            </span>
+          )}
         </div>
       </div>
     );
@@ -739,6 +764,7 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'run.restart_scheduled': return { cls: '', text: `Restart scheduled for ${new Date(String(d.at)).toLocaleString()}` };
     case 'run.restart_cancelled': return { cls: '', text: d.error ? `Restart failed: ${d.error}` : 'Restart cancelled' };
     case 'run.restarted': return { cls: 'good', text: `Restarted as run ${d.run_id}` };
+    case 'run.continued': return { cls: 'good', text: d.kind === 'round' ? `Continued: another fix round from step ${d.from_step}` : `Continued from step ${d.from_step}` };
     case 'agent.view': return { cls: 'tool', text: `Looked at ${d.file ? String(d.file).split('/').pop() : `an image from ${d.tool}`}` };
     case 'scope.denied': return { cls: 'warn', text: `Blocked ${d.tool}: ${d.reason}` };
     case 'scope.violation': return { cls: 'warn', text: d.kept ? `Changed outside its write scope (left in your folder; Undo changes reverts it): ${(d.files as string[]).join(', ')}` : `Discarded out-of-scope changes: ${(d.files as string[]).join(', ')}` };
@@ -956,6 +982,7 @@ function Chat({ detail, projectId, selected, onSelect, onSent, single }: { detai
                 : run.folder
                   ? `${agent} answers now. It resumes its session with full memory; file changes it makes go straight into your folder, and Undo changes covers them too.`
                   : `${agent} answers now. It resumes its session with full memory; file changes it makes are merged into ${run.branch ?? 'the run'}.${run.worktreesRemoved ? ' Its worktree was cleaned up and is restored first.' : ''}`}
+            {canContinue(run) && ' This is a side conversation: the run stays stopped. Use Continue (top right) to carry the workflow on from where it stopped.'}
           </span>
         </div>
       </div>

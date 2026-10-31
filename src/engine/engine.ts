@@ -66,6 +66,10 @@ export interface RunContext {
 
 class StepError extends Error {}
 
+/** Before the task, for a member whose step was cut short and is now continued. */
+const RESUME_NOTE =
+  'The run stopped while you were working on this step, and the human has continued it. What you did before it stopped is still in your working folder and, if your conversation was kept, above. Pick up where you left off: check what is already done, finish the rest, and report as the step asks. Do not start over.\n\n';
+
 /** The plan's usage limit stopped a member and the run stops (onLimit: stop). */
 class LimitError extends StepError {
   constructor(
@@ -137,6 +141,114 @@ export async function startRun(opts: RunOptions): Promise<{ runId: string; done:
   return { runId, done: new Engine(opts, runId, workspace, attachments).run() };
 }
 
+/** Where a stopped run picks up again (see resumePoint). */
+export interface ResumePoint {
+  /** Index of the step to run first. */
+  index: number;
+  /** Step outputs, loop and feedback as they were. */
+  context: RunContext;
+  maxLoops?: number;
+  /** In a parallel step: the branches that already finished, with their reports. */
+  done: Record<string, unknown>;
+  /** The step was cut short (its members pick up where they stopped), or a gate ran out of rounds (one more fix round). */
+  kind: 'step' | 'round';
+  /** Why the run had stopped. */
+  reason?: string;
+  costUsd: number;
+}
+
+/**
+ * Work out from a run's events where it stopped: the step that was cut short,
+ * or, when a gate ran out of fix rounds, one more round from the gate's
+ * on_gate_fail step. Undefined when there is nothing to continue.
+ */
+export async function resumePoint(team: TeamConfig, events: { type: string; step?: string | null; agent?: string | null; data: Record<string, unknown> }[]): Promise<ResumePoint | undefined> {
+  const context: RunContext = { goal: '', loop: 0, feedback: {} };
+  let maxLoops: number | undefined;
+  let started: string | undefined;
+  let open = false;
+  let done: Record<string, unknown> = {};
+  let failedGate: string | undefined;
+  let status: string | undefined;
+  let reason: string | undefined;
+  let costUsd = 0;
+  for (const e of events) {
+    const d = e.data;
+    switch (e.type) {
+      case 'run.started':
+        context.goal = String(d.goal ?? '');
+        break;
+      case 'step.started':
+        started = e.step ?? undefined;
+        open = true;
+        done = {};
+        failedGate = undefined;
+        if (typeof d.loop === 'number') context.loop = d.loop;
+        break;
+      case 'step.branch_finished':
+        if (e.step === started && e.agent) done[e.agent] = d.output;
+        break;
+      case 'step.finished':
+        if (e.step) context[e.step] = d.output;
+        if (e.step === started) open = false;
+        break;
+      case 'gate.failed':
+        failedGate = e.step ?? undefined;
+        break;
+      case 'loop.goto':
+        context.loop = Number(d.loop ?? context.loop);
+        context.feedback = (d.feedback as Record<string, unknown>) ?? {};
+        if (typeof d.max_loops === 'number') maxLoops = d.max_loops;
+        failedGate = undefined;
+        break;
+      case 'run.finished':
+        status = String(d.status ?? '');
+        reason = typeof d.reason === 'string' ? d.reason : undefined;
+        if (typeof d.cost_usd === 'number') costUsd = d.cost_usd;
+        break;
+    }
+  }
+  if (status === 'succeeded') return undefined;
+  const at = (id: string | undefined) => team.steps.findIndex((s) => s.id === id);
+  if (started && open && at(started) >= 0) return { index: at(started), context, maxLoops, done, kind: 'step', reason, costUsd };
+  if (failedGate) {
+    const step = team.steps[at(failedGate)];
+    const policy = step?.onGateFail;
+    if (policy && at(policy.goto) >= 0) {
+      const feedback: Record<string, unknown> = {};
+      for (const expr of policy.feed) feedback[expr] = (await evaluate(expr, context)) ?? null;
+      return { index: at(policy.goto), context: { ...context, loop: context.loop + 1, feedback }, maxLoops: Math.max(policy.maxLoops, context.loop + 1), done: {}, kind: 'round', reason, costUsd };
+    }
+    // No fix loop: run the gated step again.
+    if (step) return { index: at(failedGate), context, maxLoops, done: {}, kind: 'step', reason, costUsd };
+  }
+  // Stopped before any step (a member's account or plugin was not set up), or between steps.
+  if (!started) return { index: 0, context, maxLoops, done: {}, kind: 'step', reason, costUsd };
+  const next = at(started) + 1;
+  return next < team.steps.length ? { index: next, context, maxLoops, done: {}, kind: 'step', reason, costUsd } : undefined;
+}
+
+/**
+ * Carry on a stopped run where it stopped, in the same run: its workspace,
+ * branch and members' conversations. The step that was cut short runs again
+ * and its members resume their sessions; finished steps keep their reports.
+ */
+export async function continueRun(opts: Omit<RunOptions, 'goal' | 'base' | 'uploads' | 'files'> & { runId: string }): Promise<{ runId: string; done: Promise<RunOutcome> }> {
+  const run = opts.store.getRun(opts.runId);
+  if (!run) throw new Error(`run ${opts.runId} not found`);
+  if (run.kind !== 'workflow') throw new Error('only workflow runs can be continued');
+  if (opts.store.isLive(run)) throw new Error('this run is still going');
+  const events = opts.store.events(run.id);
+  const from = await resumePoint(opts.team, events);
+  if (!from) throw new Error(run.status === 'succeeded' ? 'this run finished; start a new goal to carry on from its result' : 'there is nothing left to continue in this run');
+  const attachments = (events.find((e) => e.type === 'run.started')?.data.attachments as Attachment[] | undefined) ?? [];
+  const workspace = await Workspace.attach(run.repo, run.id, run.branch ? opts.team.isolation : 'none', run.branch, writersOf(opts.team));
+  if (run.branch) await workspace.restore(workspace.integrationDir);
+  workspace.resuming = true;
+  opts.store.reopenRun(run.id);
+  return { runId: run.id, done: new Engine({ ...opts, goal: run.goal }, run.id, workspace, attachments, from).run() };
+}
+
 /** The members that change files, and where (for a plain folder's record of changes). */
 export function writersOf(team: TeamConfig): Writer[] {
   return Object.values(team.agents)
@@ -175,17 +287,24 @@ class Engine {
   private maxLoops: number | undefined;
   /** The goal as members read it: with the files the human attached. */
   private readonly goalText: string;
+  /** Continuing a run: members of the step that was cut short, told on their first turn to pick up where they stopped. */
+  private resumeNotes = new Set<string>();
 
   constructor(
     private readonly opts: RunOptions,
     private readonly runId: string,
     private readonly workspace: Workspace,
     private readonly attachments: Attachment[] = [],
+    /** Set when continuing a stopped run. */
+    private readonly from?: ResumePoint,
   ) {
     this.goalText = attachments.length ? `${opts.goal}\n\n${attachmentNote(attachments)}` : opts.goal;
     this.team = opts.team;
     this.store = opts.store;
-    this.context = { goal: opts.goal, loop: 0, feedback: {} };
+    this.context = from ? { ...from.context, goal: opts.goal } : { goal: opts.goal, loop: 0, feedback: {} };
+    this.maxLoops = from?.maxLoops;
+    this.costUsd = from?.costUsd ?? 0;
+    if (from?.kind === 'step') this.resumeNotes = new Set(this.stepAgents(this.team.steps[from.index]!));
     this.slots = new Semaphore(this.team.maxParallel);
     this.pause = new RunPause((paused, questions) =>
       this.emit(paused ? { type: 'run.paused', data: { questions } } : { type: 'run.resumed', data: {} }),
@@ -202,7 +321,11 @@ class Engine {
     await ensureBrain(this.workspace.repo).catch(() => undefined);
     // Signed-in plugin servers are reached through it (see mcp-proxy.ts).
     await startMcpProxy().catch(() => undefined);
-    this.emit({
+    const from = this.from;
+    if (from) {
+      const step = steps[from.index]!;
+      this.emit({ type: 'run.continued', step: step.id, data: { from_step: step.id, loop: this.context.loop, kind: from.kind, reason: from.reason ?? null, done: Object.keys(from.done) } });
+    } else this.emit({
       type: 'run.started',
       data: {
         team: this.team.name,
@@ -230,7 +353,7 @@ class Engine {
           throw new StepError(`${a.name}: ${(err as Error).message}`);
         }
       }
-      let i = 0;
+      let i = from?.index ?? 0;
       while (i < steps.length) {
         this.opts.signal?.throwIfAborted();
         const step = steps[i]!;
@@ -303,13 +426,22 @@ class Engine {
     }
 
     const output: Record<string, unknown> = {};
+    // Continuing a run: branches that finished before it stopped keep their reports.
+    const done = this.from && this.team.steps[this.from.index] === step && this.context.loop === this.from.context.loop ? this.from.done : {};
     const runBranch = async (b: Branch) => {
+      if (b.agent in done) {
+        output[b.agent] = done[b.agent];
+        this.emit({ type: 'step.skipped', step: step.id, agent: b.agent, data: { reason: 'finished before the run stopped' } });
+        return;
+      }
       const task = b.task ? await evaluate(b.task, this.context) : undefined;
       if (b.task && (task == null || (Array.isArray(task) && task.length === 0))) {
         this.emit({ type: 'step.skipped', step: step.id, agent: b.agent, data: { reason: 'no task', task_expr: b.task } });
         return;
       }
       output[b.agent] = await this.invoke(b.agent, step, task, b.outputSchema);
+      // Kept so a run that stops in this step can continue without this branch.
+      this.emit({ type: 'step.branch_finished', step: step.id, agent: b.agent, data: { loop: this.context.loop, output: clipReport(output[b.agent]) } });
     };
     // Let every branch finish (and merge its work) before reporting a failure.
     const results = await Promise.allSettled(step.branches.map(runBranch));
@@ -324,8 +456,9 @@ class Engine {
     await this.pause.wait(this.opts.signal);
     const release = await this.slots.acquire();
     try {
+      const note = this.resumeNotes.delete(agent.name) ? RESUME_NOTE : '';
       const result = await this.work(agent, step.id, outputSchema, (messages) =>
-        turnPrompt({
+        note + turnPrompt({
           goal: this.goalText,
           stepId: step.id,
           loop: this.context.loop,
@@ -456,6 +589,10 @@ class Engine {
       releaseMember();
       unclaim();
     }
+  }
+
+  private stepAgents(step: Step): string[] {
+    return step.kind === 'agent' ? [step.agent] : step.branches.map((b) => b.agent);
   }
 
   private member(name: string): Semaphore {
