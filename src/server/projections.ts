@@ -602,7 +602,7 @@ export function computeStats(
 }
 
 /** The events notifications come from. */
-export const NOTIFY_EVENTS = ['question.asked', 'question.escalated', 'question.answered', 'usage.limit', 'agent.limited', 'run.finished'];
+export const NOTIFY_EVENTS = ['question.asked', 'question.escalated', 'question.answered', 'usage.limit', 'agent.limited', 'run.finished', 'goal.checked'];
 
 const LIMIT_WINDOWS: Record<string, string> = {
   five_hour: '5-hour',
@@ -657,6 +657,8 @@ export function collectNotifications(
         if (limits.has(key)) continue;
         limits.add(key);
         add('limit', { title: 'Waiting for the plan limit to reset', body: run ? `${run.goal}: continues on its own${d.until ? ' after the reset' : ''}.` : undefined });
+      } else if (e.type === 'goal.checked' && d.verdict === 'needs_info') {
+        add('question', { title: 'Questions before the team starts', body: run?.goal, goalId: Number(d.goal_id) });
       } else if (e.type === 'run.finished' && run?.kind === 'workflow') {
         if (d.status === 'succeeded') add('done', { title: 'Job done', body: run.goal });
         else if (d.limit) add('stopped', { title: 'Stopped by the plan limit', body: run.goal });

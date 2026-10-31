@@ -107,7 +107,8 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
   if (error) return <><Toolbar title="Run" /><div className="content"><div className="banner bad"><IconAlert />{error}</div></div></>;
   if (!detail) return <Toolbar title="Loading…" />;
   const run = detail.summary;
-  const isAsk = run.kind === 'ask';
+  // A question, or a backlog goal's check: one member, read-only.
+  const isAsk = run.kind === 'ask' || run.kind === 'check';
   const tab: Tab = (['office', 'plan', 'board', 'activity', 'chat', 'changes', 'preview', 'app'].includes(tabParam ?? '') ? tabParam : isAsk ? 'chat' : 'office') as Tab;
   const setTab = (t: Tab) => go('runs', projectId, runId, t);
   const openChat = (agent: string) => {
@@ -122,7 +123,7 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
 
   return (
     <FeedbackProvider projectId={projectId} run={run}>
-      <Toolbar title={run.goal} sub={`${isAsk ? 'Question for' : 'Team'} ${run.team} · ${run.projectName} · started ${new Date(run.startedAt).toLocaleString()}`}>
+      <Toolbar title={run.goal} sub={`${run.kind === 'check' ? 'Backlog check by' : isAsk ? 'Question for' : 'Team'} ${run.team} · ${run.projectName} · started ${new Date(run.startedAt).toLocaleString()}`}>
         {run.status === 'running' && detail.canStop && (
           <button className="btn danger" onClick={() => void stop()} disabled={stopping}>
             <IconStop /> Stop
@@ -950,7 +951,7 @@ function Chat({ detail, projectId, selected, onSelect, onSent, single }: { detai
             <IconInfo />
             {queueMode || answering
               ? DELIVERY[delivery].help(agent)
-              : run.kind === 'ask'
+              : run.kind === 'ask' || run.kind === 'check'
                 ? `${agent} answers now, read-only, and remembers this conversation.`
                 : run.folder
                   ? `${agent} answers now. It resumes its session with full memory; file changes it makes go straight into your folder, and Undo changes covers them too.`

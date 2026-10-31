@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -11,7 +11,8 @@ import type { TeamConfig } from '../config/types.js';
 import { acceptIntoNote, brainLog, BrainError, curate, deleteNote, ensureBrain, listNotes, readNote, writeNote } from '../engine/brain.js';
 import { ask, chat } from '../engine/chat.js';
 import { cleanupWorktrees, worktreeReport } from '../engine/cleanup.js';
-import { buildInvocation, newRunId, startRun } from '../engine/engine.js';
+import { checkGoal, goalFilesKey, goalPrompt } from '../engine/backlog.js';
+import { buildInvocation, newRunId, startRun, type RunOutcome } from '../engine/engine.js';
 import { folderDiff, isFolderRun, undoFolderRun } from '../engine/folder.js';
 import { answerQuestion } from '../engine/questions.js';
 import { GithubError } from '../github.js';
@@ -44,10 +45,10 @@ import { ARCHITECT, design } from './designer.js';
 import { Approvals, GIT_HELPER, gitHelp, helperThread } from './git-helper.js';
 import { GitError } from '../engine/workspace.js';
 import { EventStore } from '../events/store.js';
-import type { DeliveryMode, RunEvent, RunRecord } from '../events/types.js';
+import type { DeliveryMode, Goal, RunEvent, RunRecord } from '../events/types.js';
 import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
-import type { AccountInfo, AppViewInfo, ConnectionsInfo, DiffResult, FeedbackList, MemberInfo, OpenedFile, PreviewSite, RunApp, RunAppSettings, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UndoResult, UsageReport } from './api-types.js';
+import type { AccountInfo, AppViewInfo, BacklogSettings, BacklogState, BacklogView, ConnectionsInfo, GoalView, DiffResult, FeedbackList, MemberInfo, OpenedFile, PreviewSite, RunApp, RunAppSettings, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UndoResult, UsageReport } from './api-types.js';
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
 import * as gitops from './gitops.js';
 import { GitProblem, gitOverview, gitShow } from './gitops.js';
@@ -258,7 +259,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
 
   const summary = (project: Project, run: RunRecord, events?: RunEvent[], roster = rosters()): RunSummary => {
     const store = storeFor(project);
-    return summarizeRun(run, events ?? store.events(run.id), project, store.isLive(run), run.kind === 'ask' ? [] : (roster.get(run.team) ?? []), busyIn(run.id));
+    return summarizeRun(run, events ?? store.events(run.id), project, store.isLive(run), run.kind === 'ask' || run.kind === 'check' ? [] : (roster.get(run.team) ?? []), busyIn(run.id));
   };
 
   const allRuns = (limit: number, projectId?: string): RunSummary[] => {
@@ -267,7 +268,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     for (const p of library.projects()) {
       if (projectId && p.id !== projectId) continue;
       if (!existsSync(p.path)) continue;
-      for (const r of storeFor(p).listRuns(limit)) out.push(summary(p, r, undefined, roster));
+      // Backlog checks show with their goal, not as runs of their own.
+      for (const r of storeFor(p).listRuns(limit)) if (r.kind !== 'check') out.push(summary(p, r, undefined, roster));
     }
     return out.sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, limit);
   };
@@ -316,13 +318,19 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     ((store.events(runId).find((e) => e.type === 'run.started')?.data.attachments as Attachment[] | undefined) ?? []);
 
   /** Start a goal in the background and keep its stop handle. */
-  const launch = async (project: Project, team: TeamConfig, goal: string, base?: string, files: { uploads?: string[]; files?: string[] } = {}) => {
+  const launch = async (project: Project, team: TeamConfig, goal: string, base?: string, files: { uploads?: string[]; files?: string[] } = {}, after?: (outcome: RunOutcome | undefined) => void) => {
     const controller = new AbortController();
     const onLimit = library.settings().onLimit ?? 'wait';
     const { runId, done } = await startRun({ team, repo: project.path, goal, store: storeFor(project), runner, signal: controller.signal, base, onLimit, connections, ...files });
     const key = `${project.id}/${runId}`;
     active.set(key, controller);
-    done.catch(() => undefined).finally(() => active.delete(key));
+    done
+      .then((outcome) => after?.(outcome), () => after?.(undefined))
+      .finally(() => {
+        active.delete(key);
+        // The team is free again: the backlog's next goal may start.
+        kickBacklog(project);
+      });
     return { runId, projectId: project.id };
   };
 
@@ -371,6 +379,227 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   };
   const restartTimer = setInterval(() => void restartDue().catch((err) => console.error(err)), 30_000);
   restartTimer.unref();
+
+  // ---- backlogs: goals lined up per project, checked first, then worked off one at a time (see engine/backlog.ts)
+
+  /** Checks in progress (`${project}/${goal}`), so an edit can stop an outdated one and a restart picks up unfinished ones. */
+  const checks = new Map<string, AbortController>();
+  /** Projects whose next goal waits for plan usage to come down. */
+  const usageWaits = new Map<string, Extract<BacklogState, { kind: 'waiting' }>>();
+
+  /** Tell the app a backlog changed (on the live feed only), and see whether its next goal can start. */
+  const backlogChanged = (project: Project) => {
+    const line = `event: run-event\ndata: ${JSON.stringify({ projectId: project.id, event: { id: 0, runId: '', ts: new Date().toISOString(), type: 'backlog.changed', data: {} } })}\n\n`;
+    for (const res of sse) res.write(line);
+    kickBacklog(project);
+  };
+
+  const findGoal = (pid: string, gid: string) => {
+    const project = library.project(pid);
+    const store = storeFor(project);
+    const goal = store.getGoal(Number(gid));
+    if (!goal) throw new NotFound(`goal ${gid} not found`);
+    return { project, store, goal };
+  };
+
+  /** The run working on a goal right now, if any. */
+  const liveRunOf = (store: EventStore, goal: Goal): RunRecord | undefined => {
+    if (goal.state !== 'started') return undefined;
+    const run = goal.runs.length ? store.getRun(goal.runs.at(-1)!) : undefined;
+    return run && store.isLive(run) ? run : undefined;
+  };
+
+  /** Look a goal over, or let it straight through when checks are off. Replaces a check of an earlier version of the goal. */
+  const checkGoalNow = (project: Project, goal: Goal) => {
+    const store = storeFor(project);
+    const key = `${project.id}/${goal.id}`;
+    checks.get(key)?.abort();
+    checks.delete(key);
+    const mode = library.backlog(project.id).check;
+    if (mode === 'off') {
+      store.updateGoal(goal.id, { state: 'ready', check: { verdict: 'skipped', at: new Date().toISOString() } });
+      return backlogChanged(project);
+    }
+    let team: TeamConfig;
+    try {
+      team = library.load(goal.team);
+    } catch (err) {
+      store.updateGoal(goal.id, { state: 'ready', check: { verdict: 'failed', error: (err as Error).message, at: new Date().toISOString() } });
+      return backlogChanged(project);
+    }
+    const controller = new AbortController();
+    checks.set(key, controller);
+    store.updateGoal(goal.id, { state: 'checking' });
+    backlogChanged(project);
+    void checkGoal({ store, runner, team, repo: project.path, goal, mode, connections, signal: controller.signal })
+      .then((check) => {
+        // Edited, removed or sent on meanwhile: this check is about an older goal.
+        const now = store.getGoal(goal.id);
+        if (checks.get(key) !== controller || !now || now.state !== 'checking') return;
+        store.updateGoal(goal.id, { state: check.verdict === 'needs_info' ? 'needs_info' : 'ready', check });
+      })
+      .catch((err) => console.error(err))
+      .finally(() => {
+        if (checks.get(key) === controller) checks.delete(key);
+        backlogChanged(project);
+      });
+  };
+
+  /**
+   * Whether plan usage holds the backlog back: every Claude account the team's
+   * members could use is at or above the threshold. Undefined = go ahead (also
+   * when usage is not known, or the team is not on a subscription).
+   */
+  const usageGate = async (team: TeamConfig): Promise<Extract<BacklogState, { kind: 'waiting' }> | undefined> => {
+    const max = library.settings().backlogMaxUsage;
+    if (max === null) return undefined;
+    const members = Object.values(team.agents).filter((a) => a.backend.type === 'subscription');
+    if (!members.length) return undefined;
+    const report = await usageAll();
+    const claude = (report.accounts ?? []).filter((a) => a.kind === 'claude');
+    const usageOf = new Map<string, { usage: Omit<UsageReport, 'accounts' | 'balance'>; label?: string }>([[MAIN_ACCOUNT, { usage: report }], ...claude.map((a) => [a.id, { usage: a.usage, label: a.label }] as const)]);
+    const ids = new Set<string>();
+    for (const m of members) {
+      if (m.backend.account) ids.add(m.backend.account);
+      else {
+        ids.add(MAIN_ACCOUNT);
+        if (report.balance) for (const a of claude) ids.add(a.id);
+      }
+    }
+    let soonest: Extract<BacklogState, { kind: 'waiting' }> | undefined;
+    for (const id of ids) {
+      const known = usageOf.get(id);
+      if (!known) return undefined;
+      const over = known.usage.windows.filter((w) => w.window !== 'overage' && (w.status === 'rejected' || (w.utilization ?? 0) * 100 >= max));
+      // This account has room.
+      if (!over.length) return undefined;
+      // It frees up when the last of its full windows resets.
+      const last = over.reduce((a, b) => ((b.resetsAt ?? '') > (a.resetsAt ?? '') ? b : a));
+      const wait = { kind: 'waiting' as const, ...(last.resetsAt ? { until: last.resetsAt } : {}), window: last.window, label: last.label, used: Math.round((last.utilization ?? 1) * 100), ...(known.label ? { account: known.label } : {}) };
+      if (!soonest || (wait.until && (!soonest.until || wait.until < soonest.until))) soonest = wait;
+    }
+    return soonest;
+  };
+
+  /** Where a goal starts from: the last backlog result that succeeded and is not in your branch yet, else your branch. */
+  const chainBase = async (project: Project, store: EventStore): Promise<string | undefined> => {
+    if (project.kind === 'folder' || !library.backlog(project.id).chain) return undefined;
+    const done = store
+      .goals()
+      .flatMap((g) => g.runs.map((id) => store.getRun(id)))
+      .filter((r): r is RunRecord => !!r && r.status === 'succeeded' && !!r.branch)
+      .sort((a, b) => (b.finishedAt ?? '').localeCompare(a.finishedAt ?? ''))[0];
+    if (!done?.branch) return undefined;
+    const exists = await exec('git', ['rev-parse', '--verify', '--quiet', `${done.branch}^{commit}`], { cwd: project.path }).then(() => true, () => false);
+    if (!exists) return undefined;
+    const merged = await exec('git', ['merge-base', '--is-ancestor', done.branch, 'HEAD'], { cwd: project.path }).then(() => true, () => false);
+    return merged ? undefined : done.branch;
+  };
+
+  /** Start a run on a goal, for the backlog or because you asked (which works while it is paused or waiting too). */
+  const startGoal = async (project: Project, goal: Goal) => {
+    const store = storeFor(project);
+    if (liveRunOf(store, goal)) throw new BadRequest('this goal is being worked on already');
+    let team: TeamConfig;
+    try {
+      team = library.load(goal.team);
+    } catch (err) {
+      store.updateGoal(goal.id, { state: 'needs_info', check: { ...(goal.check ?? { verdict: 'failed' as const }), error: `It could not start: ${(err as Error).message}`, at: new Date().toISOString() } });
+      backlogChanged(project);
+      throw err;
+    }
+    const files = goal.attachments.map((a) => a.path).filter((p) => existsSync(p));
+    const started = await launch(project, team, goalPrompt(goal), await chainBase(project, store), { files }, (outcome) => {
+      // Stopping a goal's run pauses the backlog, so the next goal does not start right away.
+      if (outcome?.reason === 'aborted') library.setBacklog(project.id, { auto: false });
+      backlogChanged(project);
+    });
+    store.updateGoal(goal.id, { state: 'started', runs: [...goal.runs, started.runId] });
+    usageWaits.delete(project.id);
+    backlogChanged(project);
+    return started;
+  };
+
+  /** Start the backlog's next goal if the team is free, the backlog is not paused and the plan has room. */
+  const tickBacklog = async (project: Project) => {
+    if (!existsSync(project.path)) return;
+    const store = storeFor(project);
+    const goals = store.goals();
+    // Checks cut short by quitting the app run again.
+    for (const g of goals) if (g.state === 'checking' && !checks.has(`${project.id}/${g.id}`)) checkGoalNow(project, g);
+    const next = goals.find((g) => g.state === 'ready');
+    if (!library.backlog(project.id).auto || !next || goals.some((g) => liveRunOf(store, g))) {
+      if (usageWaits.delete(project.id)) backlogChanged(project);
+      return;
+    }
+    let team: TeamConfig;
+    try {
+      team = library.load(next.team);
+    } catch {
+      // startGoal sets it aside with the reason.
+      return void (await startGoal(project, next).catch(() => undefined));
+    }
+    const wait = await usageGate(team).catch(() => undefined);
+    if (wait) {
+      const before = usageWaits.get(project.id);
+      usageWaits.set(project.id, wait);
+      if (JSON.stringify(before) !== JSON.stringify(wait)) backlogChanged(project);
+      return;
+    }
+    await startGoal(project, next);
+  };
+  /** One look at a project's backlog at a time, so a goal never starts twice. */
+  const kickBacklog = (project: Project) => {
+    void serially(`backlog:${project.id}`, () => tickBacklog(project)).catch((err) => console.error(`backlog ${project.name}:`, err));
+  };
+  const backlogTimer = setInterval(() => {
+    for (const p of library.projects()) kickBacklog(p);
+  }, 20_000);
+  backlogTimer.unref();
+  const backlogFirst = setTimeout(() => {
+    for (const p of library.projects()) kickBacklog(p);
+  }, 1_000);
+  backlogFirst.unref();
+
+  const backlogView = (project: Project): BacklogView => {
+    const store = storeFor(project);
+    const roster = rosters();
+    const settings = library.backlog(project.id);
+    const goals = store.goals().map((g): GoalView => {
+      const run = g.runs.length ? store.getRun(g.runs.at(-1)!) : undefined;
+      const status: GoalView['status'] = g.state !== 'started' ? g.state : !run || store.isLive(run) ? 'running' : run.status === 'running' ? 'failed' : run.status;
+      return { ...g, status, ...(run ? { run: summary(project, run, undefined, roster) } : {}) };
+    });
+    const working = goals.find((g) => g.status === 'running');
+    const state: BacklogState = working
+      ? { kind: 'working', goalId: working.id }
+      : !goals.some((g) => g.status === 'ready')
+        ? { kind: 'idle' }
+        : !settings.auto
+          ? { kind: 'paused' }
+          : (usageWaits.get(project.id) ?? { kind: 'idle' });
+    return { settings, maxUsage: library.settings().backlogMaxUsage, goals, state };
+  };
+
+  /** Goals from a request: `goal` (one, may come with files) or `goals` (several). */
+  const addGoals = (project: Project, body: unknown): BacklogView => {
+    const b = (body ?? {}) as { goal?: unknown; goals?: unknown; team?: unknown };
+    const texts = (Array.isArray(b.goals) ? b.goals : [b.goal]).map((t) => (typeof t === 'string' ? t.trim() : '')).filter(Boolean);
+    if (!texts.length) throw new BadRequest('"goal" is required');
+    if (texts.length > 100) throw new BadRequest('at most 100 goals at a time');
+    const ids = uploadIds(body);
+    if (ids.length && texts.length > 1) throw new BadRequest('files go with one goal at a time');
+    const team = typeof b.team === 'string' && b.team ? b.team : library.backlog(project.id).team;
+    if (!team) throw new BadRequest('"team" is required (or set the backlog\'s team)');
+    library.teamDir(team);
+    const store = storeFor(project);
+    for (const text of texts) {
+      const goal = store.addGoal({ text, team, state: 'checking', attachments: [] });
+      const files = ids.length ? takeUploads(ids, project.path, goalFilesKey(goal.id)) : [];
+      checkGoalNow(project, files.length ? store.updateGoal(goal.id, { attachments: files }) : goal);
+    }
+    return backlogView(project);
+  };
 
   const findRun = (pid: string, rid: string) => {
     const project = library.project(pid);
@@ -1030,6 +1259,95 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     }],
     ['DELETE', '/api/teams/:tid/file', (p, _b, q) => (library.deleteFile(p.tid!, q.get('path') ?? ''), { files: library.files(p.tid!) })],
 
+    // ---- a project's backlog
+    ['GET', '/api/projects/:pid/backlog', (p) => backlogView(library.project(p.pid!))],
+    ['PUT', '/api/projects/:pid/backlog', (p, body) => {
+      const project = library.project(p.pid!);
+      library.setBacklog(project.id, (body ?? {}) as Partial<BacklogSettings>);
+      backlogChanged(project);
+      return backlogView(library.project(project.id));
+    }],
+    ['POST', '/api/projects/:pid/backlog/next', async (p) => {
+      const project = library.project(p.pid!);
+      return serially(`backlog:${project.id}`, async () => {
+        const store = storeFor(project);
+        const goals = store.goals();
+        const working = goals.find((g) => liveRunOf(store, g));
+        if (working) throw new BadRequest('a goal is being worked on; the next one starts when it finishes');
+        const next = goals.find((g) => g.state === 'ready');
+        if (!next) throw new BadRequest('no goal is waiting in the backlog');
+        return startGoal(project, next);
+      });
+    }],
+    ['POST', '/api/projects/:pid/goals', (p, body) => addGoals(library.project(p.pid!), body)],
+    ['PUT', '/api/projects/:pid/goals/:gid', (p, body) => {
+      const { project, store, goal } = findGoal(p.pid!, p.gid!);
+      if (goal.state === 'started') throw new BadRequest('this goal has started; give the team a new goal instead');
+      const b = (body ?? {}) as { text?: unknown; team?: unknown };
+      const text = typeof b.text === 'string' ? b.text.trim() : goal.text;
+      if (!text) throw new BadRequest('the goal is empty');
+      const team = typeof b.team === 'string' && b.team ? b.team : goal.team;
+      library.teamDir(team);
+      const changed = text !== goal.text || team !== goal.team;
+      const updated = store.updateGoal(goal.id, { text, team });
+      // A different goal needs a fresh look.
+      if (changed) checkGoalNow(project, updated);
+      return backlogView(project);
+    }],
+    ['POST', '/api/projects/:pid/goals/:gid/answer', (p, body) => {
+      const { project, store, goal } = findGoal(p.pid!, p.gid!);
+      if (goal.state !== 'needs_info' || !goal.check?.questions?.length) throw new BadRequest('this goal has no questions waiting');
+      const answers = (body as { answers?: unknown }).answers;
+      if (!Array.isArray(answers) || answers.some((a) => typeof a !== 'string')) throw new BadRequest('"answers" is a list of answers, one per question');
+      const questions = goal.check.questions.map((q, i) => ({ ...q, ...((answers[i] as string | undefined)?.trim() ? { answer: (answers[i] as string).trim() } : {}) }));
+      store.updateGoal(goal.id, { state: 'ready', check: { ...goal.check, questions } });
+      backlogChanged(project);
+      return backlogView(project);
+    }],
+    ['POST', '/api/projects/:pid/goals/:gid/check', (p) => {
+      const { project, goal } = findGoal(p.pid!, p.gid!);
+      if (goal.state === 'started') throw new BadRequest('this goal has started already');
+      checkGoalNow(project, goal);
+      return backlogView(project);
+    }],
+    // Into the backlog as it is: questions left open, or a finished goal again.
+    ['POST', '/api/projects/:pid/goals/:gid/queue', (p) => {
+      const { project, store, goal } = findGoal(p.pid!, p.gid!);
+      if (liveRunOf(store, goal)) throw new BadRequest('this goal is being worked on');
+      checks.get(`${project.id}/${goal.id}`)?.abort();
+      checks.delete(`${project.id}/${goal.id}`);
+      store.updateGoal(goal.id, { state: 'ready' });
+      backlogChanged(project);
+      return backlogView(project);
+    }],
+    ['POST', '/api/projects/:pid/goals/:gid/start', (p) => {
+      const { project } = findGoal(p.pid!, p.gid!);
+      return serially(`backlog:${project.id}`, () => {
+        const { goal } = findGoal(p.pid!, p.gid!);
+        checks.get(`${project.id}/${goal.id}`)?.abort();
+        checks.delete(`${project.id}/${goal.id}`);
+        return startGoal(project, goal);
+      });
+    }],
+    ['POST', '/api/projects/:pid/goals/:gid/move', (p, body) => {
+      const { project, store, goal } = findGoal(p.pid!, p.gid!);
+      const index = Number((body as { index?: unknown }).index);
+      if (!Number.isInteger(index)) throw new BadRequest('"index" is the place in the backlog, from 0');
+      store.moveGoal(goal.id, index);
+      backlogChanged(project);
+      return backlogView(project);
+    }],
+    ['DELETE', '/api/projects/:pid/goals/:gid', (p) => {
+      const { project, store, goal } = findGoal(p.pid!, p.gid!);
+      if (liveRunOf(store, goal)) throw new BadRequest('this goal is being worked on; stop its run first');
+      checks.get(`${project.id}/${goal.id}`)?.abort();
+      checks.delete(`${project.id}/${goal.id}`);
+      store.deleteGoal(goal.id);
+      rmSync(attachmentsDir(project.path, goalFilesKey(goal.id)), { recursive: true, force: true });
+      backlogChanged(project);
+      return backlogView(project);
+    }],
+
     ['GET', '/api/runs', (_p, _b, q) => allRuns(Number(q.get('limit') ?? 100), q.get('project') ?? undefined)],
     ['GET', '/api/runs/:pid/:rid', async (p): Promise<RunDetail> => {
       const { project, store, run } = findRun(p.pid!, p.rid!);
@@ -1433,6 +1751,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       clearInterval(keepAlive);
       clearTimeout(autoCleanFirst);
       clearInterval(restartTimer);
+      clearInterval(backlogTimer);
+      clearTimeout(backlogFirst);
+      for (const c of checks.values()) c.abort();
       clearInterval(autoCleanTimer);
       clearInterval(previewSweep);
       clearInterval(viewSweep);

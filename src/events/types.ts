@@ -4,7 +4,8 @@
 export type RunStatus = 'running' | 'succeeded' | 'failed' | 'escalated';
 
 /** A workflow run, or a read-only question session with one agent. */
-export type RunKind = 'workflow' | 'ask' | 'curate' | 'design' | 'git';
+/** check: the lead looking over a backlog goal before it goes to the team (see engine/backlog.ts). */
+export type RunKind = 'workflow' | 'ask' | 'curate' | 'design' | 'git' | 'check';
 
 export type EventType =
   | 'run.started'
@@ -61,7 +62,11 @@ export type EventType =
   | 'app.ready'
   | 'app.failed'
   | 'app.stopped'
-  | 'feedback.sent';
+  | 'feedback.sent'
+  // The check of a backlog goal: ready for the team, or it needs answers from you.
+  | 'goal.checked'
+  // Sent on the live feed only (never stored): a project's backlog changed.
+  | 'backlog.changed';
 
 export interface RunEvent {
   id: number;
@@ -115,6 +120,54 @@ export interface BrainProposal {
   decidedBy?: string;
   decisionNote?: string;
   notePath?: string;
+}
+
+/**
+ * A goal in a project's backlog. checking: the lead (or a faster model) is
+ * looking it over; needs_info: the check has questions for you; ready: waits
+ * its turn; started: a run works on it (its outcome is the run's).
+ */
+/** Who looks a new backlog goal over before it waits its turn: the team lead, the lead on a faster model, or nobody. */
+export type CheckMode = 'lead' | 'fast' | 'off';
+
+export type GoalState = 'checking' | 'needs_info' | 'ready' | 'started';
+
+export interface GoalQuestion {
+  question: string;
+  /** Answers to pick from, when it is a choice. */
+  options?: string[];
+  /** Yours, once you answered. */
+  answer?: string;
+}
+
+export interface GoalCheck {
+  /** failed: the check could not run (the goal goes on without it); skipped: checks are off, or you sent it on as it was. */
+  verdict: 'ready' | 'needs_info' | 'failed' | 'skipped';
+  /** What the team will do, in a sentence or two. */
+  summary?: string;
+  questions?: GoalQuestion[];
+  /** The check's own run (kind "check"), and who made it. */
+  runId?: string;
+  by?: string;
+  error?: string;
+  at: string;
+}
+
+export interface Goal {
+  id: number;
+  text: string;
+  /** The library team that works on it. */
+  team: string;
+  state: GoalState;
+  /** Order in the backlog (lower first). */
+  position: number;
+  /** Files given with the goal, kept until it starts (see engine/attachments.ts). */
+  attachments: { name: string; path: string; size: number; kind: string }[];
+  check?: GoalCheck;
+  /** Runs started for it, oldest first; the last one is its outcome. */
+  runs: string[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface InboxMessage {

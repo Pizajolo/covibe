@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { BrainProposal, DeliveryMode, InboxMessage, NewEvent, ProposalStatus, Question, QuestionStatus, RunEvent, RunRecord, RunStatus } from './types.js';
+import type { BrainProposal, DeliveryMode, Goal, InboxMessage, NewEvent, ProposalStatus, Question, QuestionStatus, RunEvent, RunRecord, RunStatus } from './types.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -80,6 +80,14 @@ CREATE TABLE IF NOT EXISTS views (
   ts TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS views_run ON views(run_id, agent);
+CREATE TABLE IF NOT EXISTS goals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  position REAL NOT NULL,
+  state TEXT NOT NULL,
+  data TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 type Row = Record<string, string | number | null>;
@@ -333,6 +341,53 @@ export class EventStore {
     this.db.prepare("UPDATE questions SET status = 'cancelled' WHERE run_id = ? AND status IN ('lead', 'open')").run(runId);
   }
 
+  // ---- the project's backlog of goals (see engine/backlog.ts)
+
+  addGoal(g: Pick<Goal, 'text' | 'team' | 'state' | 'attachments'> & { check?: Goal['check'] }): Goal {
+    const ts = now();
+    const last = this.db.prepare('SELECT MAX(position) AS p FROM goals').get() as Row;
+    const data: GoalData = { text: g.text, team: g.team, attachments: g.attachments, runs: [], ...(g.check ? { check: g.check } : {}) };
+    const r = this.db
+      .prepare('INSERT INTO goals (position, state, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run(Number(last.p ?? 0) + 1, g.state, JSON.stringify(data), ts, ts);
+    return this.getGoal(Number(r.lastInsertRowid))!;
+  }
+
+  getGoal(id: number): Goal | undefined {
+    const row = this.db.prepare('SELECT * FROM goals WHERE id = ?').get(id) as Row | undefined;
+    return row ? toGoal(row) : undefined;
+  }
+
+  /** Every goal, in backlog order. */
+  goals(): Goal[] {
+    return (this.db.prepare('SELECT * FROM goals ORDER BY position, id').all() as Row[]).map(toGoal);
+  }
+
+  updateGoal(id: number, patch: Partial<Pick<Goal, 'text' | 'team' | 'state' | 'attachments' | 'check' | 'runs'>>): Goal {
+    const current = this.getGoal(id);
+    if (!current) throw new Error(`goal #${id} not found`);
+    const next = { ...current, ...patch };
+    const data: GoalData = { text: next.text, team: next.team, attachments: next.attachments, runs: next.runs, ...(next.check ? { check: next.check } : {}) };
+    this.db.prepare('UPDATE goals SET state = ?, data = ?, updated_at = ? WHERE id = ?').run(next.state, JSON.stringify(data), now(), id);
+    return this.getGoal(id)!;
+  }
+
+  deleteGoal(id: number) {
+    this.db.prepare('DELETE FROM goals WHERE id = ?').run(id);
+  }
+
+  /** Put a goal at `index` of the backlog order (0 = first). */
+  moveGoal(id: number, index: number): Goal[] {
+    const all = this.goals();
+    const from = all.findIndex((g) => g.id === id);
+    if (from < 0) throw new Error(`goal #${id} not found`);
+    const [goal] = all.splice(from, 1);
+    all.splice(Math.max(0, Math.min(all.length, index)), 0, goal!);
+    const set = this.db.prepare('UPDATE goals SET position = ? WHERE id = ?');
+    all.forEach((g, i) => set.run(i + 1, g.id));
+    return this.goals();
+  }
+
   markDelivered(ids: number[]) {
     if (!ids.length) return;
     this.db.prepare(`UPDATE inbox SET delivered_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`).run(now(), ...ids);
@@ -350,6 +405,24 @@ export class EventStore {
     }
     return rows.map((r) => toInbox(r, runId, to));
   }
+}
+
+type GoalData = Pick<Goal, 'text' | 'team' | 'attachments' | 'runs' | 'check'>;
+
+function toGoal(r: Row): Goal {
+  const data = JSON.parse(String(r.data)) as GoalData;
+  return {
+    id: Number(r.id),
+    text: data.text,
+    team: data.team,
+    state: r.state as Goal['state'],
+    position: Number(r.position),
+    attachments: data.attachments ?? [],
+    ...(data.check ? { check: data.check } : {}),
+    runs: data.runs ?? [],
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  };
 }
 
 function toProposal(r: Row): BrainProposal {

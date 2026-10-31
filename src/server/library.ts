@@ -8,7 +8,7 @@ import { isMap, isSeq, parseDocument } from 'yaml';
 import { ConfigError, loadTeam } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
 import { covibeHome } from '../home.js';
-import type { AppSettings, EditOp, NotificationKind, NotifyChoice, Project, TeamFileInfo, TeamListing } from './api-types.js';
+import type { AppSettings, BacklogSettings, EditOp, NotificationKind, NotifyChoice, Project, TeamFileInfo, TeamListing } from './api-types.js';
 
 /**
  * The desktop app's library: the projects (git repositories or plain folders) you work on and
@@ -34,6 +34,10 @@ const DEFAULT_NOTIFY: Record<NotificationKind, NotifyChoice> = {
   error: { bell: true, push: true },
   done: { bell: true, push: true },
 };
+
+/** Backlogs wait for the plan to reset once this much of it is used (percent). */
+const DEFAULT_MAX_USAGE = 90;
+const DEFAULT_BACKLOG: BacklogSettings = { auto: true, check: 'fast', chain: true };
 
 const execAsync = promisify(execFile);
 const TEMPLATES_DIR = new URL('../../examples/', import.meta.url).pathname;
@@ -68,7 +72,7 @@ export class Library {
     const saved = this.read().settings ?? {};
     const notifications = { ...DEFAULT_NOTIFY };
     for (const k of NOTIFICATION_KINDS) notifications[k] = { ...DEFAULT_NOTIFY[k], ...saved.notifications?.[k] };
-    return { autoCleanDays: null, ...saved, notifications };
+    return { autoCleanDays: null, backlogMaxUsage: DEFAULT_MAX_USAGE, ...saved, notifications };
   }
 
   /** Change some settings; notifications merge per kind, so one kind's choice can be sent alone. */
@@ -77,6 +81,8 @@ export class Library {
     const days = patch.autoCleanDays;
     if (days !== undefined && days !== null && (!Number.isFinite(days) || days < 0 || days > 3650)) throw new BadRequest('autoCleanDays must be between 0 and 3650, or null');
     if (patch.onLimit !== undefined && patch.onLimit !== 'wait' && patch.onLimit !== 'stop') throw new BadRequest('onLimit is "wait" or "stop"');
+    const max = patch.backlogMaxUsage;
+    if (max !== undefined && max !== null && (typeof max !== 'number' || !Number.isFinite(max) || max < 1 || max > 100)) throw new BadRequest('backlogMaxUsage is a percentage from 1 to 100, or null');
     const { notifications: notify, ...rest } = patch;
     const next: Partial<AppSettings> = { ...config.settings, ...rest };
     if (notify !== undefined) {
@@ -174,6 +180,41 @@ export class Library {
   defaultParent(): string {
     for (const d of ['Developer', 'Projects', 'Code', 'code', 'src']) if (existsSync(join(homedir(), d))) return join(homedir(), d);
     return join(homedir(), 'Projects');
+  }
+
+  /** How a project's backlog is worked off, with the defaults filled in. */
+  backlog(id: string): BacklogSettings {
+    const saved = this.project(id).backlog ?? {};
+    return { ...DEFAULT_BACKLOG, ...saved };
+  }
+
+  setBacklog(id: string, patch: Partial<BacklogSettings>): BacklogSettings {
+    const config = this.read();
+    const project = config.projects.find((p) => p.id === id);
+    if (!project) throw new NotFound(`project ${id} not found`);
+    const next: Partial<BacklogSettings> = { ...project.backlog };
+    if (patch.auto !== undefined) {
+      if (typeof patch.auto !== 'boolean') throw new BadRequest('auto is true or false');
+      next.auto = patch.auto;
+    }
+    if (patch.chain !== undefined) {
+      if (typeof patch.chain !== 'boolean') throw new BadRequest('chain is true or false');
+      next.chain = patch.chain;
+    }
+    if (patch.check !== undefined) {
+      if (!['lead', 'fast', 'off'].includes(patch.check)) throw new BadRequest('check is "lead", "fast" or "off"');
+      next.check = patch.check;
+    }
+    if (patch.team !== undefined) {
+      if (!patch.team) delete next.team;
+      else {
+        this.teamDir(patch.team);
+        next.team = patch.team;
+      }
+    }
+    project.backlog = next;
+    this.write(config);
+    return this.backlog(id);
   }
 
   removeProject(id: string) {

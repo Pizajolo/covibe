@@ -19,8 +19,8 @@ export type ChatOutcome =
  * while the run is live the message is queued and delivered at the start of
  * the agent's next turn; once the run has ended, the agent's session is
  * resumed and it answers now (and any files it changes are merged into the
- * run's branch, inside its write scope). In a question ("ask") session the
- * agent stays read-only.
+ * run's branch, inside its write scope). In a question ("ask") session, or a
+ * backlog goal's check, the agent stays read-only.
  */
 export async function chat(opts: {
   store: EventStore;
@@ -41,7 +41,8 @@ export async function chat(opts: {
   if (!run) throw new Error(`run ${runId} not found`);
   const configured = team.agents[opts.agent];
   if (!configured) throw new Error(`team ${team.name} has no agent "${opts.agent}"`);
-  const agent = run.kind === 'ask' ? readOnly(configured) : configured;
+  // A question, or a backlog goal's check, stays read-only in follow-ups.
+  const agent = run.kind === 'ask' || run.kind === 'check' ? readOnly(configured) : configured;
 
   const files = opts.attachments ?? [];
   // The member reads the message with where its files are; the log keeps them apart.

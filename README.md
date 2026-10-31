@@ -62,7 +62,7 @@ To try the UI in a browser instead, run `covibe app`.
 | **Team chat** | Describe the team you need and an architect agent sets it up: it reads your project to fit the stack and folders, asks only if something important is unclear, and saves the team through a tool that refuses invalid files and hands the problems back to it. Keep talking to change it ("add a security reviewer", "use haiku for the tester"). Available in New project, New team, and every team's **Chat** tab. |
 | **Skills** | One library of skills for all teams: **write your own**, **add from GitHub** (a repository or a folder; private ones work if git can clone them), or install from **Anthropic's skills**. Claude Code's **built-in skills** are listed too. Give skills to a member, to every member of a team, or mark one **Everyone** to give it to all members of all teams. |
 | **Plugins** | Claude Code plugins (skills, slash commands, agents, hooks, MCP and LSP servers) from **Anthropic's directory** or **any GitHub repository or marketplace**, or **any MCP server** (ElevenLabs, Linear, your own) from its address, command or JSON snippet (see [Adding any MCP server](#adding-any-mcp-server)). Before installing, covibe shows what a plugin runs on your computer and where it sends data, and you choose its sandbox: the websites it may reach and the folders it may write. Every hook and server it runs is confined to that sandbox. Keys its servers need are saved on its page, with covibe's other keys. Give plugins to members like skills. |
-| **Projects** | Each project has **Runs**, **Brain** and **Git** tabs. **Git** works with your checkout (see [The Git tab](#the-git-tab)): fetch, pull, push, stage and commit, stashes, branches local and on the remote, merges and rebases with conflicts resolved file by file, a commit graph to revert, cherry-pick, branch, tag or reset from, remotes, any git command, and a **git helper** to chat with when something is stuck. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
+| **Projects** | Each project has **Runs**, **Backlog**, **Brain** and **Git** tabs. **Backlog** lines goals up: each is checked for anything only you can settle, then the team works them off one after another (see [Backlog](#backlog)). **Git** works with your checkout (see [The Git tab](#the-git-tab)): fetch, pull, push, stage and commit, stashes, branches local and on the remote, merges and rebases with conflicts resolved file by file, a commit graph to revert, cherry-pick, branch, tag or reset from, remotes, any git command, and a **git helper** to chat with when something is stuck. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
 | **Settings → Advanced** | Sign in more **Claude accounts** (each in its own Claude Code folder), turn on **sharing work across them**, sign in **ChatGPT accounts** (the sign-in Codex uses) to put members on OpenAI's models within your ChatGPT plan, and add **model providers** with an API key (DeepSeek, Moonshot, Z.ai, OpenAI, OpenRouter, Groq, a local Ollama, or any Anthropic- or OpenAI-compatible API). Their models then appear in every team's model list. See [Accounts and providers](#accounts-and-providers). |
 | **Brain** | The project's shared notes. Every member reads them before working and can **propose** additions; only the team's **curator** (or you) writes. Review proposals yourself (accept into a new or existing note, or reject) or ask the curator. Edit notes directly; every change is in the brain's own git history. |
 
@@ -693,6 +693,36 @@ instead; its page then offers **Restart now** or **Restart when it resets** (a s
 the app). A restart runs the same goal with the same team, starting from the stopped run's branch so its committed
 work is kept.
 
+## Backlog
+
+Line up several goals for a project and let the team work them off. Add them in the project's **Backlog** tab (or
+with **Add to backlog** in any goal box): one goal, with files if you like, or several at once, one per line.
+
+1. **A check first.** Before a goal waits its turn, the team's lead (a member named `manager`, or the `lead` the team
+   file names; else the first member of the workflow) looks it over, read-only in the project: can the team carry it
+   out as it is, or does something need you? By default the lead does this on Haiku, which is faster and cheaper;
+   choose **the lead** to use its own model, or **nobody** to skip checks. Members on a provider's model check with
+   their own model.
+2. **Questions wait for you.** A goal the check has questions about goes under **Needs you** (and the bell tells
+   you). Pick or write answers and it joins the backlog, with your answers given to the team with the goal. Or add
+   it as it is and let the team decide. Edit a goal and it is checked again. A check that cannot run lets the goal
+   through, with the reason shown.
+3. **Worked off one at a time.** Whenever the team is free on this project, the next goal starts (change the order with the
+   arrows; **Start now** runs any goal right away). In a git project each goal builds on the last goal's result that
+   succeeded, unless you already have it in your branch; turn **Build each goal on the last one's result** off to
+   start each from your branch. A goal whose run failed or ran out of fix rounds stays in the list with **Try
+   again**; the backlog goes on with the next one. Stopping a goal's run pauses the backlog.
+4. **Room on your plan.** The backlog does not start its next goal while your plan's 5-hour or weekly usage is at or
+   above **90%** (Settings → Usage limits, or in the Backlog tab; it applies to every project): it waits for the
+   window to reset and shows when. With several Claude accounts shared, it waits only when none the team could use
+   has room. Teams that are not on your subscription are not held back. **Start next now** starts it anyway, and
+   **Paused** stops goals from starting on their own at all.
+
+Goals and their checks are kept with the project (`<repo>/.covibe/covibe.db`), so the backlog carries on after you
+quit and reopen the app; a check cut short is run again. Each check is a short read-only run of its own, so its
+cost counts like any other; it is not listed under Runs, but **how … got there** next to a goal opens it, and you can
+ask the lead about it there.
+
 ## Preview and live browser
 
 **Preview tab.** Every run has a Preview tab with its files: the result branch as merged so far (or your checkout,
@@ -831,7 +861,7 @@ every comment with where it points, for example:
 ## Notifications
 
 The bell at the top right of the app lists the questions waiting for you and the latest notifications from the past
-week: questions, plan usage close to or at its limit, runs that were stopped or ran out of fix rounds, runs that
+week: questions (including a backlog check's questions about a goal), plan usage close to or at its limit, runs that were stopped or ran out of fix rounds, runs that
 failed, and runs that finished with every gate passed. Choose in Settings → Notifications which of these show under
 the bell and which also go out as system notifications (sent while the app is in the background).
 
@@ -865,7 +895,7 @@ All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event t
 `workspace.cleaned` `brain.proposed` `brain.decided` `brain.updated` `team.saved` `question.asked`
 `question.escalated` `question.answered` `request.sent` `request.done` `git.proposed` `git.ran` `git.skipped` `run.paused` `run.resumed` `run.restart_scheduled` `run.restart_cancelled`
 `run.restarted` `browser.opened` `browser.page` `browser.control` `browser.closed` `app.starting` `app.ready` `app.failed`
-`app.stopped` `feedback.sent`
+`app.stopped` `feedback.sent` `goal.checked`
 
 `agent.finished` carries turns, estimated cost, duration, model and token counts; `usage.limit` carries the plan
 usage Claude Code reports (window, status, utilization, reset time). `message.queued` and `message.delivered` carry
@@ -892,6 +922,7 @@ src/apps/                  running a project's app: what to run (config.ts), the
                            (launcher.ts, policy.ts), sandbox and Docker processes, state and logs (manager.ts), members'
                            tools (tools.ts), the view the App tab shows it through (view.ts)
 src/server/feedback.ts     comments pinned on a run's result, and the goal that sends them to the team
+src/engine/backlog.ts      a project's backlog: checking goals before they start, and the goal the team gets
 src/engine/attachments.ts  files people give a run: uploads, the run's folder outside the project, what members are told
 src/events/store.ts        SQLite runs, events, sessions, inbox, questions, images members saw (node:sqlite, WAL)
 src/runner/claude-sdk.ts   the ONLY module that imports the Agent SDK
@@ -900,7 +931,7 @@ src/connections/           Settings → Advanced: accounts and providers, Keycha
                            signing in to plugin MCP servers (mcp-auth.ts), the proxy that adds the token or key (mcp-proxy.ts),
                            and keys saved for plugin servers (plugin-keys.ts)
                            (Chat Completions; Responses for ChatGPT accounts in codex-proxy.ts, their sign-in in codex-auth.ts)
-src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.0.0.1, token)
+src/server/app.ts          local HTTP API + Server-Sent Events for the app (127.0.0.1, token); works off project backlogs
 src/server/library.ts      projects and teams library, comment-preserving YAML edits
 src/server/projections.ts  events → run summaries, member status, board, chat threads, step reports and the plan, stats,
                            notifications, plan usage

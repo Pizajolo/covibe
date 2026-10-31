@@ -35,7 +35,7 @@ export function NotificationBell() {
     };
   }, [show, markRead]);
 
-  const pick = (n: Pick<AppNotification, 'projectId' | 'runId' | 'questionId' | 'open'>) => {
+  const pick = (n: Pick<AppNotification, 'projectId' | 'runId' | 'questionId' | 'open' | 'goalId'>) => {
     setShow(false);
     openNotification(n, showQuestion);
   };
@@ -84,7 +84,7 @@ export function NotificationBell() {
                   {n.body && <span className="ellipsis-2">{n.body}</span>}
                   <span className="tiny faint">
                     <Since iso={n.ts} />
-                    {n.kind === 'question' && !n.open ? ' · answered or closed' : ''}
+                    {n.kind === 'question' && n.goalId === undefined && !n.open ? ' · answered or closed' : ''}
                   </span>
                 </span>
               </button>

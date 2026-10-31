@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { del, desktop, get, post, put, type RunSummary } from '../api';
 import { CodeEditor } from '../components/CodeEditor';
 import { Composer } from '../components/Composer';
-import { IconBranch, IconCheck, IconFile, IconFolder, IconPlus, IconRuns, IconSparkle, IconTrash, IconX } from '../components/icons';
+import { IconBranch, IconCheck, IconFile, IconFolder, IconPlan, IconPlus, IconRuns, IconSparkle, IconTrash, IconX } from '../components/icons';
+import { Backlog } from '../components/Backlog';
 import { GitPanel } from './GitView';
 import { Markdown } from '../components/Markdown';
 import { RunRow } from '../components/RunCard';
@@ -31,13 +32,13 @@ interface BrainView {
   curators: { teamId: string; team: string; curator: string }[];
 }
 
-type Tab = 'runs' | 'brain' | 'git';
+type Tab = 'runs' | 'backlog' | 'brain' | 'git';
 
 export function ProjectPage({ projectId, tab: tabParam }: { projectId: string; tab?: string }) {
   const { overview } = useData();
   const project = overview?.projects.find((p) => p.id === projectId);
   const plain = project?.kind === 'folder';
-  const tab: Tab = tabParam === 'brain' || (tabParam === 'git' && !plain) ? tabParam : 'runs';
+  const tab: Tab = tabParam === 'brain' || tabParam === 'backlog' || (tabParam === 'git' && !plain) ? tabParam : 'runs';
   const [goal, setGoal] = useState(false);
   if (!overview) return <Toolbar title="Project" />;
   if (!project)
@@ -65,6 +66,9 @@ export function ProjectPage({ projectId, tab: tabParam }: { projectId: string; t
         <button className={tab === 'runs' ? 'on' : ''} onClick={() => go('projects', projectId, 'runs')}>
           <IconRuns width={14} height={14} /> Runs
         </button>
+        <button className={tab === 'backlog' ? 'on' : ''} onClick={() => go('projects', projectId, 'backlog')}>
+          <IconPlan width={14} height={14} /> Backlog
+        </button>
         <button className={tab === 'brain' ? 'on' : ''} onClick={() => go('projects', projectId, 'brain')}>
           <IconSparkle width={14} height={14} /> Brain
         </button>
@@ -74,7 +78,7 @@ export function ProjectPage({ projectId, tab: tabParam }: { projectId: string; t
           </button>
         )}
       </nav>
-      {tab === 'runs' ? <ProjectRuns projectId={projectId} /> : tab === 'git' ? <GitPanel projectId={projectId} /> : <Brain projectId={projectId} />}
+      {tab === 'runs' ? <ProjectRuns projectId={projectId} /> : tab === 'backlog' ? <Backlog projectId={projectId} plain={plain} /> : tab === 'git' ? <GitPanel projectId={projectId} /> : <Brain projectId={projectId} />}
       {goal && (
         <Modal title={`New goal for ${project.name}`} onClose={() => setGoal(false)} wide>
           <div className="card" style={{ boxShadow: 'none' }}>
