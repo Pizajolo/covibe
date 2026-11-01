@@ -131,6 +131,41 @@ describe('connections', () => {
     expect(validateTeamDocument(team({ type: 'subscription', account: 'Not An Id' })).join()).toMatch(/pattern/);
   });
 
+  it('runs a model only a provider offers on that provider, never on Claude', () => {
+    const c = connections();
+    c.add({ kind: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-oa', models: [{ id: 'gpt-6.1-sol', name: 'OpenAI Sol 6.1' }] });
+    expect(c.providerFor('gpt-6.1-sol')).toEqual({ connection: 'openai', model: 'gpt-6.1-sol' });
+    expect(c.providerFor('OpenAI Sol 6.1')).toEqual({ connection: 'openai', model: 'gpt-6.1-sol' });
+    expect(c.providerFor('opus')).toBeUndefined();
+
+    const dir = tempDir();
+    const write = (yaml: string) => {
+      writeFiles(dir, { 'team.yaml': yaml });
+      return loadTeam(join(dir, 'team.yaml'), { providerFor: (m) => c.providerFor(m) });
+    };
+    const members = `
+agents:
+  manager: { prompt: "x\\ny", tools: [Read], model: opus }
+  backend-dev: { prompt: "x\\ny", tools: [Read] }
+  tester: { prompt: "x\\ny", tools: [Read], model: sonnet, backend: { type: subscription } }
+workflow: { steps: [{ id: scaffold, agent: backend-dev }] }
+`;
+    // The provider's model set as the team's plain model, on the Claude login.
+    let team = write(`version: 1\nname: t\ndefaults:\n  backend: { type: subscription }\n  model: gpt-6.1-sol\n${members}`);
+    expect(team.agents['backend-dev']).toMatchObject({ model: 'gpt-6.1-sol', backend: { type: 'connection', connection: 'openai', model: 'gpt-6.1-sol' } });
+    expect(team.agents.manager).toMatchObject({ model: 'opus', backend: { type: 'subscription' } });
+    expect(team.agents.tester).toMatchObject({ model: 'sonnet', backend: { type: 'subscription' } });
+
+    // The provider as the team's backend: a member's own Claude model still runs on Claude.
+    team = write(`version: 1\nname: t\ndefaults:\n  backend: { type: connection, connection: openai, model: gpt-6.1-sol }\n${members}`);
+    expect(team.agents['backend-dev']).toMatchObject({ model: 'gpt-6.1-sol', backend: { type: 'connection', connection: 'openai' } });
+    expect(team.agents.manager).toMatchObject({ model: 'opus', backend: { type: 'subscription' } });
+
+    // Without connections there is no provider to send the model to.
+    write(`version: 1\nname: t\ndefaults:\n  model: gpt-6.1-sol\n${members}`);
+    expect(loadTeam(join(dir, 'team.yaml')).agents['backend-dev']!.backend).toEqual({ type: 'subscription' });
+  });
+
   it('prices tokens at a provider\'s rates', () => {
     expect(priceOf({ input: 1, output: 4 }, { input: 1_000_000, output: 500_000, cacheRead: 1_000_000, cacheWrite: 0 })).toBeCloseTo(1 + 2 + 0.1);
   });

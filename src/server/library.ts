@@ -5,7 +5,7 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statS
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { isMap, isSeq, parseDocument } from 'yaml';
-import { ConfigError, loadTeam } from '../config/load.js';
+import { ConfigError, loadTeam, type LoadOptions } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
 import { covibeHome } from '../home.js';
 import type { AppSettings, BacklogSettings, EditOp, NotificationKind, NotifyChoice, Project, TeamFileInfo, TeamListing } from './api-types.js';
@@ -46,6 +46,8 @@ const TEAM_FILE = 'team.yaml';
 export class Library {
   readonly teamsDir: string;
   private readonly configFile: string;
+  /** Finds the provider for a model only a provider offers (set by the server from its connections). */
+  providerFor?: LoadOptions['providerFor'];
 
   constructor(readonly home = covibeHome()) {
     this.teamsDir = join(home, 'teams');
@@ -273,12 +275,12 @@ export class Library {
 
   /** Load a team for running. Throws ConfigError when invalid. */
   load(id: string): TeamConfig {
-    return loadTeam(this.teamFile(id));
+    return loadTeam(this.teamFile(id), { providerFor: this.providerFor });
   }
 
   /** Load a team file outside the library (runs started from the CLI). */
   loadFile(file: string): TeamConfig {
-    return loadTeam(file);
+    return loadTeam(file, { providerFor: this.providerFor });
   }
 
   check(id: string): { problems: string[] } {

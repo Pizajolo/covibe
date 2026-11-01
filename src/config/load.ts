@@ -212,17 +212,60 @@ interface RawTeam {
   workflow: { on_gate_fail?: RawPolicy; steps: RawStep[] };
 }
 
+export interface LoadOptions {
+  /**
+   * The provider (a connection from Settings → Advanced) that offers this
+   * model, with the model id it expects. With it, a member whose model only a
+   * provider has runs on that provider instead of being sent to Claude.
+   */
+  providerFor?: (model: string) => { connection: string; model: string } | undefined;
+}
+
 /** Load, validate and resolve a team file into the engine's typed model. */
-export function loadTeam(path: string): TeamConfig {
+export function loadTeam(path: string, opts: LoadOptions = {}): TeamConfig {
   const file = resolve(path);
   if (!existsSync(file)) throw new ConfigError(file, ['file not found']);
   const doc = parseYaml(readFileSync(file, 'utf8'), file);
   const schemaProblems = validateTeamDocument(doc);
   if (schemaProblems.length) throw new ConfigError(file, schemaProblems);
-  return resolveTeam(doc as RawTeam, file);
+  return resolveTeam(doc as RawTeam, file, opts);
 }
 
-function resolveTeam(raw: RawTeam, file: string): TeamConfig {
+/** Claude's own model names: aliases (opus, sonnet[1m], ...) and full ids. Never routed to a provider. */
+const CLAUDE_MODEL = /^(claude-|anthropic[.:/]|(us|eu|apac|global)\.anthropic\.|(opus|sonnet|haiku|fable|opusplan|best|default)(\[|$))/i;
+
+/** Backends that send requests to Anthropic itself, where only Claude models exist. */
+const CLAUDE_BACKENDS = new Set<BackendConfig['type']>(['subscription', 'api_key']);
+
+/**
+ * The backend and model a member runs on. A member's own backend wins and
+ * carries its own model. Without one it inherits the team's backend, except
+ * that a model of its own is honoured: a Claude model leaves an inherited
+ * provider for the Claude login, and a model only a provider offers goes to
+ * that provider (Claude Code would reject it on Claude).
+ */
+export function memberBackend(
+  own: { backend?: BackendConfig; model?: string },
+  defaults: { backend: BackendConfig; model?: string },
+  providerFor?: LoadOptions['providerFor'],
+): { backend: BackendConfig; model?: string } {
+  let backend = own.backend ?? defaults.backend;
+  if (!own.backend && own.model && backend.type === 'connection' && own.model !== backend.model) {
+    if (CLAUDE_MODEL.test(own.model)) backend = { type: 'subscription' };
+    else {
+      const provider = providerFor?.(own.model);
+      if (provider) backend = { type: 'connection', ...provider };
+    }
+  }
+  const model = backend.model ?? own.model ?? defaults.model;
+  if (model && CLAUDE_BACKENDS.has(backend.type) && !CLAUDE_MODEL.test(model)) {
+    const provider = providerFor?.(model);
+    if (provider) return { backend: { type: 'connection', ...provider }, model: provider.model };
+  }
+  return { backend, model };
+}
+
+function resolveTeam(raw: RawTeam, file: string, opts: LoadOptions): TeamConfig {
   const baseDir = dirname(file);
   const problems: string[] = [];
   const schemaCache = new Map<string, JsonSchema>();
@@ -278,13 +321,13 @@ function resolveTeam(raw: RawTeam, file: string): TeamConfig {
     }
     // An agent-level backend replaces the default one entirely; merging fields
     // across backend types (say a gateway base_url into api_key) is never wanted.
-    const backend = a.backend ?? defaultBackend;
+    const { backend, model } = memberBackend({ backend: a.backend, model: a.model }, { backend: defaultBackend, model: defaults.model }, opts.providerFor);
     agents[name] = {
       name,
       description: a.description,
       prompt,
       promptFile,
-      model: backend.model ?? a.model ?? defaults.model,
+      model,
       effort: a.effort ?? defaults.effort,
       thinking: a.thinking ?? defaults.thinking,
       cacheTtl: a.cache_ttl ?? defaults.cache_ttl,

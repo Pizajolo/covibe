@@ -121,6 +121,19 @@ export class Connections implements BackendResolver {
     return this.list().filter((c) => c.kind === 'claude');
   }
 
+  /** The provider that offers this model (matched on its id, else its display name), with the id it expects. */
+  providerFor(model: string): { connection: string; model: string } | undefined {
+    const want = model.trim().toLowerCase();
+    const providers = this.list().filter((c) => c.kind !== 'claude');
+    for (const match of [(m: ProviderModel) => m.id.toLowerCase() === want, (m: ProviderModel) => m.name?.trim().toLowerCase() === want]) {
+      for (const c of providers) {
+        const found = c.models?.find(match);
+        if (found) return { connection: c.id, model: found.id };
+      }
+    }
+    return undefined;
+  }
+
   get balance(): boolean {
     return !!this.read().balance;
   }

@@ -285,6 +285,32 @@ describe('server', () => {
     );
   });
 
+  it('continues a stopped run in place, from the step it stopped in', async () => {
+    let builds = 0;
+    const { api } = await setup({
+      builder: () => (++builds === 1 ? { fail: 'Claude Code process exited with code 1' } : { write: { 'src/a.js': 'export const a = 1;' }, text: 'Built.' }),
+      reviewer: () => ({ structured: { blocking_count: 0, findings: [] } }),
+    });
+    const project = await api('POST', '/api/projects', { path: tempRepo() });
+    const team = await api('POST', '/api/teams', { name: 'duo', template: 'build-and-review' });
+    const { runId } = await api('POST', '/api/runs', { project: project.id, team: team.id, goal: 'Add module a' });
+    const stopped = await until(
+      () => api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`),
+      (d) => d.summary.status !== 'running',
+    );
+    expect(stopped.summary).toMatchObject({ status: 'failed', reason: expect.stringMatching(/exited with code 1/) });
+
+    expect(await api('POST', `/api/runs/${project.id}/${runId}/continue`)).toMatchObject({ runId });
+    const done = await until(
+      () => api<RunDetail>('GET', `/api/runs/${project.id}/${runId}`),
+      (d) => d.summary.status !== 'running',
+    );
+    expect(done.summary.status).toBe('succeeded');
+    expect(done.summary.reason).toBeUndefined();
+    expect(done.events.filter((e) => e.type === 'run.continued')).toHaveLength(1);
+    await expect(api('POST', `/api/runs/${project.id}/${runId}/continue`)).rejects.toThrow(/finished/);
+  });
+
   it('reorders and inserts workflow steps without losing comments', async () => {
     const { api } = await setup();
     const team = await api('POST', '/api/teams', { name: 'flow', template: 'feature-team' });

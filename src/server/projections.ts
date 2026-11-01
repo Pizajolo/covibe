@@ -103,6 +103,13 @@ export function summarizeRun(
       case 'run.restarted':
         restart = { runId: d.run_id };
         break;
+      case 'run.continued':
+        // Going again: what stopped it no longer applies.
+        reason = undefined;
+        limitEnd = undefined;
+        limited.clear();
+        restart = undefined;
+        break;
       case 'agent.limited': {
         const a = agent(e.agent!);
         liveUsage.delete(e.agent!);
@@ -146,7 +153,7 @@ export function summarizeRun(
         if (step(e.step!).status === 'running') step(e.step!).status = 'done';
         break;
       case 'step.skipped':
-        if (e.agent) step(e.step!).cards.push({ agent: e.agent, round: loops, status: 'skipped', costUsd: 0, summary: 'no task for this agent' });
+        if (e.agent) step(e.step!).cards.push({ agent: e.agent, round: loops, status: 'skipped', costUsd: 0, summary: d.reason === 'no task' ? 'no task for this agent' : String(d.reason ?? 'skipped') });
         break;
       case 'gate.passed':
         step(e.step!).status = 'passed';

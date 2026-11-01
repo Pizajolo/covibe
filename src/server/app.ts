@@ -12,7 +12,7 @@ import { acceptIntoNote, brainLog, BrainError, curate, deleteNote, ensureBrain, 
 import { ask, chat } from '../engine/chat.js';
 import { cleanupWorktrees, worktreeReport } from '../engine/cleanup.js';
 import { checkGoal, goalFilesKey, goalPrompt } from '../engine/backlog.js';
-import { buildInvocation, newRunId, startRun, type RunOutcome } from '../engine/engine.js';
+import { buildInvocation, continueRun, newRunId, startRun, type RunOutcome } from '../engine/engine.js';
 import { folderDiff, isFolderRun, undoFolderRun } from '../engine/folder.js';
 import { answerQuestion } from '../engine/questions.js';
 import { GithubError } from '../github.js';
@@ -118,6 +118,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const library = opts.library ?? new Library();
   const runner = opts.runner ?? new ClaudeSdkRunner();
   const connections = opts.connections ?? new Connections(library.home);
+  library.providerFor ??= (model) => connections.providerFor(model);
   const voice = opts.voice ?? new Voice(library.home, connections.secrets, connections);
   if (runner.usage && !connections.usageReader) connections.usageReader = (env) => runner.usage!(env);
   const token = opts.token ?? randomBytes(24).toString('hex');
@@ -332,6 +333,38 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         kickBacklog(project);
       });
     return { runId, projectId: project.id };
+  };
+
+  /**
+   * Carry on a stopped run in place, from the step it stopped in: its members
+   * resume their conversations and finished steps keep their reports.
+   */
+  const continueStopped = async (project: Project, run: RunRecord) => {
+    const busy = [...answering].find((k) => k.startsWith(`${run.id}/`));
+    if (busy) throw new BadRequest(`${busy.slice(run.id.length + 1)} is still answering your message; continue the run once it has replied.`);
+    const team = teamForRun(run).load();
+    const controller = new AbortController();
+    const onLimit = library.settings().onLimit ?? 'wait';
+    let started: { runId: string; done: Promise<RunOutcome> };
+    try {
+      started = await continueRun({ team, repo: project.path, runId: run.id, store: storeFor(project), runner, signal: controller.signal, onLimit, connections });
+    } catch (err) {
+      throw new BadRequest((err as Error).message);
+    }
+    // A restart waiting for a limit to reset is not wanted any more.
+    const store = storeFor(project);
+    if (store.eventsOfType(['run.restart_scheduled', 'run.restart_cancelled', 'run.restarted']).filter((e) => e.runId === run.id).at(-1)?.type === 'run.restart_scheduled') {
+      store.append(run.id, { type: 'run.restart_cancelled', data: { continued: true } });
+    }
+    const key = `${project.id}/${run.id}`;
+    active.set(key, controller);
+    started.done
+      .catch(() => undefined)
+      .finally(() => {
+        active.delete(key);
+        kickBacklog(project);
+      });
+    return { runId: run.id, projectId: project.id };
   };
 
   /**
@@ -1388,6 +1421,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         return { at };
       }
       return restartRun(project, run);
+    }],
+    ['POST', '/api/runs/:pid/:rid/continue', async (p) => {
+      const { project, run } = findRun(p.pid!, p.rid!);
+      return continueStopped(project, run);
     }],
     ['POST', '/api/runs/:pid/:rid/stop', (p) => {
       const c = active.get(`${p.pid}/${p.rid}`);

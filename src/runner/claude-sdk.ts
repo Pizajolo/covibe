@@ -181,6 +181,9 @@ export class ClaudeSdkRunner implements AgentRunner {
     let last: SDKResultMessage | undefined;
     let turns = 0;
     const usage = new LiveUsage(inv.pricing, (tokens, costUsd) => inv.onEvent({ kind: 'usage', tokens, ...(costUsd === undefined ? {} : { costUsd }) }));
+    /** What Claude Code said on the way, for a useful error when its process stops unexpectedly. */
+    const clues = new ExitClues();
+    options.stderr = (text) => clues.stderr(text);
     try {
       for await (const msg of query({ prompt: input, options }) as AsyncIterable<SDKMessage>) {
         clearTimeout(followUp);
@@ -190,6 +193,7 @@ export class ClaudeSdkRunner implements AgentRunner {
           continue;
         }
         if (msg.type === 'assistant') usage.add(msg.message);
+        clues.see(msg);
         if (msg.type === 'system' && msg.subtype === 'init') {
           sessionId = msg.session_id;
           inv.onEvent({ kind: 'session', sessionId });
@@ -225,7 +229,12 @@ export class ClaudeSdkRunner implements AgentRunner {
       }
     } catch (err) {
       stop();
-      const error = inv.signal.aborted ? 'aborted (timeout or cancel)' : (err as Error).message;
+      // The turn had finished and nothing was left to read: the work is done,
+      // whatever the process did on its way out.
+      if (!inv.signal.aborted && last && last.subtype === 'success' && !last.is_error && !unread.size) {
+        return { sessionId: last.session_id, turns, costUsd: last.total_cost_usd, durationMs: Date.now() - started, tokens: tokensOf(last), ok: true, text: last.result || lastText, structured: last.structured_output };
+      }
+      const error = inv.signal.aborted ? 'aborted (timeout or cancel)' : clues.explain((err as Error).message, lastText);
       const limit = inv.signal.aborted ? undefined : limitOf(error, rejected);
       return { ok: false, sessionId, text: lastText, error, turns, costUsd: last?.total_cost_usd ?? 0, durationMs: Date.now() - started, ...(limit ? { limit } : {}) };
     } finally {
@@ -345,6 +354,67 @@ export async function readPlanUsage(env: Env): Promise<PlanUsage> {
  * a rejected rate limit, or says so in the error ("Claude AI usage limit
  * reached|<reset epoch>", "5-hour limit reached ∙ resets 3pm").
  */
+/**
+ * Lines Claude Code prints on stderr that never explain a failure: its note
+ * that a model is not one of Claude's (true of every provider model) and that
+ * claude.ai connectors are off while another sign-in is in use.
+ */
+const STDERR_NOTICES = [/\[claude-code:unrecognized_model\]/, /claude\.ai connectors are disabled/];
+const STDERR_KEEP = 4096;
+const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+/**
+ * What Claude Code reported before its process stopped: the last API error
+ * and retry, a sign-in problem, why it shut down, and stderr without its usual
+ * notices. The SDK's own message keeps only the end of stderr, which is often
+ * nothing but those notices.
+ */
+export class ExitClues {
+  private err = '';
+  private apiError?: string;
+  private retry?: { attempt: number; max: number; status: number | null; error: string };
+  private auth?: string;
+  private shutdown?: string;
+
+  stderr(text: string) {
+    this.err = (this.err + text).slice(-4 * STDERR_KEEP);
+  }
+
+  see(msg: SDKMessage) {
+    if (msg.type === 'assistant' && msg.message.model === '<synthetic>') {
+      const text = msg.message.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join(' ').trim();
+      if (text) this.apiError = text;
+    } else if (msg.type === 'system' && msg.subtype === 'api_retry') {
+      this.retry = { attempt: msg.attempt, max: msg.max_retries, status: msg.error_status, error: String(msg.error) };
+    } else if (msg.type === 'system' && msg.subtype === 'worker_shutting_down') {
+      this.shutdown = msg.reason;
+    } else if (msg.type === 'auth_status' && msg.error) {
+      this.auth = msg.error;
+    }
+  }
+
+  /** The error to report for `message` (the SDK's), with what explains it. */
+  explain(message: string, lastText = ''): string {
+    if (!/^Claude Code process (exited|terminated)/.test(message)) return message;
+    const base = message.replace(/\. stderr: [\s\S]*$/, '');
+    const lines = this.err
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !STDERR_NOTICES.some((n) => n.test(l)));
+    const parts = [base];
+    if (this.apiError) parts.push(`last API error: ${clip(this.apiError, 500)}`);
+    if (this.retry) parts.push(`the provider's last failed answer: ${this.retry.status ?? 'no response'} (${this.retry.error}), retry ${this.retry.attempt} of ${this.retry.max}`);
+    if (this.auth) parts.push(`sign-in error: ${clip(this.auth, 300)}`);
+    if (this.shutdown) parts.push(`Claude Code shut down: ${this.shutdown}`);
+    if (lines.length) parts.push(`stderr: ${clip(lines.join(' | ').slice(-STDERR_KEEP), STDERR_KEEP)}`);
+    if (parts.length === 1) {
+      parts.push('Claude Code gave no reason (it printed only its usual notices)');
+      if (lastText.trim()) parts.push(`the member's last message: "${clip(lastText.trim(), 300)}"`);
+    }
+    return parts.join('; ');
+  }
+}
+
 export function limitOf(error: string, rejected: AgentResult['limit']): AgentResult['limit'] {
   const said = /usage limit|limit reached|rate.?limit/i.test(error);
   if (!rejected && !said) return undefined;

@@ -316,7 +316,8 @@ function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, o
         <ModelPicker
           value={{ model: agent.model, effort: agent.effort, thinking: agent.thinking }}
           inherit="Team default"
-          provider={providerOf(backend ?? teamBackend)}
+          // A member's own model (with no backend of its own) is not run on the team's provider.
+          provider={backend ? providerOf(backend) : agent.model ? undefined : providerOf(teamBackend)}
           onProvider={(c) => void edit([{ op: 'set', path: p('backend'), value: providerBackend(c) }])}
           onChange={(k, v) => {
             const ops: EditOp[] = [{ op: 'set', path: p(k), value: v }];
