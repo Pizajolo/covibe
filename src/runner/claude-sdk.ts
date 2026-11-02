@@ -1,7 +1,8 @@
 // The only module that imports the Claude Agent SDK. SDK upgrades and API
 // changes should touch this file and nothing else.
 import { randomUUID } from 'node:crypto';
-import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { closeSync, copyFileSync, cpSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   createSdkMcpServer,
@@ -29,6 +30,18 @@ const FOLLOW_UP_WAIT_MS = 30_000;
 const MAX_WAIT_MS = 7 * 24 * 60 * 60_000;
 /** How often a working member reports its running token use and spend. */
 const USAGE_EVERY_MS = 3_000;
+/** How many times a member whose Claude Code process stopped mid-turn picks its session up again. */
+const CRASH_RESUMES = 2;
+
+/** The prompt that picks a session up again after Claude Code's process stopped mid-turn. */
+export function crashResumePrompt(unread: string[]): string {
+  const note =
+    'Your previous turn was cut off: the Claude Code process running it stopped unexpectedly (not because of anything you did). What you did before is still in your working folder and above. Pick up where you left off: check what is already done, finish the rest, and report as your task asks. Do not start over.';
+  return unread.length ? `${note}\n\nThese messages reached you just before it stopped:\n\n${unread.join('\n\n')}` : note;
+}
+
+/** What one query() of a turn ended with, beyond its result: whether its process stopped mid-turn, and the messages it never read. */
+type TurnResult = AgentResult & { crashed?: boolean; unread?: string[] };
 
 /** The prompt stream: the agent's first message, then anything sent while it works. */
 class Input implements AsyncIterable<SDKUserMessage> {
@@ -72,13 +85,31 @@ export class ClaudeSdkRunner implements AgentRunner {
   }
 
   async run(inv: AgentInvocation): Promise<AgentResult> {
-    const result = await this.turn(inv);
+    let { crashed, unread, ...result } = await this.turn(inv);
+    // Claude Code's process stopped in the middle of the turn (it exits now and
+    // then without saying why): pick the session up again rather than failing
+    // the step, carrying over the messages it had not read.
+    for (let attempt = 1; crashed && result.sessionId && !result.limit && !inv.signal.aborted && attempt <= CRASH_RESUMES; attempt++) {
+      inv.onEvent({ kind: 'restarted', attempt, error: result.error ?? 'Claude Code stopped' });
+      const { crashed: again, unread: missed, ...next } = await this.turn({ ...inv, prompt: crashResumePrompt(unread ?? []), resumeSessionId: result.sessionId, forkSession: false });
+      crashed = again;
+      unread = missed;
+      result = {
+        ...next,
+        sessionId: next.sessionId ?? result.sessionId,
+        text: next.text || result.text,
+        turns: result.turns + next.turns,
+        costUsd: result.costUsd + next.costUsd,
+        durationMs: result.durationMs + next.durationMs,
+        tokens: addTokens(result.tokens, next.tokens),
+      };
+    }
     // Claude Code prices every model as Claude; another provider's model gets its own prices.
     if (inv.pricing && result.tokens) result.costUsd = priceOf(inv.pricing, result.tokens);
     return result;
   }
 
-  private async turn(inv: AgentInvocation): Promise<AgentResult> {
+  private async turn(inv: AgentInvocation): Promise<TurnResult> {
     const started = Date.now();
     // A session started on another Claude account lives in that account's
     // config folder; bring it over so this account can pick it up.
@@ -158,10 +189,14 @@ export class ClaudeSdkRunner implements AgentRunner {
     // message was read (a "now" message ends one turn and starts another).
     const input = new Input();
     const unread = new Set<string>([input.push(inv.prompt)]);
+    /** Messages sent while it works, by id: carried over if its process stops before reading them. */
+    const sent = new Map<string, string>();
     inv.onControl?.({
       send: (text, priority) => {
         if (input.isClosed) return false;
-        unread.add(input.push(text, priority));
+        const uuid = input.push(text, priority);
+        unread.add(uuid);
+        sent.set(uuid, text);
         return true;
       },
     });
@@ -184,6 +219,9 @@ export class ClaudeSdkRunner implements AgentRunner {
     /** What Claude Code said on the way, for a useful error when its process stops unexpectedly. */
     const clues = new ExitClues();
     options.stderr = (text) => clues.stderr(text);
+    // Claude Code writes why it stopped to its debug log, often nowhere else.
+    const debugFile = join(tmpdir(), `covibe-claude-${randomUUID()}.log`);
+    options.debugFile = debugFile;
     try {
       for await (const msg of query({ prompt: input, options }) as AsyncIterable<SDKMessage>) {
         clearTimeout(followUp);
@@ -234,18 +272,37 @@ export class ClaudeSdkRunner implements AgentRunner {
       if (!inv.signal.aborted && last && last.subtype === 'success' && !last.is_error && !unread.size) {
         return { sessionId: last.session_id, turns, costUsd: last.total_cost_usd, durationMs: Date.now() - started, tokens: tokensOf(last), ok: true, text: last.result || lastText, structured: last.structured_output };
       }
-      const error = inv.signal.aborted ? 'aborted (timeout or cancel)' : clues.explain((err as Error).message, lastText);
+      const message = (err as Error).message;
+      const crashed = !inv.signal.aborted && ExitClues.isExit(message);
+      if (crashed) clues.log(readTail(debugFile, DEBUG_TAIL_BYTES));
+      const error = inv.signal.aborted ? 'aborted (timeout or cancel)' : clues.explain(message, lastText);
       const limit = inv.signal.aborted ? undefined : limitOf(error, rejected);
-      return { ok: false, sessionId, text: lastText, error, turns, costUsd: last?.total_cost_usd ?? 0, durationMs: Date.now() - started, ...(limit ? { limit } : {}) };
+      // What the turn used up to the stop: its last result, or the running count when it stopped mid-turn.
+      const spent = usage.totals();
+      const costUsd = Math.max(last?.total_cost_usd ?? 0, spent.costUsd ?? 0);
+      return {
+        ok: false,
+        sessionId,
+        text: lastText,
+        error,
+        turns,
+        costUsd,
+        durationMs: Date.now() - started,
+        tokens: last ? tokensOf(last) : spent.tokens,
+        ...(limit ? { limit } : {}),
+        ...(crashed ? { crashed: true, unread: [...unread].flatMap((u) => (sent.has(u) ? [sent.get(u)!] : [])) } : {}),
+      };
     } finally {
       stop();
       usage.close();
       inv.signal.removeEventListener('abort', onAbort);
+      rmSync(debugFile, { force: true });
     }
 
     if (!last) {
       const limit = limitOf(lastText, rejected);
-      return { ok: false, sessionId, text: lastText, error: limit ? lastText || 'usage limit reached' : 'session ended without a result', turns, costUsd: 0, durationMs: Date.now() - started, ...(limit ? { limit } : {}) };
+      // Without a limit, its process stopped before the turn was over: like a crash.
+      return { ok: false, sessionId, text: lastText, error: limit ? lastText || 'usage limit reached' : 'session ended without a result', turns, costUsd: 0, durationMs: Date.now() - started, ...(limit ? { limit } : inv.signal.aborted ? {} : { crashed: true, unread: [] }) };
     }
     // Cost and usage are running totals across the turns of one query().
     const base = { sessionId: last.session_id, turns, costUsd: last.total_cost_usd, durationMs: Date.now() - started, tokens: tokensOf(last) };
@@ -361,6 +418,28 @@ export async function readPlanUsage(env: Env): Promise<PlanUsage> {
  */
 const STDERR_NOTICES = [/\[claude-code:unrecognized_model\]/, /claude\.ai connectors are disabled/];
 const STDERR_KEEP = 4096;
+/** How much of the end of Claude Code's debug log is read when its process stops, and how many of its lines are kept. */
+const DEBUG_TAIL_BYTES = 256 * 1024;
+const LOG_LINES = 6;
+
+/** The last `bytes` of a file, or '' when it cannot be read. */
+export function readTail(path: string, bytes: number): string {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r');
+    const size = fstatSync(fd).size;
+    const length = Math.min(size, bytes);
+    const buf = Buffer.alloc(length);
+    readSync(fd, buf, 0, length, size - length);
+    const text = buf.toString('utf8');
+    // Drop a partial first line.
+    return size > length ? text.slice(text.indexOf('\n') + 1) : text;
+  } catch {
+    return '';
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
 /**
@@ -371,6 +450,7 @@ const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0
  */
 export class ExitClues {
   private err = '';
+  private logged: string[] = [];
   private apiError?: string;
   private retry?: { attempt: number; max: number; status: number | null; error: string };
   private auth?: string;
@@ -393,9 +473,24 @@ export class ExitClues {
     }
   }
 
+  /** Whether the SDK's error says Claude Code's process stopped (rather than reporting a failed turn). */
+  static isExit(message: string): boolean {
+    return /^Claude Code process (exited|terminated)/.test(message);
+  }
+
+  /** The end of Claude Code's debug log: the errors it logged, without timestamps. */
+  log(text: string) {
+    this.logged = text
+      .split('\n')
+      .map((l) => l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s+/, '').trim())
+      .filter((l) => l.startsWith('[ERROR]') && !STDERR_NOTICES.some((n) => n.test(l)))
+      .slice(-LOG_LINES)
+      .map((l) => clip(l.replace(/^\[ERROR\]\s*/, ''), 400));
+  }
+
   /** The error to report for `message` (the SDK's), with what explains it. */
   explain(message: string, lastText = ''): string {
-    if (!/^Claude Code process (exited|terminated)/.test(message)) return message;
+    if (!ExitClues.isExit(message)) return message;
     const base = message.replace(/\. stderr: [\s\S]*$/, '');
     const lines = this.err
       .split('\n')
@@ -407,6 +502,7 @@ export class ExitClues {
     if (this.auth) parts.push(`sign-in error: ${clip(this.auth, 300)}`);
     if (this.shutdown) parts.push(`Claude Code shut down: ${this.shutdown}`);
     if (lines.length) parts.push(`stderr: ${clip(lines.join(' | ').slice(-STDERR_KEEP), STDERR_KEEP)}`);
+    if (this.logged.length) parts.push(`Claude Code's log: ${this.logged.join(' | ')}`);
     if (parts.length === 1) {
       parts.push('Claude Code gave no reason (it printed only its usual notices)');
       if (lastText.trim()) parts.push(`the member's last message: "${clip(lastText.trim(), 300)}"`);
@@ -480,6 +576,15 @@ export class LiveUsage {
   flush() {
     clearTimeout(this.timer);
     this.timer = undefined;
+    const { tokens, costUsd } = this.totals();
+    const key = JSON.stringify(tokens);
+    if (key === this.sent) return;
+    this.sent = key;
+    this.report(tokens, costUsd);
+  }
+
+  /** Tokens so far, and their estimated cost (undefined when a model's prices are unknown). */
+  totals(): { tokens: TokenUsage; costUsd: number | undefined } {
     const tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     let cost = 0;
     let priced = true;
@@ -494,10 +599,7 @@ export class LiveUsage {
       if (price) cost += priceOf(price, { ...t, cacheWrite: t.cacheWrite - u.cache_1h }) + (u.cache_1h * price.input * 2) / 1e6;
       else priced = false;
     }
-    const key = JSON.stringify(tokens);
-    if (key === this.sent) return;
-    this.sent = key;
-    this.report(tokens, priced ? cost : undefined);
+    return { tokens, costUsd: priced ? cost : undefined };
   }
 
   /** The turn is over: its result carries the exact figures. */
@@ -551,6 +653,11 @@ function resultImages(content: unknown[]): { toolUseId: string; mediaType: strin
     }
   }
   return out;
+}
+
+function addTokens(a: TokenUsage | undefined, b: TokenUsage | undefined): TokenUsage | undefined {
+  if (!a || !b) return b ?? a;
+  return { input: a.input + b.input, output: a.output + b.output, cacheRead: a.cacheRead + b.cacheRead, cacheWrite: a.cacheWrite + b.cacheWrite };
 }
 
 function tokensOf(msg: SDKResultMessage): TokenUsage {

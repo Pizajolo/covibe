@@ -1,8 +1,8 @@
 // The run's plan and the other steps' reports, readable rather than as JSON:
 // the plan's summary and its tasks by owner, the requests members made of each
 // other, and every other step's latest report.
-import type { RequestView, RunDetail, RunSummary, StepReport } from '../api';
-import { IconCheck, IconPlan, IconSpinner } from './icons';
+import type { RequestView, RunDetail, RunSummary, StepReport, TaskView } from '../api';
+import { IconAlert, IconCheck, IconPlan, IconSpinner } from './icons';
 import { Markdown } from './Markdown';
 import { AgentStatus, Avatar, Empty } from './ui';
 
@@ -20,13 +20,15 @@ export function PlanTab({ detail, onOpen }: { detail: RunDetail; onOpen: (agent:
   const others = detail.reports.filter((r) => r.step !== detail.planStep);
   const planState = run.steps.find((s) => s.id === detail.planStep);
   const planner = planState?.cards.at(-1)?.agent ?? plan?.agents[0];
+  const todo = detail.tasks ?? [];
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
       <div className="col" style={{ gap: 14, maxWidth: 1000, margin: '0 auto' }}>
+        {todo.length > 0 && <TodoCard run={run} tasks={todo} details={planDetails(plan)} onOpen={onOpen} />}
         {detail.planStep &&
           (plan ? (
-            <PlanCard run={run} report={plan} onOpen={onOpen} />
+            <PlanCard run={run} report={plan} onOpen={onOpen} hideTasks={todo.length > 0} />
           ) : (
             <div className="card">
               <div className="card-head">
@@ -54,7 +56,7 @@ export function PlanTab({ detail, onOpen }: { detail: RunDetail; onOpen: (agent:
           <ReportCard key={r.step} run={run} report={r} />
         ))}
 
-        {!detail.planStep && !detail.reports.length && !run.requests.length && (
+        {!detail.planStep && !todo.length && !detail.reports.length && !run.requests.length && (
           <Empty icon={<IconPlan />} title="No reports yet">
             Each step's report shows here when the step finishes: the plan, reviews, test results.
           </Empty>
@@ -74,11 +76,123 @@ function Byline({ run, report }: { run: RunSummary; report: StepReport }) {
   );
 }
 
-function PlanCard({ run, report, onOpen }: { run: RunSummary; report: StepReport; onOpen: (agent: string) => void }) {
+/** The plan's own task entries (acceptance criteria and the rest), by the id the todo list gives them. */
+function planDetails(plan: StepReport | undefined): Map<string, Obj> {
+  const out = new Map<string, Obj>();
+  const tasks = plan && isObj(plan.output) && Array.isArray(plan.output.tasks) ? (plan.output.tasks as unknown[]) : [];
+  tasks.forEach((t, i) => {
+    if (!isObj(t)) return;
+    const id = typeof t.id === 'string' && t.id.trim() ? t.id.trim() : typeof t.id === 'number' ? String(t.id) : `T${i + 1}`;
+    if (!out.has(id)) out.set(id, t);
+  });
+  return out;
+}
+
+const STATUS_LABEL: Record<TaskView['status'], string> = { open: 'Open', working: 'Working', done: 'Done', blocked: 'Blocked' };
+
+function TaskState({ status }: { status: TaskView['status'] }) {
+  if (status === 'done') return <IconCheck width={14} height={14} className="todo-icon done" />;
+  if (status === 'working') return <IconSpinner width={14} height={14} className="todo-icon working" />;
+  if (status === 'blocked') return <IconAlert width={14} height={14} className="todo-icon blocked" />;
+  return <span className="todo-icon todo-dot" />;
+}
+
+/** The run's todo list, live: each member's tasks and where each stands. */
+function TodoCard({ run, tasks, details, onOpen }: { run: RunSummary; tasks: TaskView[]; details: Map<string, Obj>; onOpen: (agent: string) => void }) {
+  const index = (name: string) => run.agents.findIndex((a) => a.name === name);
+  const count = (s: TaskView['status']) => tasks.filter((t) => t.status === s).length;
+  const done = count('done');
+  const groups = new Map<string, TaskView[]>();
+  for (const t of tasks) groups.set(t.owner ?? '', [...(groups.get(t.owner ?? '') ?? []), t]);
+  return (
+    <div className="card">
+      <div className="card-head" style={{ flexWrap: 'wrap' }}>
+        <IconCheck width={15} height={15} />
+        <h2>Todo list</h2>
+        <span className="hint">
+          {done} of {tasks.length} done
+        </span>
+        <span className="right row tiny" style={{ gap: 6 }}>
+          {count('working') > 0 && <span className="pill info">{count('working')} working</span>}
+          {count('blocked') > 0 && <span className="pill warn">{count('blocked')} blocked</span>}
+          {count('open') > 0 && <span className="pill">{count('open')} open</span>}
+        </span>
+      </div>
+      <div className="meter-track thin" style={{ borderRadius: 0 }} title={`${done} of ${tasks.length} done`}>
+        <div className="meter-fill" style={{ width: `${(100 * done) / tasks.length}%`, background: 'var(--good)' }} />
+      </div>
+      <div className="col" style={{ padding: 16, gap: 16 }}>
+        {[...groups].map(([owner, list]) => {
+          const member = run.agents.find((a) => a.name === owner);
+          return (
+            <section key={owner || '_'} className="col" style={{ gap: 6 }}>
+              <div className="row plan-owner" onClick={owner ? () => onOpen(owner) : undefined} title={owner ? `Chat with ${owner}` : undefined}>
+                {owner ? <Avatar name={owner} index={index(owner)} size="sm" /> : null}
+                <strong>{owner || 'Not assigned'}</strong>
+                <span className="tiny faint">
+                  {list.filter((t) => t.status === 'done').length} of {list.length} done
+                </span>
+                {member && <AgentStatus status={member.status} />}
+              </div>
+              {list.map((t) => (
+                <TodoItem key={t.id} task={t} detail={details.get(t.id)} />
+              ))}
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TodoItem({ task, detail }: { task: TaskView; detail?: Obj }) {
+  const acceptance = detail && Array.isArray(detail.acceptance) ? (detail.acceptance as unknown[]) : [];
+  const description = task.description ?? (typeof detail?.description === 'string' && detail.description !== task.title ? detail.description : undefined);
+  const more = !!description || acceptance.length > 0;
+  return (
+    <div className={`todo-task ${task.status}`}>
+      <TaskState status={task.status} />
+      <div className="col grow" style={{ gap: 4, minWidth: 0 }}>
+        <div className="row" style={{ gap: 8 }}>
+          <span className="chip static mono">{task.id}</span>
+          <span className="todo-title grow">{task.title}</span>
+          <span className={`pill ${task.status === 'done' ? 'good' : task.status === 'working' ? 'info' : task.status === 'blocked' ? 'warn' : ''}`}>{STATUS_LABEL[task.status]}</span>
+        </div>
+        {task.note && (
+          <span className="small muted">
+            {task.by ? `${task.by}: ` : ''}
+            {task.note}
+          </span>
+        )}
+        {more && (
+          <details>
+            <summary className="tiny faint">Details</summary>
+            <div className="col" style={{ gap: 6 }}>
+              {description && <Markdown text={description} />}
+              {acceptance.length > 0 && (
+                <ul className="plan-checks">
+                  {acceptance.map((a, i) => (
+                    <li key={i}>
+                      <IconCheck width={12} height={12} />
+                      <span>{typeof a === 'string' ? a : JSON.stringify(a)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </details>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PlanCard({ run, report, onOpen, hideTasks }: { run: RunSummary; report: StepReport; onOpen: (agent: string) => void; hideTasks?: boolean }) {
   const out = report.output;
   const index = (name: string) => run.agents.findIndex((a) => a.name === name);
   if (!isObj(out) || report.parallel) return <ReportCard run={run} report={report} title="Plan" />;
-  const tasks = Array.isArray(out.tasks) ? (out.tasks as unknown[]) : undefined;
+  // With a todo list, the tasks show there (with their details), not twice.
+  const tasks = Array.isArray(out.tasks) && !hideTasks ? (out.tasks as unknown[]) : undefined;
   const rest = Object.fromEntries(Object.entries(out).filter(([k]) => k !== 'summary' && k !== 'tasks' && k !== 'text'));
   // Tasks by owner, in the order owners first appear in the plan.
   const groups = new Map<string, Obj[]>();

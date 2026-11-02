@@ -467,6 +467,18 @@ details.report > summary::before { content: '▸'; color: var(--text-3); font-si
 details.report[open] > summary::before { content: '▾'; }
 details.report:not([open]) > summary { border-bottom: 0; }
 .plan-task details > summary { cursor: default; color: var(--text-2); margin-bottom: 4px; }
+/* the run's todo list */
+.todo-task { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; background: var(--surface); transition: border-color .2s, box-shadow .2s; }
+.todo-task.working { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.todo-task.blocked { border-color: var(--warn); }
+.todo-task.done .todo-title { color: var(--text-3); text-decoration: line-through; }
+.todo-task details > summary { cursor: default; }
+.todo-title { min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
+.todo-icon { flex: none; margin-top: 4px; }
+.todo-icon.done { color: var(--good); }
+.todo-icon.working { color: var(--accent); }
+.todo-icon.blocked { color: var(--warn); }
+.todo-dot { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--text-3); display: inline-block; margin-left: 1px; }
 .board-card .for { font-size: 11px; color: var(--text-2); }
 .gate { font-family: var(--mono); font-size: 11px; color: var(--text-2); background: rgba(127,127,127,.12); padding: 1px 6px; border-radius: 4px; display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
