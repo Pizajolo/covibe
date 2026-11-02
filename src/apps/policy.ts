@@ -19,6 +19,8 @@ export interface LaunchApp {
   allowWrite: string[];
   /** Its own temp folder (TMPDIR). */
   tmp: string;
+  /** The file its output goes to (its stdout and stderr). */
+  log?: string;
   /** Linux: the Unix socket the bridge listens on. */
   socket?: string;
 }
@@ -53,7 +55,9 @@ export function appSandboxConfig(spec: LaunchApp, home = homedir(), linux = proc
     },
     filesystem: {
       denyRead: [home],
-      allowRead: [spec.folder, spec.tmp, ...toolchains, ...spec.allowWrite, ...socketDir],
+      // The log file its output goes to stays readable: it is in covibe's folder in the home folder, and on macOS a
+      // denied read also fails fstat on its stdout and stderr, which Node checks first thing (it aborts otherwise).
+      allowRead: [spec.folder, spec.tmp, ...toolchains, ...spec.allowWrite, ...socketDir, ...(spec.log ? [spec.log] : [])],
       allowWrite: [spec.folder, spec.tmp, ...spec.allowWrite, ...socketDir],
       denyWrite: [...PROTECTED, '.covibe'].map((p) => join(spec.folder, p)).filter((p) => !linux || existsSync(p)),
     },

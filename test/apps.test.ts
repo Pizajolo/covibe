@@ -140,6 +140,9 @@ workflow:
     expect(homeTools('/h/.local/share/fnm/node-versions/v22/bin:/usr/bin:/h/bin:/h/tools/go/bin', '/h')).toEqual(['/h/.local/share/fnm/node-versions/v22/bin', '/h/.local/share/fnm/node-versions/v22', '/h/bin', '/h/tools/go/bin', '/h/tools/go']);
     expect(sandboxedCommand(spec)).toBe('socat UNIX-LISTEN:/t/x/app.sock,fork,reuseaddr TCP:127.0.0.1:4100 & cd /p/app && npm start');
     expect(sandboxedCommand({ ...spec, socket: undefined })).toBe('cd /p/app && npm start');
+    // Its log file (its stdout and stderr) stays readable though it is in the home folder: on macOS Node aborts at startup otherwise.
+    expect(appSandboxConfig({ ...spec, log: '/h/.covibe/apps/x/r1/app/app.log' }, '/h', false).filesystem.allowRead).toContain('/h/.covibe/apps/x/r1/app/app.log');
+    expect(cfg.filesystem.allowWrite).not.toContain('/h/.covibe/apps/x/r1/app/app.log');
   });
 });
 

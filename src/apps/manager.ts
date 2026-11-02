@@ -381,6 +381,7 @@ export class AppHub {
       network: [...new Set([...o.network, ...(spec.network ?? [])])],
       allowWrite: o.allowWrite,
       tmp: join(dir, 'tmp'),
+      log: join(dir, 'app.log'),
       ...(socketDir ? { socket: join(socketDir, 'app.sock') } : {}),
     };
     // Protected even before the app runs: hooks there would run outside any sandbox at a member's next turn (see policy.ts).
