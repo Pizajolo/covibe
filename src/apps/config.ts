@@ -1,8 +1,8 @@
 // How to run a project's app: from what a member or person gave, the team
 // file's `app:` section, what worked last time in this project, or what
 // covibe can tell from the files (package.json, a compose file…).
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { parse } from 'yaml';
 
 export type AppRuntime = 'sandbox' | 'docker';
@@ -41,6 +41,8 @@ export interface AppSpec extends AppConfig {
   readyTimeoutS: number;
   /** Where the settings came from, for people. */
   source: 'given' | 'team' | 'remembered' | 'detected';
+  /** What covibe changed or skipped on its own to make it start (written at the top of the log). */
+  notes?: string[];
 }
 
 export const DEFAULT_READY_S = 180;
@@ -51,7 +53,7 @@ export class AppConfigError extends Error {}
 /** What last started successfully in this project, kept in its .covibe folder. */
 export function rememberedApp(repo: string): AppConfig | undefined {
   try {
-    return JSON.parse(readFileSync(join(repo, '.covibe', 'app.json'), 'utf8')) as AppConfig;
+    return JSON.parse(readFileSync(rememberedFile(repo), 'utf8')) as AppConfig;
   } catch {
     return undefined;
   }
@@ -93,18 +95,30 @@ export function resolveApp(folder: string, opts: { given?: AppConfig; team?: App
   // The first of team, remembered or detected that knows how to start the app fills in what `given` leaves out.
   let base: AppConfig = {};
   let source: AppSpec['source'] = 'given';
+  const notes: string[] = [];
   if (!startable(given)) {
+    // What worked last time may have run a file that only exists in another folder (a member's worktree whose work is not merged yet).
+    const gone = startable(remembered) && remembered.command ? missingScript(folder, remembered.command) : undefined;
+    if (gone) notes.push(`skipped what ran last time (\`${remembered.command}\`): ${gone} is not in ${folder}`);
     if (startable(team)) [base, source] = [team, 'team'];
-    else if (startable(remembered) && (remembered.runtime ?? 'sandbox') === runtime) [base, source] = [remembered, 'remembered'];
+    else if (startable(remembered) && !gone && (remembered.runtime ?? 'sandbox') === runtime) [base, source] = [remembered, 'remembered'];
     else {
       const found = detectApp(folder, runtime);
       if (found) [base, source] = [{ ...team, ...found }, 'detected'];
       else [base, source] = [team, 'team'];
     }
+  } else if (!opts.allowRuntime && !given.setup && team.setup) {
+    // A member chose the command; the team's setup (npm install…) still runs first.
+    given.setup = team.setup;
   }
   // The team's environment, extra domains and patience apply whatever starts the app.
   const context = clean({ env: team.env, network: team.network, readyTimeoutS: team.readyTimeoutS });
   const merged: AppConfig = { ...context, ...base, ...given };
+  // A fresh worktree has no node_modules (they are not in git): install them first.
+  if (runtime === 'sandbox' && !merged.setup && merged.command && needsInstall(folder, merged.command)) {
+    merged.setup = `${packageManager(folder)} install`;
+    notes.push(`node_modules is missing in ${folder}, so \`${merged.setup}\` runs first`);
+  }
   const spec: AppSpec = {
     ...merged,
     runtime,
@@ -112,6 +126,7 @@ export function resolveApp(folder: string, opts: { given?: AppConfig; team?: App
     env: { ...(team.env ?? {}), ...(base.env ?? {}), ...(given.env ?? {}) },
     readyTimeoutS: merged.readyTimeoutS ?? DEFAULT_READY_S,
     source,
+    ...(notes.length ? { notes } : {}),
   };
   if (runtime === 'sandbox' && !spec.command) {
     throw new AppConfigError('covibe cannot tell how to start this app. Give the command that starts it (it must listen on $PORT), e.g. "npm run dev -- --port $PORT".');
@@ -155,8 +170,7 @@ function detectNode(folder: string, host: string): AppConfig | undefined {
   } catch {
     return undefined;
   }
-  const has = (f: string) => existsSync(join(folder, f));
-  const pm = has('pnpm-lock.yaml') ? 'pnpm' : has('yarn.lock') ? 'yarn' : has('bun.lockb') || has('bun.lock') ? 'bun' : 'npm';
+  const pm = packageManager(folder);
   const scripts = pkg.scripts ?? {};
   const name = scripts.dev ? 'dev' : scripts.start ? 'start' : scripts.serve ? 'serve' : scripts.preview ? 'preview' : undefined;
   if (!name) return undefined;
@@ -180,4 +194,47 @@ function composeService(file: string): AppConfig {
   } catch {
     return {};
   }
+}
+
+/** The package manager a Node project uses, by its lockfile. */
+export function packageManager(folder: string): 'npm' | 'pnpm' | 'yarn' | 'bun' {
+  const has = (f: string) => existsSync(join(folder, f));
+  return has('pnpm-lock.yaml') ? 'pnpm' : has('yarn.lock') ? 'yarn' : has('bun.lockb') || has('bun.lock') ? 'bun' : 'npm';
+}
+
+/** Whether a command runs Node tooling in a folder whose packages are not installed (a package.json with dependencies, no node_modules). */
+export function needsInstall(folder: string, command: string): boolean {
+  if (!existsSync(join(folder, 'package.json')) || existsSync(join(folder, 'node_modules'))) return false;
+  try {
+    const pkg = JSON.parse(readFileSync(join(folder, 'package.json'), 'utf8')) as { dependencies?: object; devDependencies?: object };
+    if (!Object.keys({ ...pkg.dependencies, ...pkg.devDependencies }).length) return false;
+  } catch {
+    return false;
+  }
+  return /(^|[\s;&|(])(npm|npx|pnpm|yarn|bun|bunx|node|tsx|vite|next|nuxt|astro|electron-vite|electron)(\s|$)/.test(command);
+}
+
+/** Script files a command runs directly (node x.mjs, python3 app.py, bash run.sh…). */
+const SCRIPT_RUN = /(?:^|[\s;&|(])(?:node|tsx|ts-node|bun|deno run|python3?|bash|sh)\s+(?:-{1,2}[\w-]+(?:=\S+)?\s+)*([^\s;&|()'"$`-][^\s;&|()'"$`]*\.(?:m?js|cjs|m?ts|py|sh))(?=$|[\s;&|)])/g;
+
+/** The first script a command runs that does not exist in the folder, if any. */
+export function missingScript(folder: string, command: string): string | undefined {
+  for (const m of command.matchAll(SCRIPT_RUN)) {
+    const file = m[1]!;
+    if (!existsSync(isAbsolute(file) ? file : join(folder, file))) return file;
+  }
+  return undefined;
+}
+
+/** Where what worked last time is kept for a project. */
+export function rememberedFile(repo: string): string {
+  return join(repo, '.covibe', 'app.json');
+}
+
+/** Forget what worked last time; true when there was something to forget. */
+export function forgetApp(repo: string): boolean {
+  const file = rememberedFile(repo);
+  if (!existsSync(file)) return false;
+  rmSync(file);
+  return true;
 }

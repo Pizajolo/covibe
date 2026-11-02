@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { ConfigError, DEFAULT_SANDBOX_NETWORK, DEFAULT_SANDBOX_WRITE } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
 import { acceptIntoNote, brainLog, BrainError, curate, deleteNote, ensureBrain, listNotes, readNote, writeNote } from '../engine/brain.js';
-import { ask, chat } from '../engine/chat.js';
+import { ask, chat, type ChatOutcome } from '../engine/chat.js';
 import { cleanupWorktrees, worktreeReport } from '../engine/cleanup.js';
 import { checkGoal, goalFilesKey, goalPrompt } from '../engine/backlog.js';
 import { buildInvocation, continueRun, newRunId, startRun, type RunOutcome } from '../engine/engine.js';
@@ -43,19 +43,21 @@ import { backendEnv, BackendError } from '../runner/backend.js';
 import type { EnvironmentInfo, PlanUsage } from '../runner/types.js';
 import { ARCHITECT, design } from './designer.js';
 import { Approvals, GIT_HELPER, gitHelp, helperThread } from './git-helper.js';
+import { APP_DOCTOR, appDoctor, doctorKey, doctorThread, type DoctorActions } from './app-doctor.js';
+import { diagnoseApp } from '../apps/diagnose.js';
 import { GitError } from '../engine/workspace.js';
 import { EventStore } from '../events/store.js';
 import type { DeliveryMode, Goal, RunEvent, RunRecord } from '../events/types.js';
 import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
-import type { AccountInfo, AppViewInfo, BacklogSettings, BacklogState, BacklogView, ConnectionsInfo, GoalView, DiffResult, FeedbackList, MemberInfo, OpenedFile, PreviewSite, RunApp, RunAppSettings, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UndoResult, UsageReport } from './api-types.js';
+import type { AccountInfo, AppViewInfo, BacklogSettings, BacklogState, BacklogView, ConnectionsInfo, GoalView, DiffResult, DoctorDetail, FeedbackList, MemberInfo, OpenedFile, PreviewSite, RunApp, RunAppSettings, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UndoResult, UsageReport } from './api-types.js';
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
 import * as gitops from './gitops.js';
 import { GitProblem, gitOverview, gitShow } from './gitops.js';
 import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, stepReports, summarizeRun, usageReport } from './projections.js';
 import { diskSource, FEEDBACK_BRIDGE, gitSource, isText, relPath, SITE_MIME, SiteServer, type SiteSource } from './site.js';
 import { browserHub, type LiveTab } from '../browser/hub.js';
-import { AppConfigError, rememberedApp, resolveApp, type AppConfig, type AppSpec } from '../apps/config.js';
+import { AppConfigError, forgetApp, rememberedApp, rememberedFile, resolveApp, type AppConfig, type AppSpec } from '../apps/config.js';
 import { appHub, AppError, tail, type AppState } from '../apps/manager.js';
 import { AppView } from '../apps/view.js';
 import { expandHome } from '../sandbox-policy.js';
@@ -689,6 +691,125 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     } catch {
       return { network: DEFAULT_SANDBOX_NETWORK };
     }
+  };
+  /** A person's message to a member of a run: into the live run, or a follow-up conversation after it ended. */
+  const chatWith = async (project: Project, store: EventStore, run: RunRecord, agent: string, message: string, delivery: DeliveryMode = 'queue', uploads: string[] = []): Promise<ChatOutcome | { mode: 'answering' }> => {
+    const team = teamForRun(run).load();
+    if (!team.agents[agent]) throw new BadRequest(`team ${team.name} has no member "${agent}"`);
+    // Files sent with the message go to a folder of their own in the run's.
+    const attachments = uploads.length ? takeUploads(uploads, project.path, run.id, `chat-${Date.now()}`) : [];
+    if (store.isLive(run)) return chat({ store, runner, team, runId: run.id, agent, message, delivery, connections, attachments });
+    if (!store.getSession(run.id, agent)) throw new BadRequest(`${agent} has not worked on this run yet, so there is no conversation to continue. Ask it a question instead.`);
+    const key = `${run.id}/${agent}`;
+    if (answering.has(key)) {
+      // It is answering an earlier message: hand this one to it while it works.
+      const mode: DeliveryMode = delivery === 'interrupt' ? 'interrupt' : 'steer';
+      const m = store.enqueue(run.id, agent, 'human', withFiles(message, attachments), mode);
+      store.append(run.id, { type: 'message.queued', agent, step: 'chat', data: { id: m.id, to: agent, from: 'human', text: message, mode, ...(attachments.length ? { attachments } : {}) } });
+      return { mode: 'queued' as const, messageId: m.id, delivery: mode };
+    }
+    answering.add(key);
+    // The answer streams in as events; don't hold the request open for it.
+    void chat({ store, runner, team, runId: run.id, agent, message, connections, attachments })
+      .catch((err) => store.append(run.id, { type: 'agent.error', agent, step: 'chat', data: { ok: false, error: (err as Error).message } }))
+      .finally(() => answering.delete(key));
+    return { mode: 'answering' as const };
+  };
+  /** Where a run's app settings live: what covibe remembered for the project, and the team file's app: section. */
+  const appPlaces = (project: Project, run: RunRecord): RunApp['places'] => {
+    const remembered = rememberedApp(project.path);
+    const { team } = appContext(run);
+    return {
+      ...(remembered ? { memory: { file: rememberedFile(project.path), settings: settingsOf(remembered) } } : {}),
+      ...(run.teamFile ? { teamFile: run.teamFile } : {}),
+      ...(team ? { team: settingsOf(team) } : {}),
+    };
+  };
+  /**
+   * Start a run's app as a person (the App tab) or with their approval (the
+   * app doctor). Resolves with its state once it answers or fails.
+   */
+  const startApp = async (project: Project, store: EventStore, run: RunRecord, given: AppConfig, by: string, allowRuntime: boolean): Promise<{ started: Promise<AppState> }> => {
+    const folder = await appFolder(project, run, true);
+    const { team, network } = appContext(run);
+    let spec: AppSpec;
+    try {
+      spec = resolveApp(folder, { given, team, remembered: rememberedApp(project.path), allowRuntime });
+    } catch (err) {
+      if (err instanceof AppConfigError) throw new BadRequest(err.message);
+      throw err;
+    }
+    // Whatever a person starts is remembered for next time (as they gave it, or as it was suggested).
+    spec = { ...spec, source: 'given' };
+    const started = appHub.start({
+      repo: project.path,
+      runId: run.id,
+      folder,
+      spec,
+      by,
+      network,
+      allowWrite: DEFAULT_SANDBOX_WRITE.map((d) => expandHome(d, homedir())),
+      onEvent: (e) => store.append(run.id, { type: e.type, step: 'app', data: e.data }),
+      keepAlive: () => store.isLive(store.getRun(run.id) ?? run),
+    });
+    started.catch((err) => store.append(run.id, { type: 'app.failed', step: 'app', data: { name: 'app', reason: (err as Error).message } }));
+    return { started };
+  };
+  /** What the app doctor reads, and does once the person approves. */
+  const doctorActions = (project: Project, store: EventStore, run: RunRecord, folder: string): DoctorActions => {
+    let members: string[] = [];
+    try {
+      members = Object.keys(teamForRun(run).load().agents);
+    } catch {
+      // the team file is gone: no one to message
+    }
+    const logs = (n: number, find?: string) => {
+      let lines = appHub.logs(project.path, run.id).split('\n');
+      if (find) lines = lines.filter((l) => l.toLowerCase().includes(find.toLowerCase()));
+      return lines.slice(-n).join('\n').trim() || (find ? `No lines with "${find}".` : 'The log is empty.');
+    };
+    return {
+      members,
+      logs,
+      info: () => {
+        const state = appHub.get(project.path, run.id);
+        const places = appPlaces(project, run);
+        const { team } = appContext(run);
+        let next: string;
+        try {
+          const spec = resolveApp(folder, { team, remembered: rememberedApp(project.path) });
+          next = `Start would run: ${JSON.stringify(settingsOf(spec))} (${spec.source})${spec.notes?.length ? `; covibe by itself: ${spec.notes.join('; ')}` : ''}`;
+        } catch (err) {
+          next = `Start cannot tell how to run it: ${(err as Error).message}`;
+        }
+        const problems = state?.status === 'failed' ? diagnoseApp(state, appHub.logs(project.path, run.id)) : [];
+        return [
+          `Folder: ${folder}`,
+          state
+            ? `Last start: ${state.status}${state.reason ? ` (${state.reason})` : ''}, by ${state.by}, runtime ${state.runtime}, settings ${JSON.stringify(settingsOf(state.spec))} (${state.source}).`
+            : 'It has not been started for this run.',
+          next,
+          `Team file: ${places.teamFile ?? 'none'}; its app: section: ${places.team ? JSON.stringify(places.team) : 'none'}.`,
+          `Remembered from last time (${rememberedFile(project.path)}): ${places.memory ? JSON.stringify(places.memory.settings) : 'nothing'}.`,
+          problems.length ? `covibe recognised: ${problems.map((p) => `${p.title} (${p.detail})`).join(' | ')}` : '',
+          state ? `The end of its log:\n${tail(appHub.logs(project.path, run.id), 40)}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n');
+      },
+      start: async (settings) => {
+        const state = await (await startApp(project, store, run, settings, 'the app doctor (you approved)', false)).started.catch((err: Error) => ({ status: 'failed', reason: err.message, url: '' }) as Pick<AppState, 'status' | 'reason' | 'url'>);
+        const end = tail(appHub.logs(project.path, run.id), 30) || '(empty)';
+        return state.status === 'running'
+          ? { ok: true, text: `It runs at ${state.url}. The end of its log:\n${end}` }
+          : { ok: false, text: `It did not start: ${state.reason ?? 'unknown reason'}. The end of its log:\n${end}` };
+      },
+      forget: () => (forgetApp(project.path) ? { ok: true, text: `Forgot ${rememberedFile(project.path)}.` } : { ok: true, text: 'Nothing was remembered.' }),
+      message: async (to, text) => {
+        const r = await chatWith(project, store, run, to, `${text}\n\n(From covibe's app doctor, approved by the person.)`);
+        return { ok: true, text: `The message went to ${to} (${r.mode}).` };
+      },
+    };
   };
   const settingsOf = (c: AppConfig): RunAppSettings => {
     const out: RunAppSettings = {};
@@ -1449,31 +1570,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     }],
     ['POST', '/api/runs/:pid/:rid/chat', async (p, body) => {
       const { project, store, run } = findRun(p.pid!, p.rid!);
-      const team = teamForRun(run).load();
-      const agent = str(body, 'agent');
-      const message = str(body, 'message');
       const requested = (body as { delivery?: unknown }).delivery;
       const delivery: DeliveryMode = requested === 'steer' || requested === 'interrupt' ? requested : 'queue';
-      if (!team.agents[agent]) throw new BadRequest(`team ${team.name} has no member "${agent}"`);
-      // Files sent with the message go to a folder of their own in the run's.
-      const ids = uploadIds(body);
-      const attachments = ids.length ? takeUploads(ids, project.path, run.id, `chat-${Date.now()}`) : [];
-      if (store.isLive(run)) return chat({ store, runner, team, runId: run.id, agent, message, delivery, connections, attachments });
-      if (!store.getSession(run.id, agent)) throw new BadRequest(`${agent} has not worked on this run yet, so there is no conversation to continue. Ask it a question instead.`);
-      const key = `${run.id}/${agent}`;
-      if (answering.has(key)) {
-        // It is answering an earlier message: hand this one to it while it works.
-        const mode: DeliveryMode = delivery === 'interrupt' ? 'interrupt' : 'steer';
-        const m = store.enqueue(run.id, agent, 'human', withFiles(message, attachments), mode);
-        store.append(run.id, { type: 'message.queued', agent, step: 'chat', data: { id: m.id, to: agent, from: 'human', text: message, mode, ...(attachments.length ? { attachments } : {}) } });
-        return { mode: 'queued', messageId: m.id, delivery: mode };
-      }
-      answering.add(key);
-      // The answer streams in as events; don't hold the request open for it.
-      void chat({ store, runner, team, runId: run.id, agent, message, connections, attachments })
-        .catch((err) => store.append(run.id, { type: 'agent.error', agent, step: 'chat', data: { ok: false, error: (err as Error).message } }))
-        .finally(() => answering.delete(key));
-      return { mode: 'answering' };
+      return chatWith(project, store, run, str(body, 'agent'), str(body, 'message'), delivery, uploadIds(body));
     }],
     ['POST', '/api/ask', async (_p, body) => {
       const project = library.project(str(body, 'project'));
@@ -1558,7 +1657,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const { project, run } = findRun(p.pid!, p.rid!);
       const state = appHub.get(project.path, run.id);
       if (state && (state.status === 'running' || state.status === 'starting')) appHub.touch(project.path, run.id);
-      const out: RunApp = { log: state ? tail(appHub.logs(project.path, run.id), 400) : '', dockerAvailable: await dockerAvailable(), ...(state ? { app: appInfo(state) } : {}) };
+      const log = state ? tail(appHub.logs(project.path, run.id), 400) : '';
+      const out: RunApp = { log, dockerAvailable: await dockerAvailable(), ...(state ? { app: appInfo(state) } : {}), places: appPlaces(project, run) };
+      if (state?.status === 'failed') out.problems = diagnoseApp(state, appHub.logs(project.path, run.id));
+      const doctor = libraryStore.listRuns(500).find((r) => r.kind === 'doctor' && r.team === doctorKey(project.id, run.id));
+      if (doctor) out.doctor = { runId: doctor.id, busy: answering.has(`${doctor.id}/${APP_DOCTOR}`), waiting: approvals.waiting(doctor.id).length };
       let folder: string | undefined;
       try {
         folder = await appFolder(project, run, false);
@@ -1588,34 +1691,67 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     }],
     ['POST', '/api/runs/:pid/:rid/app/start', async (p, body) => {
       const { project, store, run } = findRun(p.pid!, p.rid!);
-      const folder = await appFolder(project, run, true);
-      const given = appSettingsBody(body);
-      const { team, network } = appContext(run);
-      let spec: AppSpec;
-      try {
-        spec = resolveApp(folder, { given, team, remembered: rememberedApp(project.path), allowRuntime: true });
-      } catch (err) {
-        if (err instanceof AppConfigError) throw new BadRequest(err.message);
-        throw err;
-      }
-      // Whatever a person starts is remembered for next time (as they gave it, or as it was suggested).
-      spec = { ...spec, source: 'given' };
-      const started = appHub.start({
-        repo: project.path,
-        runId: run.id,
-        folder,
-        spec,
-        by: 'you',
-        network,
-        allowWrite: DEFAULT_SANDBOX_WRITE.map((d) => expandHome(d, homedir())),
-        onEvent: (e) => store.append(run.id, { type: e.type, step: 'app', data: e.data }),
-        keepAlive: () => store.isLive(store.getRun(run.id) ?? run),
-      });
-      started.catch((err) => store.append(run.id, { type: 'app.failed', step: 'app', data: { name: 'app', reason: (err as Error).message } }));
+      const { started } = await startApp(project, store, run, appSettingsBody(body), 'you', true);
       // It answers once the app does; the panel follows its state meanwhile.
       await Promise.race([started.catch(() => undefined), new Promise((r) => setTimeout(r, 300))]);
       const state = appHub.get(project.path, run.id);
       return state ? appInfo(state) : { status: 'failed' };
+    }],
+    ['DELETE', '/api/runs/:pid/:rid/app/memory', (p) => {
+      const { project } = findRun(p.pid!, p.rid!);
+      return { forgotten: forgetApp(project.path) };
+    }],
+    // ---- the app doctor (conversations live in the library store, one per run)
+    ['POST', '/api/runs/:pid/:rid/app/doctor', async (p, body) => {
+      const { project, store, run } = findRun(p.pid!, p.rid!);
+      const b = body as { runId?: unknown };
+      const key = doctorKey(project.id, run.id);
+      const previous = typeof b.runId === 'string' && b.runId ? libraryStore.getRun(b.runId) : undefined;
+      if (previous && (previous.kind !== 'doctor' || previous.team !== key)) throw new BadRequest("that conversation is about another run's app");
+      if (previous && answering.has(`${previous.id}/${APP_DOCTOR}`)) throw new BadRequest('the app doctor is still working');
+      const folder = await appFolder(project, run, true);
+      const stop = new AbortController();
+      const teamFile = run.teamFile && existsSync(run.teamFile) ? run.teamFile : undefined;
+      const { runId, done } = await appDoctor({
+        store: libraryStore,
+        runner,
+        approvals,
+        project,
+        target: { runId: run.id },
+        folder,
+        readDirs: teamFile ? [dirname(teamFile)] : undefined,
+        runId: previous?.id,
+        message: str(body, 'message'),
+        signal: stop.signal,
+        actions: doctorActions(project, store, run, folder),
+      });
+      answering.add(`${runId}/${APP_DOCTOR}`);
+      helperStops.set(runId, stop);
+      void done.finally(() => {
+        answering.delete(`${runId}/${APP_DOCTOR}`);
+        helperStops.delete(runId);
+      });
+      return { runId };
+    }],
+    ['GET', '/api/app-doctor/:did', (p): DoctorDetail => {
+      const run = libraryStore.getRun(p.did!);
+      if (!run || run.kind !== 'doctor') throw new NotFound('conversation not found');
+      const events = libraryStore.events(run.id);
+      return {
+        runId: run.id,
+        busy: answering.has(`${run.id}/${APP_DOCTOR}`),
+        thread: doctorThread(events, new Set(approvals.waiting(run.id))),
+        costUsd: events.filter((e) => e.type === 'agent.finished' || e.type === 'agent.error').reduce((n, e) => n + Number(e.data.cost_usd ?? 0), 0),
+      };
+    }],
+    ['POST', '/api/app-doctor/:did/decide', (p, body) => {
+      const b = body as { id?: unknown; run?: unknown };
+      if (!approvals.decide(p.did!, String(b.id ?? ''), b.run === true)) throw new BadRequest('that proposal is no longer waiting');
+      return { ok: true };
+    }],
+    ['POST', '/api/app-doctor/:did/stop', (p) => {
+      helperStops.get(p.did!)?.abort();
+      return { ok: true };
     }],
     ['POST', '/api/runs/:pid/:rid/app/stop', async (p) => {
       const { project, run } = findRun(p.pid!, p.rid!);

@@ -806,6 +806,23 @@ app:
   ready_timeout_s: 180
 ```
 
+**What covibe fixes by itself.** A fresh worktree has no `node_modules`, so when a project with dependencies has
+none and nothing installs them, covibe runs the install first (by the lockfile). What ran last time is skipped
+when it runs a script this folder does not have (it worked in a member's worktree whose work is not merged yet).
+When a member gives its own command, the team file's `setup` still runs first. What covibe changed is at the top
+of the app's log.
+
+**When it does not start**, the App tab says what covibe recognises in the log (packages not installed, a missing
+file, a program that is not installed, a blocked domain, a write the sandbox refused, an app that never answers on
+`$PORT` or listens elsewhere, a desktop app such as Electron) and where to fix each: **How it runs**, the team file's
+`app:` section, what ran last time, the project's code, or this computer. **How it runs** also shows the team
+file's `app:` section and what covibe remembered (`<repo>/.covibe/app.json`), which **Forget it** deletes.
+
+**The app doctor** (**Find and fix it with an agent**, or **App doctor**) is an agent that reads the app's log,
+folder and settings and finds out why it does not start. It changes nothing itself: it proposes starting the app
+with other settings, forgetting what ran last time, or asking a member of the run to change the code, and each
+proposal waits for you to apply or decline it. It uses your Claude login.
+
 **In the sandbox** (the default) the app runs in the same OS sandbox as members' shell commands: it writes only in
 its folder, its temp folder and package caches (not `.git`, `.claude`, `.mcp.json` or `.covibe` there), reaches only
 the team's sandbox domains plus `network`, and gets a clean environment without your keys. On macOS it listens on
@@ -926,7 +943,9 @@ src/browser/               covibe's browser: tabs over the DevTools protocol (ta
 src/server/site.ts         a run's files (or a member's folder) served as a website on a port of its own
 src/apps/                  running a project's app: what to run (config.ts), the sandbox launcher and its policy
                            (launcher.ts, policy.ts), sandbox and Docker processes, state and logs (manager.ts), members'
-                           tools (tools.ts), the view the App tab shows it through (view.ts)
+                           tools (tools.ts), the view the App tab shows it through (view.ts), why it did not start
+                           (diagnose.ts)
+src/server/app-doctor.ts   the app doctor: finds out why the app does not start and proposes fixes people approve
 src/server/feedback.ts     comments pinned on a run's result, and the goal that sends them to the team
 src/engine/backlog.ts      a project's backlog: checking goals before they start, and the goal the team gets
 src/engine/attachments.ts  files people give a run: uploads, the run's folder outside the project, what members are told

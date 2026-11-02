@@ -272,6 +272,7 @@ export class AppHub {
     const log = openSync(logFile, 'w');
     const say = (line: string) => writeSync(log, `${line}\n`);
     const spec = o.spec;
+    for (const note of spec.notes ?? []) say(`# covibe ${note}`);
     const docker = spec.runtime === 'docker';
     const containerPort = docker ? (spec.port ?? 3000) : undefined;
     let port: number;

@@ -903,6 +903,14 @@ button.link.mono:hover { color: var(--accent); }
 .app-head { display: flex; flex-direction: column; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface); flex: none; }
 .app-settings { display: flex; flex-direction: column; gap: 10px; }
 .app-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.app-places { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.app-place { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.app-place .tiny { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; overflow-wrap: anywhere; }
+.app-place pre { margin: 0; font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; color: var(--text-2); }
+.app-problems { display: flex; flex-direction: column; gap: 10px; margin: 0 16px 12px; }
+.app-problem { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.app-problem ul { margin: 4px 0 0; padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.chip-label { display: inline-block; font-size: 10.5px; padding: 1px 6px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); margin-right: 4px; }
 .app-field.small-field { max-width: 200px; }
 .app-body { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--surface-2); }
 .app-body > .preview-main { flex: 1; min-height: 0; }

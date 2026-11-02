@@ -70,7 +70,7 @@ describe('what covibe runs', () => {
 
   it('takes what was given, then the team file, then what worked last time, then detection', () => {
     const repo = tempDir();
-    writeFiles(repo, { 'package.json': JSON.stringify({ scripts: { start: 'node server.js' } }) });
+    writeFiles(repo, { 'package.json': JSON.stringify({ scripts: { start: 'node server.js' } }), 'server.js': '', 'node_modules/.keep': '' });
     expect(resolveApp(repo, {})).toMatchObject({ runtime: 'sandbox', command: 'npm run start', source: 'detected', path: '/', readyTimeoutS: 180 });
     rememberApp(repo, { command: 'node server.js', path: '/shop' });
     expect(rememberedApp(repo)).toEqual({ command: 'node server.js', path: '/shop' });
