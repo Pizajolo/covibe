@@ -195,6 +195,55 @@ export interface RunApp {
   /** Why it cannot be started from here (the run's files are gone, say). */
   unavailable?: string;
   dockerAvailable: boolean;
+  /** Where the settings live, so people can see and change them. */
+  places: {
+    /** What worked last time in this project (<repo>/.covibe/app.json), if anything. */
+    memory?: { file: string; settings: RunAppSettings };
+    /** The team file the run uses, and its app: section if it has one. */
+    teamFile?: string;
+    team?: RunAppSettings;
+  };
+  /** What went wrong, when it did not start (see apps/diagnose.ts). */
+  problems?: AppProblemInfo[];
+  /** The app doctor's latest conversation about this run's app. */
+  doctor?: { runId: string; busy: boolean; waiting: number };
+}
+
+export type AppFixPlace = 'settings' | 'team' | 'memory' | 'code' | 'sandbox' | 'computer';
+
+export interface AppProblemInfo {
+  kind: string;
+  title: string;
+  detail: string;
+  fixes: { where: AppFixPlace; text: string }[];
+}
+
+/** One item of the app doctor's conversation. */
+export type DoctorItem =
+  | { id: number; ts: string; kind: 'human' | 'agent' | 'tool' | 'note' | 'error'; text: string }
+  /** A change it proposes, waiting for the person (or applied, declined, or no longer waiting). */
+  | {
+      id: number;
+      ts: string;
+      kind: 'proposal';
+      proposal: string;
+      action: 'start' | 'forget' | 'message';
+      /** What it would do, in a line. */
+      title: string;
+      why?: string;
+      settings?: RunAppSettings;
+      to?: string;
+      message?: string;
+      state: 'waiting' | 'applied' | 'skipped' | 'expired';
+      ok?: boolean;
+      output?: string;
+    };
+
+export interface DoctorDetail {
+  runId: string;
+  busy: boolean;
+  thread: DoctorItem[];
+  costUsd: number;
 }
 
 /** Where the app panel shows the app: a view in front of it (see apps/view.ts). */

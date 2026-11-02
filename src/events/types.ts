@@ -5,7 +5,7 @@ export type RunStatus = 'running' | 'succeeded' | 'failed' | 'escalated';
 
 /** A workflow run, or a read-only question session with one agent. */
 /** check: the lead looking over a backlog goal before it goes to the team (see engine/backlog.ts). */
-export type RunKind = 'workflow' | 'ask' | 'curate' | 'design' | 'git' | 'check';
+export type RunKind = 'workflow' | 'ask' | 'curate' | 'design' | 'git' | 'check' | 'doctor';
 
 export type EventType =
   | 'run.started'
@@ -47,6 +47,9 @@ export type EventType =
   | 'git.proposed'
   | 'git.ran'
   | 'git.skipped'
+  | 'doctor.proposed'
+  | 'doctor.applied'
+  | 'doctor.skipped'
   | 'request.sent'
   | 'request.done'
   | 'run.paused'

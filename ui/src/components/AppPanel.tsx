@@ -2,10 +2,11 @@
 // or in Docker. Start, stop and restart it, change how it runs, read its log,
 // and use it live, with feedback on any page or element.
 import { useEffect, useRef, useState } from 'react';
-import { desktop, post, get, type AppViewInfo, type RunApp, type RunAppSettings, type RunSummary } from '../api';
+import { del, desktop, post, get, type AppProblemInfo, type AppViewInfo, type RunApp, type RunAppSettings, type RunSummary } from '../api';
+import { AppDoctor } from './AppDoctor';
 import { useLive } from '../data';
 import { FeedbackPanel, useFeedback } from './Feedback';
-import { IconAlert, IconArrowLeft, IconArrowRight, IconChat, IconLoop, IconPlay, IconSpinner, IconStop } from './icons';
+import { IconAlert, IconArrowLeft, IconArrowRight, IconChat, IconLoop, IconPlay, IconSparkle, IconSpinner, IconStop } from './icons';
 import { Empty, useAction } from './ui';
 
 const SOURCE: Record<string, string> = {
@@ -53,6 +54,14 @@ export function AppPanel({ projectId, run }: { projectId: string; run: RunSummar
     await reload();
   });
 
+  const [forget, forgetting] = useAction(async () => {
+    await del(`${base}/memory`);
+    setForm(null);
+    await reload();
+  });
+  const [doctor, setDoctor] = useState<{ seed?: string } | null>(null);
+  const askDoctor = () => setDoctor({ seed: 'The app does not start. Find out why and get it running.' });
+
   const feedback = useFeedback();
   const [panel, setPanel] = useState(false);
   const [showLog, setShowLog] = useState(false);
@@ -99,6 +108,9 @@ export function AppPanel({ projectId, run }: { projectId: string; run: RunSummar
             <button className={`btn sm ${panel ? '' : 'ghost'}`} onClick={() => setPanel((p) => !p)}>
               Feedback{feedback.items.length ? ` (${feedback.items.length})` : ''}
             </button>
+            <button className={`btn sm ${doctor ? '' : 'ghost'}`} onClick={() => setDoctor((d) => (d ? null : {}))} title="An agent that finds out why the app does not start and proposes fixes you approve">
+              <IconSparkle width={13} height={13} /> App doctor{info.doctor?.waiting ? ` (${info.doctor.waiting})` : ''}
+            </button>
           </div>
           {info.unavailable && <div className="banner warn"><IconAlert />{info.unavailable}</div>}
           {(editing || (!app && !info.suggested?.command && !info.suggested?.compose && !info.suggested?.dockerfile)) && !info.unavailable && (
@@ -138,6 +150,7 @@ export function AppPanel({ projectId, run }: { projectId: string; run: RunSummar
                   <span className="tiny faint">What you start is remembered for this project.</span>
                 </div>
               )}
+              <Places places={info.places} onForget={() => void forget()} forgetting={forgetting} />
             </div>
           )}
         </div>
@@ -155,6 +168,14 @@ export function AppPanel({ projectId, run }: { projectId: string; run: RunSummar
           ) : app?.status === 'failed' ? (
             <div className="col" style={{ flex: 1, minHeight: 0 }}>
               <div className="banner bad" style={{ margin: 16 }}><IconAlert />{app.reason ?? 'The app stopped.'}</div>
+              <Problems
+                problems={info.problems ?? []}
+                places={info.places}
+                onSettings={() => setEditing(true)}
+                onForget={() => void forget()}
+                forgetting={forgetting}
+                onDoctor={askDoctor}
+              />
               {!showLog && <pre className="app-log mono grow">{info.log || 'The log is empty.'}</pre>}
             </div>
           ) : (
@@ -166,7 +187,114 @@ export function AppPanel({ projectId, run }: { projectId: string; run: RunSummar
         </div>
       </div>
       {panel && <FeedbackPanel onClose={() => setPanel(false)} />}
+      {doctor && (
+        <AppDoctor
+          projectId={projectId}
+          runId={run.id}
+          conversation={doctor.seed ? undefined : info.doctor?.runId}
+          seed={doctor.seed}
+          onSeeded={() => setDoctor({})}
+          onClose={() => setDoctor(null)}
+        />
+      )}
     </div>
+  );
+}
+
+const PLACE: Record<AppProblemInfo['fixes'][number]['where'], string> = {
+  settings: 'How it runs',
+  team: 'Team file',
+  memory: 'Last time',
+  code: 'Code',
+  sandbox: 'Sandbox',
+  computer: 'This computer',
+};
+
+/** What covibe recognised in the log, each with where to fix it, and the app doctor for the rest. */
+function Problems({
+  problems,
+  places,
+  onSettings,
+  onForget,
+  forgetting,
+  onDoctor,
+}: {
+  problems: AppProblemInfo[];
+  places: RunApp['places'];
+  onSettings: () => void;
+  onForget: () => void;
+  forgetting: boolean;
+  onDoctor: () => void;
+}) {
+  return (
+    <div className="app-problems">
+      {problems.map((p) => (
+        <div key={p.kind} className="app-problem">
+          <div className="small"><strong>{p.title}</strong></div>
+          <div className="tiny muted">{p.detail}</div>
+          <ul>
+            {p.fixes.map((f, i) => (
+              <li key={i} className="small">
+                <span className="chip-label">{PLACE[f.where]}</span> {f.text}{' '}
+                {f.where === 'settings' && <button className="btn sm ghost" onClick={onSettings}>Open How it runs</button>}
+                {f.where === 'team' && places.teamFile && <OpenFile path={places.teamFile} label="Open the team file" />}
+                {f.where === 'memory' && places.memory && (
+                  <button className="btn sm ghost" disabled={forgetting} onClick={onForget}>Forget it</button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+      <div className="row wrap" style={{ gap: 8 }}>
+        <button className="btn sm primary" onClick={onDoctor}>
+          <IconSparkle width={13} height={13} /> Find and fix it with an agent
+        </button>
+        <span className="tiny faint">
+          {problems.length ? 'Or fix it yourself where it says above. ' : 'covibe does not recognise this one. '}
+          The app doctor reads the log and the folder and proposes fixes; nothing changes until you approve each one.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** Where the settings live: the team file's app: section and what covibe remembered (app.json), which you can forget. */
+function Places({ places, onForget, forgetting }: { places: RunApp['places']; onForget: () => void; forgetting: boolean }) {
+  const show = (s: RunAppSettings) =>
+    Object.entries(s)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join('\n');
+  return (
+    <div className="app-places">
+      <div className="app-place">
+        <div className="tiny muted">
+          Team file{places.teamFile ? <> · <span className="mono">{places.teamFile}</span></> : ''}
+          {places.teamFile && <OpenFile path={places.teamFile} label="Open" />}
+        </div>
+        {places.team ? <pre className="mono">{`app:\n${show(places.team).replace(/^/gm, '  ')}`}</pre> : <div className="tiny faint">No app: section. Add one to set how every start runs (setup, command, …).</div>}
+      </div>
+      <div className="app-place">
+        <div className="tiny muted">
+          What ran last time{places.memory ? <> · <span className="mono">{places.memory.file}</span></> : ''}
+          {places.memory && (
+            <button className="btn sm ghost" disabled={forgetting} onClick={onForget} title="Delete app.json, so the team file or what covibe detects is used">
+              Forget it
+            </button>
+          )}
+        </div>
+        {places.memory ? <pre className="mono">{show(places.memory.settings)}</pre> : <div className="tiny faint">Nothing remembered yet. What starts successfully from here or by a member is kept for this project.</div>}
+      </div>
+    </div>
+  );
+}
+
+function OpenFile({ path, label }: { path: string; label: string }) {
+  if (!desktop) return null;
+  return (
+    <button className="btn sm ghost" onClick={() => void desktop!.openPath(path)}>
+      {label}
+    </button>
   );
 }
 
