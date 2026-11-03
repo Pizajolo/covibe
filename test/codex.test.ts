@@ -396,3 +396,13 @@ describe('ChatGPT accounts', () => {
     expect(((await limited.json()) as { error: { message: string } }).error.message).toMatch(/usage limit reached.*\|1900000000$/);
   });
 });
+
+describe('context Claude Code sends as a system message', () => {
+  it('reaches the model as instructions, not as something it said', () => {
+    const req = { model: 'm', messages: [{ role: 'user' as const, content: 'Hi' }, { role: 'system' as const, content: '# Environment\nLinux' }] };
+    expect(toResponsesRequest(req).input).toEqual([
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Hi' }] },
+      { type: 'message', role: 'developer', content: [{ type: 'input_text', text: '# Environment\nLinux' }] },
+    ]);
+  });
+});

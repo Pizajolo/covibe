@@ -105,6 +105,8 @@ interface StepBase {
   instructions?: string;
   gate?: string;
   onGateFail?: GateFailPolicy;
+  /** Runs in full whatever the planner chose (see engine/selection.ts): the planner cannot leave it out, and a fix round reruns all its branches. */
+  required?: boolean;
 }
 
 export interface AgentStep extends StepBase {

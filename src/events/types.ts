@@ -13,6 +13,8 @@ export type EventType =
   | 'step.started'
   | 'step.finished'
   | 'step.skipped'
+  // The planner chose the members the goal needs (see engine/selection.ts).
+  | 'members.selected'
   | 'step.branch_finished'
   | 'gate.passed'
   | 'gate.failed'

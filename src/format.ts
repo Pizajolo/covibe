@@ -60,6 +60,11 @@ export function formatEvent(e: RunEvent): string {
     case 'step.skipped':
       text = dim(`skipped (${d.reason})`);
       break;
+    case 'members.selected': {
+      const skipped = (d.skipped as string[] | undefined) ?? [];
+      text = `needed: ${(d.members as string[]).join(', ') || 'nobody else'}` + (skipped.length ? dim(` · left out: ${skipped.join(', ')}`) : '') + (d.reason ? dim(` (${d.reason})`) : '');
+      break;
+    }
     case 'gate.passed':
       text = green(`gate passed: ${d.gate}`);
       break;

@@ -321,12 +321,18 @@ A variable you have not saved is taken from the environment covibe runs in, as b
   engine against the context: step outputs, plus `goal`, `loop` (the current fix round) and `feedback`. A gate
   passes only when it evaluates to literal `true`. A missing field or a number counts as failing.
 - **Tasks.** If a branch's `task` selects nothing (`undefined` or `[]`), that branch is skipped.
+- **Who is needed.** The planner (the member of a step named `plan`, or the lead's first step) names the members the
+  goal needs, with the `select_members` tool or a `members` list in its plan report. Steps of members it leaves out
+  and gives no task are skipped, gates included. `required: true` on a step keeps it running in full. If the planner
+  does not choose, every step runs.
 - **Loops.** When a gate fails, the engine evaluates the `feed` expressions, stores them as `feedback`, and jumps
   back to `goto`. The agents there get the feedback in their prompt and resume their own sessions, so they
   remember what they did. After `max_loops` rounds, the run ends with status `escalated` (or `failed`).
 - **Reports.** Every step's output also goes into the event log (`step.finished`), so the plan and each report can
   be read while the run goes: in the app's **Plan** tab, and in `covibe log`, which prints a plan's tasks. The plan is
   the step named `plan`, or else the first step whose report has a `tasks` list.
+- **Narrow fix rounds.** When every item of the feedback has an `owner`, a parallel step reruns only those members'
+  branches; the others keep their reports. See [Where a run's tokens go](docs/token-use.md).
 - **Requests.** Not everything has to go through the workflow's steps. See [Requests between members](#requests-between-members).
 - **Prompts.** Long prompts live in Markdown files. A `prompt` value that contains a newline is used as the prompt
   text itself.

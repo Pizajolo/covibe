@@ -88,6 +88,8 @@ export interface TurnInput {
   maxLoops?: number;
   instructions?: string;
   task?: unknown;
+  /** The task comes from the planner's plan. */
+  fromPlan?: boolean;
   feedback?: Record<string, unknown>;
   messages: InboxMessage[];
   structured: boolean;
@@ -99,7 +101,10 @@ export function turnPrompt(t: TurnInput): string {
   const loopNote = t.loop > 0 ? ` (fix round ${t.loop}${t.maxLoops !== undefined ? ` of at most ${t.maxLoops}` : ''})` : '';
   parts.push(`# Step: ${t.stepId}${loopNote}`);
   if (t.instructions) parts.push(t.instructions.trim());
-  if (t.task !== undefined) parts.push(`## Your task\n${fence(t.task)}`);
+  if (t.task !== undefined) {
+    const hint = t.fromPlan ? '\nThe plan was made by a teammate who already looked through the project: start from the files and facts it names, and read further only where you need to.' : '';
+    parts.push(`## Your task\n${fence(t.task)}${hint}`);
+  }
   if (t.loop > 0 && t.feedback && Object.keys(t.feedback).length) {
     parts.push(
       `## Feedback from the previous round\nThe last round did not pass its gates. Fix the items that concern your work; items with an "owner" field name who should fix them.\n${fence(t.feedback)}`,

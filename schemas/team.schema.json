@@ -462,6 +462,10 @@
         },
         "on_gate_fail": {
           "$ref": "#/$defs/gateFailPolicy"
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Always run this step in full: the planner cannot leave its members out, and a fix round reruns all its branches."
         }
       }
     },
@@ -491,6 +495,10 @@
         },
         "on_gate_fail": {
           "$ref": "#/$defs/gateFailPolicy"
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Always run this step in full: the planner cannot leave its members out, and a fix round reruns all its branches."
         }
       }
     },

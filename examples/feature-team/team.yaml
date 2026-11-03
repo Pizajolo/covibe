@@ -83,9 +83,12 @@ workflow:
     then: escalate_to_human
 
   steps:
+    # The manager lists the members the goal needs (members in its report);
+    # the steps of the others are skipped. `required: true` on a step keeps it
+    # running whatever the plan says.
     - id: plan
       agent: manager
-      output_schema: schemas/plan.json   # tasks[] with an owner each
+      output_schema: schemas/plan.json   # tasks[] with an owner each, and members
 
     - id: build
       parallel:

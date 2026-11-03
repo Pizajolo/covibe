@@ -757,6 +757,7 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'step.started': return { cls: 'step', text: `Step ${e.step}${d.loop ? ` (round ${d.loop})` : ''}` };
     case 'step.finished': return null;
     case 'step.skipped': return { cls: '', text: `Skipped: ${d.reason}` };
+    case 'members.selected': return { cls: 'step', text: `Needed for this goal: ${(d.members as string[]).join(', ') || 'nobody else'}${(d.skipped as string[] | undefined)?.length ? ` · left out: ${(d.skipped as string[]).join(', ')}` : ''}${d.reason ? ` (${d.reason})` : ''}` };
     case 'gate.passed': return { cls: 'good', text: `Gate passed: ${d.gate}` };
     case 'gate.failed': return { cls: 'error', text: `Gate failed: ${d.gate} → ${JSON.stringify(d.value)}` };
     case 'loop.goto': return { cls: 'warn', text: `Back to ${d.to} (round ${d.loop} of ${d.max_loops}) with feedback: ${JSON.stringify(d.feedback).slice(0, 400)}` };

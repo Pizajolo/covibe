@@ -74,6 +74,12 @@ export function toResponsesRequest(req: MessagesRequest, opts: { efforts?: strin
   if (system) input.push({ type: 'message', role: 'developer', content: [{ type: 'input_text', text: system }] });
 
   for (const m of req.messages) {
+    // Context Claude Code sends as a system message (its environment): instructions, not something the model said.
+    if (m.role === 'system') {
+      const text = textOf(m.content);
+      if (text) input.push({ type: 'message', role: 'developer', content: [{ type: 'input_text', text }] });
+      continue;
+    }
     if (typeof m.content === 'string') {
       input.push(m.role === 'user' ? { type: 'message', role: 'user', content: [{ type: 'input_text', text: m.content }] } : { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: m.content }] });
       continue;

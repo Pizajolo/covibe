@@ -32,7 +32,8 @@ export type Block =
 export interface MessagesRequest {
   model: string;
   system?: string | { type: string; text?: string }[];
-  messages: { role: 'user' | 'assistant'; content: string | Block[] }[];
+  /** Claude Code also sends context (its environment) as a system message among the others. */
+  messages: { role: 'user' | 'assistant' | 'system'; content: string | Block[] }[];
   max_tokens?: number;
   temperature?: number;
   top_p?: number;
@@ -82,12 +83,17 @@ const textOf = (content: string | Block[] | undefined): string =>
   typeof content === 'string' ? content : (content ?? []).filter((b): b is Extract<Block, { type: 'text' }> => b.type === 'text').map((b) => b.text).join('\n');
 
 /** An Anthropic Messages request as an OpenAI Chat Completions request. */
-export function toChatRequest(req: MessagesRequest, opts: { maxOutput?: number; openaiHost?: boolean } = {}): Record<string, unknown> {
+export function toChatRequest(req: MessagesRequest, opts: { maxOutput?: number; openaiHost?: boolean; cacheKey?: string } = {}): Record<string, unknown> {
   const messages: ChatMessage[] = [];
   const system = typeof req.system === 'string' ? req.system : (req.system ?? []).map((b) => b.text ?? '').filter(Boolean).join('\n\n');
   if (system) messages.push({ role: 'system', content: system });
 
   for (const m of req.messages) {
+    if (m.role === 'system') {
+      const text = textOf(m.content);
+      if (text) messages.push({ role: 'system', content: text });
+      continue;
+    }
     if (typeof m.content === 'string') {
       messages.push(m.role === 'user' ? { role: 'user', content: m.content } : { role: 'assistant', content: m.content });
       continue;
@@ -120,6 +126,8 @@ export function toChatRequest(req: MessagesRequest, opts: { maxOutput?: number; 
   }
 
   const out: Record<string, unknown> = { model: req.model, messages };
+  // OpenAI routes requests with the same key to the same cache: a member's requests share their long prefix.
+  if (opts.openaiHost && opts.cacheKey) out.prompt_cache_key = opts.cacheKey;
   if (req.max_tokens) {
     const max = opts.maxOutput ? Math.min(req.max_tokens, opts.maxOutput) : req.max_tokens;
     out[opts.openaiHost ? 'max_completion_tokens' : 'max_tokens'] = max;
@@ -348,7 +356,12 @@ export class OpenAiTranslator {
     res.on('close', () => controller.abort());
     if (upstream.codex) return answerCodex(body, req.headers, upstream.baseUrl, upstream.codex, res, controller.signal, (f) => this.fail(res, f.status, f.message, f.retry));
     const base = upstream.baseUrl.replace(/\/+$/, '');
-    const chat = toChatRequest(body, { maxOutput: upstream.maxOutput(body.model), openaiHost: /(^|\.)openai\.com$/.test(new URL(base).hostname) });
+    const session = req.headers['x-claude-code-session-id'];
+    const chat = toChatRequest(body, {
+      maxOutput: upstream.maxOutput(body.model),
+      openaiHost: /(^|\.)openai\.com$/.test(new URL(base).hostname),
+      cacheKey: typeof session === 'string' && session ? session : undefined,
+    });
     const answer = await fetch(`${base}/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(upstream.key ? { authorization: `Bearer ${upstream.key}` } : {}) },
