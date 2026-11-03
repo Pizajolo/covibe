@@ -11,6 +11,7 @@ import type { DeliveryMode, RunEvent } from './events/types.js';
 import { runTeam } from './engine/engine.js';
 import { browserHub } from './browser/hub.js';
 import { answerQuestion } from './engine/questions.js';
+import { stepAgents } from './engine/selection.js';
 import { EventStore } from './events/store.js';
 import { bold, dim, formatEvent, formatRun, green, QUIET_EVENTS, red, yellow } from './format.js';
 import { ClaudeSdkRunner } from './runner/claude-sdk.js';
@@ -168,7 +169,7 @@ function validate(file: string | undefined): number {
   console.log(`  team ${bold(team.name)}: ${Object.keys(team.agents).length} agents, ${team.steps.length} steps, isolation ${team.isolation}, max ${team.maxParallel} in parallel`);
   for (const a of Object.values(team.agents)) {
     const scope = a.writeScope === undefined ? (a.writes ? 'writes anywhere' : 'read-only') : a.writeScope.length ? `writes ${a.writeScope.join(', ')}` : 'read-only';
-    const inSteps = team.steps.some((s) => (s.kind === 'agent' ? s.agent === a.name : s.branches.some((b) => b.agent === a.name)));
+    const inSteps = team.steps.some((s) => stepAgents(s).includes(a.name));
     const onCall = !inSteps && Object.values(team.agents).some((o) => o.canRequest.includes(a.name)) ? ', on request only' : '';
     const asks = a.canRequest.length ? `, asks ${a.canRequest.join(', ')} for work` : '';
     console.log(dim(`  - ${a.name.padEnd(12)} ${(a.model ?? 'default').padEnd(14)} ${a.backend.type.padEnd(12)} ${scope}${a.browser ? ', browser' : ''}${asks}${onCall}`));

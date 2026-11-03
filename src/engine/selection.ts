@@ -18,7 +18,8 @@ export function isPlanningStep(team: TeamConfig, agent: string, stepId: string):
   return /^plan(ning)?$/i.test(stepId) || (team.lead === agent && team.steps[0]?.id === stepId);
 }
 
-export const stepAgents = (step: Step): string[] => (step.kind === 'agent' ? [step.agent] : step.branches.map((b) => b.agent));
+/** The members a step runs (none for a summary step, which covibe writes itself). */
+export const stepAgents = (step: Step): string[] => (step.kind === 'agent' ? [step.agent] : step.kind === 'parallel' ? step.branches.map((b) => b.agent) : []);
 
 /** The run's planner: the member of the first planning step, and where that step is. */
 export function plannerOf(team: TeamConfig): { agent: string; index: number } | undefined {

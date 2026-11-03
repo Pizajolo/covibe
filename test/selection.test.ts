@@ -60,8 +60,9 @@ describe('choosing the members a goal needs', () => {
     expect(outcome.status).toBe('succeeded');
     expect(runner.callsFor('qa')).toHaveLength(0);
     expect(runner.callsFor('tester')).toHaveLength(0);
-    // The manager's own report step still runs.
-    expect(runner.callsFor('manager')).toHaveLength(2);
+    // The summary step still runs (covibe writes it, without the manager).
+    expect(runner.callsFor('manager')).toHaveLength(1);
+    expect((outcome.context.report as { text: string }).text).toContain('qa, tester');
     const events = store.events(outcome.runId);
     expect(events.find((e) => e.type === 'members.selected')).toMatchObject({ agent: 'manager', data: { members: ['frontend', 'backend'], skipped: ['qa', 'tester'] } });
     expect(events.filter((e) => e.type === 'step.skipped').map((e) => [e.step, e.agent])).toEqual([
@@ -75,7 +76,6 @@ describe('choosing the members a goal needs', () => {
     expect(first).toContain('## Who is needed');
     expect(first).toContain("your report's `members`");
     expect(first).toContain('## Hand over what you found');
-    expect(runner.callsFor('manager')[1]!.prompt).not.toContain('## Who is needed');
     // Builders are told the plan already looked through the project.
     expect(runner.callsFor('frontend')[0]!.prompt).toContain('start from the files and facts it names');
   });
@@ -128,12 +128,16 @@ describe('choosing the members a goal needs', () => {
   it('gives a member the same tools on every turn, so its prompt cache holds', async () => {
     const repo = tempRepo();
     const store = new EventStore(':memory:');
-    const runner = new ScriptedRunner(scripts());
-    await runTeam({ team: loadTeam(EXAMPLE), repo, goal: 'g', store, runner, env: {} });
-    const tools = runner.callsFor('manager').map((c) => (c.customTools ?? []).map((t) => t.name));
+    const runner = new ScriptedRunner({ lead: () => ({ text: 'ok' }), builder: () => ({ text: 'ok' }), docs: () => ({ text: 'ok' }), reviewer: () => ({ text: 'ok' }) });
+    await runTeam({ team: toolTeam(), repo, goal: 'g', store, runner, env: {} });
+    const calls = runner.callsFor('lead');
+    const tools = calls.map((c) => (c.customTools ?? []).map((t) => t.name));
     expect(tools).toHaveLength(2);
     expect(tools[0]).toEqual(tools[1]);
-    expect(tools[0]).toEqual(expect.arrayContaining(['update_task', 'select_members']));
+    expect(tools[0]).toEqual(expect.arrayContaining(['plan_tasks', 'update_task', 'select_members']));
+    // Only the planning turn is asked to choose.
+    expect(calls[0]!.prompt).toContain('## Who is needed');
+    expect(calls[1]!.prompt).not.toContain('## Who is needed');
   });
 
   it('tells later members what was changed and by whom', async () => {

@@ -321,6 +321,9 @@ A variable you have not saved is taken from the environment covibe runs in, as b
   engine against the context: step outputs, plus `goal`, `loop` (the current fix round) and `feedback`. A gate
   passes only when it evaluates to literal `true`. A missing field or a number counts as failing.
 - **Tasks.** If a branch's `task` selects nothing (`undefined` or `[]`), that branch is skipped.
+- **Summary steps.** `{ id: report, summary: true }` is a step covibe writes itself, with no member and no model:
+  the run's summary from its log (plan, tasks, each member's latest report, files changed, gates, fix rounds,
+  questions answered, open minor findings). Its output is `{ "text": "…" }`, shown in the Plan tab.
 - **Who is needed.** The planner (the member of a step named `plan`, or the lead's first step) names the members the
   goal needs, with the `select_members` tool or a `members` list in its plan report. Steps of members it leaves out
   and gives no task are skipped, gates included. `required: true` on a step keeps it running in full. If the planner
@@ -573,8 +576,9 @@ A member that needs a decision it cannot make from the goal, its task, the code 
 Every member in a workflow step has an `ask_question` tool, and its turn waits until the tool returns the answer.
 
 1. **The lead answers first.** The question goes to the team's `lead` (a member named `manager` unless the team file
-   says otherwise). The lead answers in a read-only copy of its session from this run, so it knows the plan, and
-   either answers or decides the question is for you. Only the member that asked waits; the rest of the team keeps
+   says otherwise). The lead answers read-only, in a session for questions of its own: the first question starts
+   it with the plan, the todo list and the files changed so far, and later ones continue it, so the lead stays
+   consistent and its prompt stays cached. It either answers or decides the question is for you. Only the member that asked waits; the rest of the team keeps
    working. The lead's own questions, and every question in a team without a lead, go straight to you.
 2. **If the lead cannot answer, the run pauses.** The question comes to you, and until you answer: no new step or
    member starts, members that are working stop at their next tool call, and their time limits stop counting. The

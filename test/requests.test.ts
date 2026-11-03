@@ -104,7 +104,7 @@ describe('requests between members', () => {
     expect(planStep).toBe('plan');
     expect(reports.map((r) => r.step)).toEqual(['plan', 'build', 'review', 'test', 'report']);
     expect(reports.find((r) => r.step === 'build')).toMatchObject({ parallel: true, agents: ['frontend', 'backend'] });
-    expect(reports.find((r) => r.step === 'report')!.output).toEqual({ text: 'Shipped.' });
+    expect((reports.find((r) => r.step === 'report')!.output as { text: string }).text).toContain('# Summary');
     // The read-only manager sees the design at once: it works in the merged state.
     expect(runner.toolResults.find((r) => r.agent === 'manager')!.result).toContain('Reply from designer');
   });

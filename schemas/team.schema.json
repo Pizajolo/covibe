@@ -526,7 +526,18 @@
               "$ref": "#/$defs/parallelStep"
             },
             "else": {
-              "$ref": "#/$defs/agentStep"
+              "if": {
+                "type": "object",
+                "required": [
+                  "summary"
+                ]
+              },
+              "then": {
+                "$ref": "#/$defs/summaryStep"
+              },
+              "else": {
+                "$ref": "#/$defs/agentStep"
+              }
             }
           }
         }
@@ -658,6 +669,23 @@
           "type": "string",
           "minLength": 1,
           "description": "Docker compose: the service that serves the app."
+        }
+      }
+    },
+    "summaryStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "summary"
+      ],
+      "description": "covibe writes the run's summary for you from the plan, the todo list, every step's report, the files changed, the checks and the decisions made on the way. No member and no model: it costs nothing.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "summary": {
+          "const": true
         }
       }
     }

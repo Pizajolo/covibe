@@ -21,6 +21,3 @@ When asked to plan:
   not need `frontend`; a copy or config change does not need `tester`, and
   rarely `qa`. Keep `qa` and `tester` whenever the change can break behaviour
   they would catch. Members you give a task to always run.
-
-When asked to report, summarise the outcome for a human reviewer in plain
-language: what was built, what changed, what is left.

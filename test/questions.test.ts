@@ -130,7 +130,7 @@ describe('Deadline and RunPause', () => {
 });
 
 describe('questions in a run', () => {
-  it('a member asks the lead, which answers from a read-only copy of its session; nothing pauses', async () => {
+  it('a member asks the lead, which answers read-only in a session of its own; nothing pauses', async () => {
     const repo = tempRepo();
     const store = new EventStore(':memory:');
     const runner = new ScriptedRunner(scripts(() => ({ structured: { decision: 'answer', answer: 'Use "hello", lowercase.' } }), { frontend: asks('Which greeting text?') }));
@@ -143,9 +143,13 @@ describe('questions in a run', () => {
     expect(consult.prompt).toContain('Which greeting text?');
     expect(consult.prompt).toContain('web/index.html shows the greeting');
     expect(consult.outputSchema).toBe(LEAD_SCHEMA);
-    // It resumes the session from planning, as a fork, and cannot change anything or ask in turn.
-    expect(consult.resumeSessionId).toBe('session-manager');
-    expect(consult.forkSession).toBe(true);
+    // It answers in a session of its own, not a copy of its planning session, given what the run settled;
+    // it cannot change anything or ask in turn.
+    expect(consult.resumeSessionId).toBeUndefined();
+    expect(consult.forkSession).toBeFalsy();
+    expect(consult.prompt).toContain('# Where the run stands');
+    expect(consult.prompt).toContain('"summary": "Add a greeting page backed by an API."');
+    expect(consult.prompt).toContain('## Todo list');
     expect(consult.tools).toEqual(['Read', 'Grep', 'Glob']);
     expect(consult.customTools?.map((t) => t.name) ?? []).not.toContain('ask_question');
 
@@ -163,6 +167,27 @@ describe('questions in a run', () => {
     expect(summary.steps.map((s) => s.id)).toEqual(['plan', 'build', 'review', 'test', 'report']);
     expect(summary.questions).toMatchObject([{ id: 1, from: 'frontend', status: 'answered', answeredBy: 'manager' }]);
     expect(store.questions(outcome.runId)).toMatchObject([{ status: 'answered', answeredBy: 'manager' }]);
+  });
+
+  it('the lead answers later questions in the same question session', async () => {
+    const repo = tempRepo();
+    const store = new EventStore(':memory:');
+    const runner = new ScriptedRunner(
+      scripts(() => ({ structured: { decision: 'answer', answer: 'Lowercase.' } }), { frontend: asks('Which greeting text?'), backend: asks('Which field name?') }),
+    );
+    const outcome = await runTeam({ team: loadTeam(EXAMPLE), repo, goal: 'Add a greeting', store, runner });
+    expect(outcome.status).toBe('succeeded');
+    const consults = runner.callsFor('manager').filter((c) => isQuestion(c.prompt));
+    expect(consults).toHaveLength(2);
+    expect(consults[0]!.resumeSessionId).toBeUndefined();
+    expect(consults[1]!.resumeSessionId).toBe('session-manager');
+    expect(consults[1]!.forkSession).toBeFalsy();
+    // The resumed session already has the goal; it gets where the run stands now and the new question.
+    expect(consults[1]!.prompt).not.toContain('# Goal');
+    expect(consults[1]!.prompt).toContain('stay consistent');
+    // Same tools and report schema each time, so the session's prompt cache holds.
+    expect(consults[1]!.customTools?.map((t) => t.name)).toEqual(consults[0]!.customTools?.map((t) => t.name));
+    expect(consults[1]!.outputSchema).toBe(consults[0]!.outputSchema);
   });
 
   it('when the lead cannot answer, the run pauses, holds the team, and resumes on the human answer', async () => {

@@ -14,6 +14,7 @@ import { attachmentNote, type Attachment } from './attachments.js';
 import { accountOf, buildInvocation, extractJson, finishedData, isBalanced, newRunId, resolverOf } from './engine.js';
 import { questionOptions } from './questions.js';
 import { readOnly } from './scope.js';
+import { stepAgents } from './selection.js';
 
 
 /** The model "fast" checks run on (members on a provider's model keep theirs). */
@@ -50,8 +51,7 @@ export const CHECK_SCHEMA = {
 
 /** The member that checks goals: the lead, else the first member of the workflow, else the first member. */
 export function checkerOf(team: TeamConfig, mode: Exclude<CheckMode, 'off'>): AgentConfig {
-  const first = team.steps[0];
-  const name = team.lead ?? (first ? (first.kind === 'agent' ? first.agent : first.branches[0]?.agent) : undefined) ?? Object.keys(team.agents)[0];
+  const name = team.lead ?? team.steps.flatMap(stepAgents)[0] ?? Object.keys(team.agents)[0];
   const member = name ? team.agents[name] : undefined;
   if (!member) throw new Error(`team ${team.name} has no members`);
   const base: AgentConfig = { ...readOnly(member), browser: false, app: false, limits: { ...member.limits, max_turns: Math.min(member.limits.max_turns, CHECK_MAX_TURNS) } };

@@ -121,7 +121,12 @@ export interface ParallelStep extends StepBase {
   branches: Branch[];
 }
 
-export type Step = AgentStep | ParallelStep;
+/** covibe writes the run's summary from the reports, the todo list and the log: no member, no model. */
+export interface SummaryStep extends StepBase {
+  kind: 'summary';
+}
+
+export type Step = AgentStep | ParallelStep | SummaryStep;
 
 export interface TeamConfig {
   name: string;

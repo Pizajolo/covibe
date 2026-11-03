@@ -51,7 +51,7 @@ describe('continuing a stopped run', () => {
     expect(store.getRun(runId)!.status).toBe('succeeded');
 
     // The plan was not made again, and the frontend's finished branch was kept.
-    expect(runner.callsFor('manager')).toHaveLength(2); // plan, then the final report
+    expect(runner.callsFor('manager')).toHaveLength(1); // the plan; covibe writes the summary
     expect(runner.callsFor('frontend')).toHaveLength(1);
     // The backend resumed its own session, told to carry on, with its unfinished work still there.
     const again = runner.callsFor('backend')[1]!;
@@ -79,7 +79,7 @@ describe('continuing a stopped run', () => {
     const outcome = await (await continueRun({ team, repo, runId: first.runId, store, runner })).done;
     expect(outcome.status).toBe('succeeded');
     expect(outcome.context.loop).toBe(4);
-    expect(runner.callsFor('manager')).toHaveLength(2);
+    expect(runner.callsFor('manager')).toHaveLength(1);
     const last = runner.callsFor('frontend').at(-1)!;
     expect(last.prompt).not.toMatch(/^The run stopped/);
     expect(last.prompt).toContain('typo');

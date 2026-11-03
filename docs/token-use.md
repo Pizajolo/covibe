@@ -44,14 +44,15 @@ Members do not see each other's conversations. What reaches a member:
    each builder reads it, QA reads it, the tester reads it, and each copy is sent again with every later request of
    that member. This is usually the biggest part.
 2. **Every member pays the fixed overhead** (5,000–9,000 tokens per request, above) in its own session.
-3. **Every step ran, needed or not.** QA, the tester and the manager's report ran for a one-line change.
+3. **Every step ran, needed or not.** QA, the tester and the manager's report ran for a one-line change. The
+   report step also resumed the manager's whole planning session just to restate the reports.
 4. **Fix rounds reran every builder.** A finding for the frontend also sent the backend back to work, and it
    resumed its whole session to find out it had nothing to do.
 5. **A member's tool list could change between its turns.** Claude caches the prompt from the tool list on, so
    a different tool list means the member's whole conversation is read again at full price. The manager got
    `update_task` only once the todo list existed, so its report turn re-read its whole planning session uncached.
-6. **A lead answering a question** works in a copy of its planning session, with other tools and another report
-   schema. Each question re-reads the planner's whole conversation without the cache.
+6. **A lead answering a question** worked in a copy of its planning session, with other tools and another report
+   schema. Each question re-read the planner's whole conversation without the cache.
 7. **A member that ends with text instead of its report** gets one more request from Claude Code
    (`[structured-output-enforce]`), with the whole conversation. Models other than Claude do this more often.
 8. **Other providers cache less.** Claude caches automatically. covibe gives the ChatGPT (Codex) API the session as
@@ -83,6 +84,13 @@ your plan usage, not just the token count.
 - **Report schemas reach Claude Code without `$schema`.** That line costs tokens and means nothing to the model,
   and some Claude Code versions refuse to start with the draft 2020-12 `$schema`. covibe still checks reports
   against the full schema.
+- **The lead answers questions in a session of its own.** The first question starts a small read-only session with
+  what the run has settled: the plan's report, the todo list and the files changed. Later questions in the run
+  resume that session, one at a time, with the same tools and report schema, so it is cached and the lead stays
+  consistent with its earlier answers. The planning session is no longer copied.
+- **covibe can write the summary.** A step `{ id: report, summary: true }` has no member and no model: covibe
+  writes the summary from the run's log (goal, plan, tasks, each member's latest report, files changed, gates and
+  fix rounds, members left out, questions answered, open minor findings). The example team uses it.
 
 ## What you can do in the team file
 
@@ -93,13 +101,7 @@ your plan usage, not just the token count.
 - Use `cache_ttl: 1h` for members resumed after long waits, such as builders between fix rounds. A 1-hour cache
   write costs more than a 5-minute one, but less than writing the whole conversation again after it expired.
 - Give review findings and test failures an `owner` (the example schemas do), so fix rounds stay narrow.
-- Put a cheaper model on the steps that summarise, or leave the final report step out. It resumes the planner's
-  whole session.
+- End with `{ id: report, summary: true }` instead of a member's report step. If you want a member's own words,
+  give that step a cheaper model; it resumes that member's whole session.
 - Keep `CLAUDE.md` short. With `setting_sources: [project]` every member sends it with every request.
 - Prefer providers that cache for members that make many tool calls.
-
-## Not done yet
-
-- **Lead questions** still fork the planner's whole session. A small fresh session with the plan's report, or
-  matching the planning turn's tools and report schema, would let them use the cache.
-- **The report step** could be written from the reports the engine already has, without a model.

@@ -104,8 +104,8 @@ workflow:
       task: "plan.tasks.acceptance"
       gate: "test.failed = 0 and test.passed > 0"
 
+    # covibe writes the summary from the plan, the reports and the log: no
+    # member and no model. (A manager writing it would resume its whole
+    # planning session just to restate the reports.)
     - id: report
-      agent: manager
-      instructions: |
-        Review and tests have passed. Summarise for the human what was built,
-        which files changed and anything left for later.
+      summary: true

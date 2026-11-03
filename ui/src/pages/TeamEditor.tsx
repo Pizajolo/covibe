@@ -888,17 +888,24 @@ function Workflow({ doc, edit }: { doc: Doc; edit: Edit }) {
             <label className="field">
               Who works on it
               <div className="seg">
-                <button className={!Array.isArray(step.parallel) ? 'on' : ''} onClick={() => Array.isArray(step.parallel) && setStep(i, { ...withoutKeys(step, ['parallel']), agent: step.parallel[0]?.agent ?? agents[0] })}>
+                <button className={!Array.isArray(step.parallel) && !step.summary ? 'on' : ''} onClick={() => (Array.isArray(step.parallel) || step.summary) && setStep(i, { ...withoutKeys(step, ['parallel', 'summary']), agent: step.parallel?.[0]?.agent ?? agents[0] })}>
                   One member
                 </button>
-                <button className={Array.isArray(step.parallel) ? 'on' : ''} onClick={() => !Array.isArray(step.parallel) && setStep(i, { ...withoutKeys(step, ['agent', 'task', 'output_schema']), parallel: [{ agent: step.agent ?? agents[0], ...(step.task ? { task: step.task } : {}) }] })}>
+                <button className={Array.isArray(step.parallel) ? 'on' : ''} onClick={() => !Array.isArray(step.parallel) && setStep(i, { ...withoutKeys(step, ['agent', 'task', 'output_schema', 'summary']), parallel: [{ agent: step.agent ?? agents[0], ...(step.task ? { task: step.task } : {}) }] })}>
                   Several in parallel
+                </button>
+                <button className={step.summary ? 'on' : ''} title="covibe writes the run's summary from the reports, without a model" onClick={() => !step.summary && setStep(i, { id: step.id, summary: true })}>
+                  Summary by covibe
                 </button>
               </div>
             </label>
           </div>
 
-          {!Array.isArray(step.parallel) ? (
+          {step.summary ? (
+            <p className="small muted">
+              covibe writes the run's summary here from what the run already has: the plan, the todo list, every step's report, the files changed, the checks, and the questions answered on the way. No member and no model, so it costs nothing.
+            </p>
+          ) : !Array.isArray(step.parallel) ? (
             <div className="grid grid-2">
               <label className="field">
                 Member
@@ -943,36 +950,40 @@ function Workflow({ doc, edit }: { doc: Doc; edit: Edit }) {
             </div>
           )}
 
-          <label className="field">
-            Extra instructions (optional)
-            <TextField multiline value={step.instructions} placeholder="Anything this step should do beyond the member's role" onCommit={(v) => void edit([{ op: 'set', path: ['workflow', 'steps', i, 'instructions'], value: v || null }])} />
-          </label>
+          {!step.summary && (
+            <>
+              <label className="field">
+                Extra instructions (optional)
+                <TextField multiline value={step.instructions} placeholder="Anything this step should do beyond the member's role" onCommit={(v) => void edit([{ op: 'set', path: ['workflow', 'steps', i, 'instructions'], value: v || null }])} />
+              </label>
 
-          <div className="grid grid-2">
-            <label className="field">
-              Gate (optional)
-              <TextField mono value={step.gate} placeholder={`e.g. ${step.id}.blocking_count = 0`} onCommit={(v) => void edit([{ op: 'set', path: ['workflow', 'steps', i, 'gate'], value: v || null }])} />
-              <span className="help">Must be true to continue. Reads the step's structured report, e.g. review.blocking_count = 0 or test.failed = 0.</span>
-            </label>
-            {step.gate && (
-              <div className="field">
-                When the gate fails
-                <div className="seg">
-                  <button className={!step.on_gate_fail ? 'on' : ''} onClick={() => void edit([{ op: 'delete', path: ['workflow', 'steps', i, 'on_gate_fail'] }])}>
-                    Team default
-                  </button>
-                  <button className={step.on_gate_fail ? 'on' : ''} onClick={() => !step.on_gate_fail && void edit([{ op: 'set', path: ['workflow', 'steps', i, 'on_gate_fail'], value: { goto: steps[0]?.id, max_loops: 2, then: 'escalate_to_human' } }])}>
-                    Custom
-                  </button>
-                </div>
-                {step.on_gate_fail ? (
-                  <PolicyFields policy={step.on_gate_fail} steps={steps.slice(0, i + 1).map((s) => s.id)} onChange={(v) => void edit([{ op: 'set', path: ['workflow', 'steps', i, 'on_gate_fail'], value: v }])} />
-                ) : (
-                  <span className="help">{policy ? `Back to ${policy.goto}, up to ${policy.max_loops} rounds.` : 'No team default: the run stops.'}</span>
+              <div className="grid grid-2">
+                <label className="field">
+                  Gate (optional)
+                  <TextField mono value={step.gate} placeholder={`e.g. ${step.id}.blocking_count = 0`} onCommit={(v) => void edit([{ op: 'set', path: ['workflow', 'steps', i, 'gate'], value: v || null }])} />
+                  <span className="help">Must be true to continue. Reads the step's structured report, e.g. review.blocking_count = 0 or test.failed = 0.</span>
+                </label>
+                {step.gate && (
+                  <div className="field">
+                    When the gate fails
+                    <div className="seg">
+                      <button className={!step.on_gate_fail ? 'on' : ''} onClick={() => void edit([{ op: 'delete', path: ['workflow', 'steps', i, 'on_gate_fail'] }])}>
+                        Team default
+                      </button>
+                      <button className={step.on_gate_fail ? 'on' : ''} onClick={() => !step.on_gate_fail && void edit([{ op: 'set', path: ['workflow', 'steps', i, 'on_gate_fail'], value: { goto: steps[0]?.id, max_loops: 2, then: 'escalate_to_human' } }])}>
+                        Custom
+                      </button>
+                    </div>
+                    {step.on_gate_fail ? (
+                      <PolicyFields policy={step.on_gate_fail} steps={steps.slice(0, i + 1).map((s) => s.id)} onChange={(v) => void edit([{ op: 'set', path: ['workflow', 'steps', i, 'on_gate_fail'], value: v }])} />
+                    ) : (
+                      <span className="help">{policy ? `Back to ${policy.goto}, up to ${policy.max_loops} rounds.` : 'No team default: the run stops.'}</span>
+                    )}
+                  </div>
                 )}
               </div>
-            )}
-          </div>
+            </>
+          )}
         </div>
       )}
 
@@ -1086,7 +1097,8 @@ function WorkflowGraph({
     if (!item) return null;
     const s = steps[k]!;
     if (item.kind === 'member') {
-      if (membersOf(s).includes(item.name)) return null;
+      // covibe writes a summary step itself: no members to drop there.
+      if (s.summary || membersOf(s).includes(item.name)) return null;
       if (Array.isArray(s.parallel)) return [{ op: 'insert', path: ['workflow', 'steps', k, 'parallel'], value: { agent: item.name } }];
       const first = { agent: s.agent, ...(s.task ? { task: s.task } : {}) };
       return [{ op: 'set', path: ['workflow', 'steps', k], value: { ...withoutKeys(s, ['agent', 'task', 'output_schema']), parallel: [first, { agent: item.name }] } }];
@@ -1180,7 +1192,7 @@ function WorkflowGraph({
               {...target(`card${k}`, (it) => cardAction(it, k))}
               data-step={s.id}
             >
-              <span className="kind">{parallel ? 'In parallel' : 'Step'}</span>
+              <span className="kind">{parallel ? 'In parallel' : s.summary ? 'Summary' : 'Step'}</span>
               <strong>{s.id}</strong>
               <div className="agents">
                 {who.length ? (
@@ -1194,6 +1206,8 @@ function WorkflowGraph({
                       )}
                     </span>
                   ))
+                ) : s.summary ? (
+                  <span className="tiny faint">Written by covibe, no model</span>
                 ) : (
                   <span className="tiny faint">Drop a member here</span>
                 )}

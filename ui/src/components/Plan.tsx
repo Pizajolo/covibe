@@ -69,7 +69,7 @@ export function PlanTab({ detail, onOpen }: { detail: RunDetail; onOpen: (agent:
 function Byline({ run, report }: { run: RunSummary; report: StepReport }) {
   return (
     <span className="hint">
-      by {report.agents.join(', ') || 'the team'}
+      by {report.agents.join(', ') || 'covibe'}
       {report.round > 0 ? ` · fix round ${report.round}` : ''} · {new Date(report.ts).toLocaleTimeString()}
       {run.steps.find((s) => s.id === report.step)?.status === 'running' ? ' · running again' : ''}
     </span>

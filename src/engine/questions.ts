@@ -49,14 +49,22 @@ export function leadVerdict(value: unknown, question: string): LeadVerdict {
   return { forHuman: question, note: 'the lead did not give a usable answer' };
 }
 
-export function leadPrompt(p: { goal: string; lead: string; from: string; step: string; question: string; context?: string; options?: string[] }): string {
+/**
+ * The lead's turn for a question. `known`: what the run has settled so far (the
+ * plan, the todo list, the files changed), since the lead answers in a session
+ * of its own rather than in its planning session.
+ */
+export function leadPrompt(p: { goal: string; lead: string; from: string; step: string; question: string; context?: string; options?: string[]; known?: string[]; again?: boolean }): string {
+  const known = (p.known ?? []).filter(Boolean);
   return [
-    `# Goal\n${p.goal}`,
+    ...(p.again ? [] : [`# Goal\n${p.goal}`]),
+    ...(known.length ? [`# Where the run stands\n${known.join('\n\n')}`] : []),
     `# Question from ${p.from}\n${p.question}`,
     ...(p.options ? [`## Options ${p.from} sees\n${p.options.map((o) => `- ${o}`).join('\n')}`] : []),
     ...(p.context ? [`## Context from ${p.from}\n${p.context}`] : []),
     `You are ${p.lead}, the team lead. ${p.from} is waiting for your answer before it continues step "${p.step}".`,
     `Answer it yourself if the goal, the plan, the code or the project brain settle it, or if it is a call you can make as lead. Pass it to the human only when the decision is theirs: product or scope choices the goal leaves open, trade-offs with real cost, credentials or access, or anything you would be guessing. The whole run pauses while the human answers, so do not pass on what you can decide.`,
+    `You answer the team's questions in a session of your own, not the one you planned in${p.again ? '; your earlier answers in this run are above, so stay consistent with them' : ''}: what the run has settled is above. Read the code or files only where the question needs it.`,
     'You can read but not change anything. Return decision "answer" with your answer, or decision "ask_human" with question_for_human and reason, and options_for_human when it is a choice between a few answers.',
   ].join('\n\n');
 }

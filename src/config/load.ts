@@ -186,6 +186,7 @@ interface RawStep {
   gate?: string;
   on_gate_fail?: RawPolicy;
   required?: boolean;
+  summary?: boolean;
 }
 interface RawTeam {
   name: string;
@@ -376,6 +377,7 @@ function resolveTeam(raw: RawTeam, file: string, opts: LoadOptions): TeamConfig 
     if (s.task) checkExpr(s.task, `${where}/task`);
     const onGateFail = resolvePolicy(s.on_gate_fail, `${where}/on_gate_fail`) ?? (s.gate ? defaultPolicy : undefined);
     const base = { id: s.id, instructions: s.instructions, gate: s.gate, onGateFail, ...(s.required ? { required: true } : {}) };
+    if (s.summary) return { id: s.id, kind: 'summary' };
     if (s.parallel) {
       const seen = new Set<string>();
       const branches = s.parallel.map((b, j): Branch => {
