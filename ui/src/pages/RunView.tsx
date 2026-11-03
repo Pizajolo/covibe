@@ -220,7 +220,12 @@ export function RunView({ projectId, runId, tab: tabParam }: { projectId: string
           )}
           {!isAsk && (
             <button className={tab === 'plan' ? 'on' : ''} onClick={() => setTab('plan')}>
-              <IconPlan width={14} height={14} /> {detail.planStep ? 'Plan' : 'Reports'}
+              <IconPlan width={14} height={14} /> {detail.planStep || detail.tasks.length ? 'Plan' : 'Reports'}
+              {detail.tasks.length > 0 && (
+                <span className="badge" title="Tasks done">
+                  {detail.tasks.filter((t) => t.status === 'done').length}/{detail.tasks.length}
+                </span>
+              )}
               {run.requests.some((r) => r.status === 'working') && <span className="badge">{run.requests.filter((r) => r.status === 'working').length}</span>}
             </button>
           )}
@@ -760,6 +765,9 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'agent.tool': return { cls: 'tool', text: toolText(String(d.tool), d.input, roots) };
     case 'agent.finished': return { cls: 'good', text: `Finished · ${d.turns} turns · ${money(d.cost_usd)} · ${tokens((d.tokens?.input ?? 0) + (d.tokens?.output ?? 0) + (d.tokens?.cacheRead ?? 0) + (d.tokens?.cacheWrite ?? 0))} tokens` };
     case 'agent.error': return { cls: 'error', text: `Failed: ${d.error}` };
+    case 'tasks.planned': return { cls: 'step', text: `Todo list: ${(d.tasks as { id: string; owner?: string; title: string }[]).map((t) => `${t.id} ${t.title}${t.owner ? ` (${t.owner})` : ''}`).join(' · ')}` };
+    case 'task.updated': return { cls: d.status === 'done' ? 'good' : d.status === 'blocked' ? 'warn' : '', text: `Task ${d.id}: ${d.status}${d.note ? ` — ${d.note}` : ''}` };
+    case 'agent.restarted': return { cls: 'warn', text: `Claude Code stopped unexpectedly; picked up where it left off (try ${d.attempt}): ${d.error}` };
     case 'agent.limited': return { cls: 'warn', text: d.switched_to ? `Hit a usage limit; continues on the ${d.switched_to} account` : d.waiting ? `Hit the plan's usage limit; continues ${d.until ? `at ${clock(String(d.until))}` : 'once it resets'}` : "Stopped by the plan's usage limit" };
     case 'run.restart_scheduled': return { cls: '', text: `Restart scheduled for ${new Date(String(d.at)).toLocaleString()}` };
     case 'run.restart_cancelled': return { cls: '', text: d.error ? `Restart failed: ${d.error}` : 'Restart cancelled' };

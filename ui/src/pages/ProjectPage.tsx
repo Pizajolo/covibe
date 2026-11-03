@@ -30,7 +30,11 @@ interface BrainView {
   }[];
   log: { commit: string; author: string; date: string; message: string }[];
   curators: { teamId: string; team: string; curator: string }[];
+  /** An agent is compressing the notes right now. */
+  summarizing: boolean;
 }
+
+const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`);
 
 type Tab = 'runs' | 'backlog' | 'brain' | 'git';
 
@@ -118,7 +122,8 @@ function Brain({ projectId }: { projectId: string }) {
   const { value: brain, reload } = useLive(
     () => get<BrainView>(`/api/projects/${projectId}/brain`),
     [projectId],
-    (e) => e.projectId === projectId && /^brain\./.test(e.event.type),
+    // A summary that fails changes no note, so its end counts too.
+    (e) => e.projectId === projectId && (/^brain\./.test(e.event.type) || e.event.type === 'run.finished'),
   );
   const [sel, setSel] = useState<string>('README.md');
   const [text, setText] = useState<string | null>(null);
@@ -166,7 +171,16 @@ function Brain({ projectId }: { projectId: string }) {
     go('runs', r.projectId, r.runId, 'activity');
   });
 
+  const [summarize, starting] = useAction(async () => {
+    if (!window.confirm('Summarize the brain? An agent rewrites the notes to say the same in far fewer words, merging notes on the same topic, so members read less on every run. The history keeps the current version.')) return;
+    const r = await post<{ runId: string; projectId: string }>(`/api/projects/${projectId}/brain/summarize`, {});
+    toast('Summarizing the brain');
+    void reload();
+    go('runs', r.projectId, r.runId, 'activity');
+  });
+
   if (!brain) return <div className="content faint small">Loading the brain…</div>;
+  const total = brain.notes.reduce((n, note) => n + note.size, 0);
   const pending = brain.proposals.filter((p) => p.status === 'pending');
   const decided = brain.proposals.filter((p) => p.status !== 'pending').slice(0, 8);
 
@@ -176,6 +190,19 @@ function Brain({ projectId }: { projectId: string }) {
         <div className="split-list">
           <div className="tiny faint" style={{ padding: '2px 4px 8px' }}>
             Shared notes every member reads. Members propose; {brain.curators.length ? [...new Set(brain.curators.map((c) => `${c.curator} of ${c.team}`))].join(', ') : 'you'} and you curate.
+          </div>
+          <div className="row" style={{ padding: '0 4px 8px', gap: 8 }}>
+            <span className="tiny faint grow">
+              {brain.notes.length} note{brain.notes.length === 1 ? '' : 's'} · {kb(total)}
+            </span>
+            <button
+              className="btn sm"
+              disabled={starting || brain.summarizing || total < 1024}
+              onClick={() => void summarize()}
+              title={total < 1024 ? 'The brain is still small' : 'An agent compresses the notes: same facts, fewer words, so members read less'}
+            >
+              <IconSparkle width={13} height={13} /> {brain.summarizing ? 'Summarizing…' : 'Summarize'}
+            </button>
           </div>
           {brain.notes.map((n) => (
             <div key={n.path} className={`list-row clickable ${n.path === sel ? 'selected' : ''}`} style={{ borderRadius: 8, border: 0, padding: '6px 10px' }} onClick={() => setSel(n.path)}>

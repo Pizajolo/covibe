@@ -8,7 +8,7 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { ConfigError, DEFAULT_SANDBOX_NETWORK, DEFAULT_SANDBOX_WRITE } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
-import { acceptIntoNote, brainLog, BrainError, curate, deleteNote, ensureBrain, listNotes, readNote, writeNote } from '../engine/brain.js';
+import { acceptIntoNote, brainLog, BrainError, brainSize, curate, deleteNote, ensureBrain, listNotes, readNote, summarizeBrain, SUMMARIZER, writeNote } from '../engine/brain.js';
 import { ask, chat, type ChatOutcome } from '../engine/chat.js';
 import { cleanupWorktrees, worktreeReport } from '../engine/cleanup.js';
 import { checkGoal, goalFilesKey, goalPrompt } from '../engine/backlog.js';
@@ -54,6 +54,7 @@ import type { AccountInfo, AppViewInfo, BacklogSettings, BacklogState, BacklogVi
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
 import * as gitops from './gitops.js';
 import { GitProblem, gitOverview, gitShow } from './gitops.js';
+import { replayBoard } from '../engine/tasks.js';
 import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, stepReports, summarizeRun, usageReport } from './projections.js';
 import { diskSource, FEEDBACK_BRIDGE, gitSource, isText, relPath, SITE_MIME, SiteServer, type SiteSource } from './site.js';
 import { browserHub, type LiveTab } from '../browser/hub.js';
@@ -133,6 +134,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const streams = new Set<ServerResponse>();
   /** `${runId}/${agent}` for members answering a chat after their run ended. */
   const answering = new Set<string>();
+  /** Projects whose brain is being summarized right now. */
+  const summarizing = new Set<string>();
   const busyIn = (runId: string) => new Set([...answering].filter((k) => k.startsWith(`${runId}/`)).map((k) => k.slice(runId.length + 1)));
   const cursors = new Map<string, number>();
   /** The git helper's proposals waiting for the person, and how to stop a conversation's turn. */
@@ -1232,7 +1235,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         const doc = rawDoc(library.readFile(t.id, 'team.yaml')) as { brain?: { curator?: string } };
         return doc.brain?.curator ? [{ teamId: t.id, team: t.name, curator: doc.brain.curator }] : [];
       });
-      return { dir: brainRoot(project.path), notes: listNotes(project.path), proposals: store.proposals(), log: await brainLog(project.path), curators };
+      return { dir: brainRoot(project.path), notes: listNotes(project.path), proposals: store.proposals(), log: await brainLog(project.path), curators, summarizing: summarizing.has(project.id) };
     }],
     ['GET', '/api/projects/:pid/brain/note', (p, _b, q) => ({ path: q.get('path'), content: readNote(library.project(p.pid!).path, q.get('path') ?? '') })],
     ['PUT', '/api/projects/:pid/brain/note', async (p, body) => {
@@ -1271,6 +1274,30 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         .finally(() => {
           store.finishRun(run.id, 'succeeded');
           store.append(run.id, { type: 'run.finished', data: { status: 'succeeded', loops: 0, cost_usd: null } });
+        });
+      return { runId: run.id, projectId: project.id };
+    }],
+
+    ['POST', '/api/projects/:pid/brain/summarize', async (p) => {
+      const project = library.project(p.pid!);
+      const store = storeFor(project);
+      await ensureBrain(project.path);
+      if (brainSize(project.path) < 1024) throw new BadRequest('the brain is too small to summarize (under 1 KB)');
+      if (summarizing.has(project.id)) throw new BadRequest('the brain is being summarized already');
+      summarizing.add(project.id);
+      const run = store.createRun({ id: newRunId(), kind: 'curate', team: SUMMARIZER, teamFile: '', repo: project.path, goal: 'Summarize the project brain so members read less' });
+      store.append(run.id, { type: 'run.started', data: { team: SUMMARIZER, goal: run.goal, kind: 'curate', steps: ['summarize'] } });
+      let status: 'succeeded' | 'failed' = 'succeeded';
+      let reason: string | undefined;
+      void summarizeBrain({ store, runner, repo: project.path, runId: run.id, model: library.settings().designerModel, backends: connections })
+        .catch((err) => {
+          status = 'failed';
+          reason = (err as Error).message;
+        })
+        .finally(() => {
+          summarizing.delete(project.id);
+          store.finishRun(run.id, status);
+          store.append(run.id, { type: 'run.finished', data: { status, ...(reason ? { reason } : {}), loops: 0, cost_usd: null } });
         });
       return { runId: run.id, projectId: project.id };
     }],
@@ -1514,6 +1541,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         events,
         threads: chatThreads(events, [project.path]),
         ...stepReports(events),
+        tasks: replayBoard(events, store.isLive(run)),
         roots: [project.path],
         chatMode: store.isLive(run) ? 'queue' : 'answer',
         canStop: active.has(`${project.id}/${run.id}`),

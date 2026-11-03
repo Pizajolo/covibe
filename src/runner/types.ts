@@ -127,7 +127,9 @@ export type AgentStreamEvent =
   /** Tokens used so far in this invocation, and their estimated cost (undefined when the model's prices are unknown). */
   | { kind: 'usage'; tokens: TokenUsage; costUsd?: number }
   /** An image in a tool's result, which the agent sees (a screenshot it read, say); base64 data. */
-  | { kind: 'image'; tool: string; input: unknown; mediaType: string; data: string };
+  | { kind: 'image'; tool: string; input: unknown; mediaType: string; data: string }
+  /** Claude Code's process stopped mid-turn (`error` says how); the runner picks the session up again. */
+  | { kind: 'restarted'; attempt: number; error: string };
 
 export interface RateLimitInfo {
   status: string;

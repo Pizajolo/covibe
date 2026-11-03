@@ -24,6 +24,8 @@ export type EventType =
   | 'agent.error'
   | 'agent.view'
   | 'agent.limited'
+  // Claude Code's process stopped mid-turn and the member's session was picked up again.
+  | 'agent.restarted'
   | 'scope.denied'
   | 'scope.violation'
   | 'git.commit'
@@ -68,6 +70,9 @@ export type EventType =
   | 'app.failed'
   | 'app.stopped'
   | 'feedback.sent'
+  // The run's todo list (see engine/tasks.ts): the planner's tasks, and where each stands.
+  | 'tasks.planned'
+  | 'task.updated'
   // The check of a backlog goal: ready for the team, or it needs answers from you.
   | 'goal.checked'
   // Sent on the live feed only (never stored): a project's backlog changed.

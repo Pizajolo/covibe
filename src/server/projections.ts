@@ -224,6 +224,12 @@ export function summarizeRun(
         a.views = (a.views ?? 0) + 1;
         break;
       }
+      case 'agent.restarted': {
+        const a = agent(e.agent!);
+        a.activity = 'Claude Code stopped unexpectedly; picking up where it left off';
+        a.updatedAt = e.ts;
+        break;
+      }
       case 'agent.text': {
         const a = agent(e.agent!);
         a.lastText = String(d.text).slice(0, 400);
@@ -442,6 +448,7 @@ export function chatThreads(events: RunEvent[], roots: string[] = []): Record<st
     else if (e.type === 'agent.tool' && e.agent) push(e.agent, { ...base, kind: 'tool', text: toolLabel(String(d.tool), d.input, roots) });
     else if (e.type === 'scope.denied' && e.agent) push(e.agent, { ...base, kind: 'error', text: `Blocked: ${d.reason}` });
     else if (e.type === 'agent.error' && e.agent) push(e.agent, { ...base, kind: 'error', text: `Failed: ${d.error}` });
+    else if (e.type === 'agent.restarted' && e.agent) push(e.agent, { ...base, kind: 'note', text: `Claude Code stopped unexpectedly; picked the conversation up again (${d.error})` });
   }
   return threads;
 }

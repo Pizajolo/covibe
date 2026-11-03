@@ -12,6 +12,8 @@ import { brainRoot } from '../home.js';
 import type { Connections } from '../connections/store.js';
 import { plainBackends, type Env } from '../runner/backend.js';
 import type { AgentRunner, CustomTool } from '../runner/types.js';
+import type { BackendResolver } from '../runner/backend.js';
+import { makeToolChecker } from './scope.js';
 
 const exec = promisify(execFile);
 const README = `# Project brain
@@ -265,4 +267,106 @@ ${list}`;
   if (commit) store.append(runId, { type: 'brain.updated', step: 'curate', agent: name, data: { commit } });
   store.append(runId, { type: 'step.finished', step: 'curate', data: { decided } });
   return { decided, commit };
+}
+
+/** The member that compresses the brain (not one of a team's). */
+export const SUMMARIZER = 'summarizer';
+
+/** How many bytes the brain's notes take. */
+export function brainSize(repo: string): number {
+  return listNotes(repo).reduce((n, note) => n + note.size, 0);
+}
+
+/**
+ * Compress the brain: an agent rewrites the notes to say the same in far
+ * fewer words (every member reads them, so every word costs tokens), merges
+ * notes on the same topic and deletes what becomes redundant. The brain's
+ * history keeps what was there before.
+ */
+export async function summarizeBrain(opts: {
+  store: EventStore;
+  runner: AgentRunner;
+  repo: string;
+  /** The run the events go to (a dedicated one, kind "curate"). */
+  runId: string;
+  model?: string;
+  env?: Env;
+  backends?: BackendResolver;
+  signal?: AbortSignal;
+}): Promise<{ before: number; after: number; commit?: string }> {
+  const { store, runId } = opts;
+  const dir = await ensureBrain(opts.repo);
+  // Whatever was edited by hand is kept in the history first.
+  await commitBrain(opts.repo, 'Before summarizing', 'you');
+  const notes = listNotes(opts.repo);
+  const before = brainSize(opts.repo);
+  const base = { step: 'summarize', agent: SUMMARIZER };
+  const model = opts.model ?? 'sonnet';
+  const tools = ['Read', 'Write', 'Edit', 'MultiEdit', 'Grep', 'Glob'];
+  let deleted = 0;
+  const remove: CustomTool = {
+    name: 'delete_note',
+    description: 'Delete a note that became redundant (its content merged into another note). README.md stays.',
+    params: { path: { type: 'string', description: 'The note, relative to the brain folder, e.g. "old-decisions.md".' } },
+    run: (a) => {
+      const rel = String(a.path ?? '').trim();
+      if (rel === 'README.md') throw new Error('README.md is the index of the brain and stays');
+      const file = notePath(opts.repo, rel);
+      if (!existsSync(file)) throw new Error(`${rel} not found`);
+      rmSync(file);
+      deleted += 1;
+      return `Deleted ${rel}.`;
+    },
+  };
+  const prompt = `Compress the project brain in ${dir} (your working folder): ${notes.length} note(s), ${Math.round(before / 102.4) / 10} KB.
+
+Every team member reads these notes before it works, so every word costs tokens on every run. Rewrite them to say the same in far fewer words:
+- Keep every durable fact a future member needs: decisions and their reasons, conventions, gotchas, how parts work, names, paths, commands, numbers. When in doubt, keep the fact and cut the words around it.
+- Cut repetition, filler, narrative, examples that teach nothing new and progress reports. Where two notes contradict each other, keep the newer or more specific statement.
+- Prefer terse bullet points to prose. Keep one "# Title" heading per note.
+- Merge notes on the same topic into one and delete the rest with delete_note.
+- Keep README.md as the index: one line per note.
+- Aim for at most half the current size, without losing a fact.
+
+Notes:
+${notes.map((n) => `- ${n.path} (${n.size} bytes): ${n.title}`).join('\n')}
+
+When you are done, say in two or three lines what you merged, deleted and shortened.`;
+
+  const built = await (opts.backends ?? plainBackends).resolve({ type: 'subscription' }, opts.env ?? process.env);
+  store.append(runId, { type: 'step.started', step: 'summarize', data: { loop: 0, notes: notes.length, bytes: before } });
+  store.append(runId, { ...base, type: 'agent.started', data: { model, backend: 'subscription', via: built.via, cwd: dir, resumed: false } });
+  const { eventSink, finishedData } = await import('./engine.js');
+  const agent: AgentConfig = { name: SUMMARIZER, prompt: '', model, tools, canMessage: [], canRequest: [], backend: { type: 'subscription' }, limits: { max_turns: 80, timeout_min: 30 }, writes: true, skills: [], plugins: [], browser: false, app: false };
+  const result = await opts.runner.run({
+    agentName: SUMMARIZER,
+    prompt,
+    systemPrompt: `You maintain the project brain: a folder of Markdown notes about a project that every member of its agent team reads. You work only in ${dir}, with file tools.`,
+    cwd: dir,
+    model,
+    tools,
+    env: built.env,
+    pricing: built.pricing,
+    maxTurns: agent.limits.max_turns,
+    settingSources: [],
+    signal: opts.signal ?? AbortSignal.timeout(agent.limits.timeout_min * 60_000),
+    canMessage: [],
+    customTools: [remove],
+    checkToolUse: makeToolChecker({ root: dir, cwd: dir, writeScope: ['**/*.md'] }),
+    sendMessage: () => 'Messaging is not available here.',
+    onEvent: eventSink(store, runId, base, { model, via: built.via }),
+  });
+  store.append(runId, { ...base, type: result.ok ? 'agent.finished' : 'agent.error', data: finishedData(agent, result, built.via) });
+  if (!result.ok) {
+    // A half-rewritten brain is worse than the long one: put it back as it was.
+    await git(dir, ['reset', '-q', '--hard', 'HEAD']);
+    await git(dir, ['clean', '-q', '-fd']);
+    store.append(runId, { type: 'step.finished', step: 'summarize', data: { output: { text: `Failed, and the brain was left as it was: ${result.error}` }, agents: [SUMMARIZER] } });
+    throw new BrainError(result.error ?? 'the summarizer failed');
+  }
+  const after = brainSize(opts.repo);
+  const commit = await commitBrain(opts.repo, `Summarized the brain: ${Math.round(before / 1024)} KB to ${Math.round(after / 1024)} KB${deleted ? `, ${deleted} note(s) merged away` : ''}`, SUMMARIZER);
+  if (commit) store.append(runId, { ...base, type: 'brain.updated', data: { commit, before_bytes: before, after_bytes: after } });
+  store.append(runId, { type: 'step.finished', step: 'summarize', data: { output: { text: result.text, before_bytes: before, after_bytes: after, deleted }, agents: [SUMMARIZER] } });
+  return { before, after, commit };
 }

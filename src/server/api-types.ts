@@ -391,6 +391,20 @@ export interface RequestView {
 }
 
 /** The latest report of a workflow step: the plan, a review, test results… */
+/** A task on a run's todo list. */
+export interface TaskView {
+  id: string;
+  /** The member it is for. */
+  owner?: string;
+  title: string;
+  description?: string;
+  status: 'open' | 'working' | 'done' | 'blocked';
+  note?: string;
+  updatedAt?: string;
+  /** Who changed it last. */
+  by?: string;
+}
+
 export interface StepReport {
   step: string;
   /** The fix round it came from. */
@@ -500,6 +514,8 @@ export interface RunDetail {
   reports: StepReport[];
   /** The step that plans the work (a step named "plan", or the first whose report lists tasks), if any. */
   planStep?: string;
+  /** The run's todo list: the planner's tasks, each for one member, and where each stands now. */
+  tasks: TaskView[];
   /** Whether a chat message right now is queued (live run) or answered immediately. */
   chatMode: 'queue' | 'answer';
   /** The run was started by this app and can be stopped from it. */

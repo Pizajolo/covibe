@@ -25,6 +25,7 @@ import { makeToolChecker, readOnly } from './scope.js';
 import { denyWritePaths, type Writer } from './folder.js';
 import { Workspace, type CollectResult } from './workspace.js';
 import { attachFiles, attachmentNote, ensureAttachmentsDir, takeUploads, type Attachment } from './attachments.js';
+import { boardPrompt, planTasksOf, planTasksTool, replayBoard, TaskBoard, updateTaskTool, type BoardTask } from './tasks.js';
 
 export interface RunOptions {
   team: TeamConfig;
@@ -155,6 +156,8 @@ export interface ResumePoint {
   /** Why the run had stopped. */
   reason?: string;
   costUsd: number;
+  /** The todo list as it stood. */
+  tasks?: BoardTask[];
 }
 
 /**
@@ -209,6 +212,17 @@ export async function resumePoint(team: TeamConfig, events: { type: string; step
     }
   }
   if (status === 'succeeded') return undefined;
+  const tasks = replayBoard(events).map(({ updatedAt: _u, by: _b, ...t }) => t);
+  const point = await resumeAt(team, context, { started, open, done, failedGate, maxLoops, reason, costUsd });
+  return point && (tasks.length ? { ...point, tasks } : point);
+}
+
+async function resumeAt(
+  team: TeamConfig,
+  context: RunContext,
+  s: { started?: string; open: boolean; done: Record<string, unknown>; failedGate?: string; maxLoops?: number; reason?: string; costUsd: number },
+): Promise<ResumePoint | undefined> {
+  const { started, open, done, failedGate, maxLoops, reason, costUsd } = s;
   const at = (id: string | undefined) => team.steps.findIndex((s) => s.id === id);
   if (started && open && at(started) >= 0) return { index: at(started), context, maxLoops, done, kind: 'step', reason, costUsd };
   if (failedGate) {
@@ -289,6 +303,8 @@ class Engine {
   private readonly goalText: string;
   /** Continuing a run: members of the step that was cut short, told on their first turn to pick up where they stopped. */
   private resumeNotes = new Set<string>();
+  /** The run's todo list. */
+  private readonly board: TaskBoard;
 
   constructor(
     private readonly opts: RunOptions,
@@ -306,6 +322,7 @@ class Engine {
     this.costUsd = from?.costUsd ?? 0;
     if (from?.kind === 'step') this.resumeNotes = new Set(this.stepAgents(this.team.steps[from.index]!));
     this.slots = new Semaphore(this.team.maxParallel);
+    this.board = new TaskBoard((e) => this.emit(e), from?.tasks);
     this.pause = new RunPause((paused, questions) =>
       this.emit(paused ? { type: 'run.paused', data: { questions } } : { type: 'run.resumed', data: {} }),
     );
@@ -363,6 +380,9 @@ class Engine {
         // The report goes into the log too, so the plan and every other report can be read while the run goes.
         const agents = step.kind === 'agent' ? [step.agent] : Object.keys(output as object);
         this.emit({ type: 'step.finished', step: step.id, data: { loop: this.context.loop, agents, parallel: step.kind === 'parallel', output: clipReport(output) } });
+        // A report that lists tasks (the plan) becomes the run's todo list.
+        const planned = step.kind === 'agent' ? planTasksOf(output) : undefined;
+        if (planned && step.kind === 'agent') this.board.plan(planned, { step: step.id, agent: step.agent }, 'report');
 
         if (step.gate) {
           const { passed, value } = await evaluateGate(step.gate, this.context);
@@ -455,6 +475,11 @@ class Engine {
     // Nothing new starts while a question waits for the human.
     await this.pause.wait(this.opts.signal);
     const release = await this.slots.acquire();
+    // The todo list: this member's tasks for the step are being worked on until it hands the step in.
+    const by = { step: step.id, agent: agent.name };
+    const tasks = this.tasksFor(agent.name, task);
+    this.board.set(tasks, 'working', by, undefined, true);
+    const still = () => tasks.filter((id) => this.board.get(id)?.status === 'working');
     try {
       const note = this.resumeNotes.delete(agent.name) ? RESUME_NOTE : '';
       const result = await this.work(agent, step.id, outputSchema, (messages) =>
@@ -470,10 +495,29 @@ class Engine {
           structured: !!outputSchema,
         }),
       );
-      return this.output(agent, step.id, result, outputSchema);
+      const report = this.output(agent, step.id, result, outputSchema);
+      this.board.set(still(), 'done', by, undefined, true);
+      return report;
+    } catch (err) {
+      this.board.set(still(), 'open', by, undefined, true);
+      throw err;
     } finally {
       release();
     }
+  }
+
+  /** The tasks on the todo list a member's step is about: those its task hands it, or else its own that are not done. */
+  private tasksFor(agent: string, task: unknown): string[] {
+    if (!this.board.size) return [];
+    const given = task === undefined ? [] : this.board.match(task);
+    return given.length ? given : this.board.owned(agent).filter((t) => t.status !== 'done').map((t) => t.id);
+  }
+
+  /** Whether a member writes the todo list in this step: a planning step (or the lead's first step) whose report does not list tasks itself. */
+  private plans(agent: AgentConfig, stepId: string, outputSchema: JsonSchema | undefined): boolean {
+    const planning = /^plan(ning)?$/i.test(stepId) || (this.team.lead === agent.name && this.team.steps[0]?.id === stepId);
+    const listsTasks = !!(outputSchema as { properties?: Record<string, unknown> } | undefined)?.properties?.tasks;
+    return planning && !listsTasks;
   }
 
   /**
@@ -507,7 +551,9 @@ class Engine {
 
       const previous = this.store.getSession(this.runId, agent.name);
       const resume = previous && previous.cwd === cwd ? previous.sessionId : undefined;
-      const text = prompt(messages);
+      const planning = !request && this.plans(agent, stepId, outputSchema);
+      const todo = boardPrompt(this.board, agent.name, true);
+      const text = [prompt(messages), todo, planning ? PLAN_NOTE : undefined].filter(Boolean).join('\n\n');
       const requested = request ? { request: request.id, request_from: request.from } : {};
 
       this.emit({
@@ -516,7 +562,7 @@ class Engine {
         data: { model: agent.model ?? null, backend: agent.backend.type, via: built.via, cwd, resumed: !!resume, loop: this.context.loop, ...requested },
       });
       const turn = (p: { prompt: string; resume?: string }) =>
-        this.runAgent(agent, { cwd, ...p, env: built.env, pricing: built.pricing, account: accountOf(built), via: built.via, outputSchema, step: stepId });
+        this.runAgent(agent, { cwd, ...p, env: built.env, pricing: built.pricing, account: accountOf(built), via: built.via, outputSchema, step: stepId, planning });
       /** Move this member to another account. */
       const move = async (account: string) => {
         unclaim();
@@ -621,7 +667,7 @@ class Engine {
 
   private async runAgent(
     agent: AgentConfig,
-    p: { cwd: string; prompt: string; resume?: string; env: Env; pricing?: BackendEnv['pricing']; account?: string; via?: string; outputSchema?: JsonSchema; step: string },
+    p: { cwd: string; prompt: string; resume?: string; env: Env; pricing?: BackendEnv['pricing']; account?: string; via?: string; outputSchema?: JsonSchema; step: string; planning?: boolean },
   ): Promise<AgentResult> {
     // The time limit does not count while the member waits for an answer or the run is paused.
     const deadline = new Deadline(agent.limits.timeout_min * 60_000);
@@ -633,7 +679,13 @@ class Engine {
       signal,
       repo: this.workspace.repo,
       folder: !!this.workspace.folder,
-      extraTools: [this.askTool(agent.name, p.step, deadline), ...(agent.canRequest.length ? [this.requestTool(agent, p.step, deadline)] : [])],
+      extraTools: [
+        this.askTool(agent.name, p.step, deadline),
+        ...(agent.canRequest.length ? [this.requestTool(agent, p.step, deadline)] : []),
+        ...(p.planning ? [planTasksTool(this.board, Object.values(this.team.agents).filter((a) => a.name !== agent.name), { step: p.step, agent: agent.name })] : []),
+        // Tools are fixed for the turn: a planner gets update_task with plan_tasks, so it can mark progress on the list it writes.
+        ...(this.board.size || p.planning ? [updateTaskTool(this.board, agent.name, this.team.lead === agent.name || !!p.planning, p.step)] : []),
+      ],
       // A paused run holds working members at their next tool call.
       beforeToolUse: () => this.pause.wait(signal),
     });
@@ -993,6 +1045,10 @@ export function buildInvocation(
   };
 }
 
+/** For a member who writes the todo list (see Engine.plans). */
+const PLAN_NOTE =
+  '## Todo list\nWrite the run\'s todo list with the plan_tasks tool before you finish: the concrete tasks the goal breaks into, in order, each for the one member who will do it. People watch it live while the team works through it.';
+
 const LIMIT_SWITCH =
   'Your last turn stopped because a usage limit was reached. You now continue on another account: pick up where you left off and finish the task as asked.';
 
@@ -1023,6 +1079,7 @@ export function eventSink(store: EventStore, runId: string, base: { step?: strin
       const file = typeof (e.input as { file_path?: unknown })?.file_path === 'string' ? (e.input as { file_path: string }).file_path : null;
       emit({ ...base, type: 'agent.view', data: { id, tool: e.tool, file, media_type: e.mediaType, bytes: data.length } });
     }
+    else if (e.kind === 'restarted') emit({ ...base, type: 'agent.restarted', data: { attempt: e.attempt, error: clip(e.error, 2000) } });
     else if (e.kind === 'denied') emit({ ...base, type: 'scope.denied', data: { tool: e.tool, input: summarize(e.input), reason: e.reason } });
     else if (e.kind === 'rate_limit') emit({ ...base, type: 'usage.limit', data: { ...e.info, ...(account ? { account } : {}) } });
     // Running totals of the turn in progress; its agent.finished (or error, or limited) replaces them.
