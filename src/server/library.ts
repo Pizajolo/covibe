@@ -85,6 +85,10 @@ export class Library {
     if (patch.onLimit !== undefined && patch.onLimit !== 'wait' && patch.onLimit !== 'stop') throw new BadRequest('onLimit is "wait" or "stop"');
     const max = patch.backlogMaxUsage;
     if (max !== undefined && max !== null && (typeof max !== 'number' || !Number.isFinite(max) || max < 1 || max > 100)) throw new BadRequest('backlogMaxUsage is a percentage from 1 to 100, or null');
+    const bp = patch.brainProvider;
+    if (bp !== undefined && bp !== null && (typeof bp !== 'object' || typeof bp.connection !== 'string' || !bp.connection || typeof bp.model !== 'string' || !bp.model)) {
+      throw new BadRequest('brainProvider takes a connection and a model, or null');
+    }
     const { notifications: notify, ...rest } = patch;
     const next: Partial<AppSettings> = { ...config.settings, ...rest };
     if (notify !== undefined) {

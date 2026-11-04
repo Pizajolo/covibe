@@ -63,6 +63,10 @@ export interface AppSettings {
   /** Model and effort the team architect uses in design chats. */
   designerModel?: string;
   designerEffort?: Effort;
+  /** What summarizes project brains: a Claude model (default sonnet) and effort, or a provider's model. */
+  brainModel?: string | null;
+  brainEffort?: Effort | null;
+  brainProvider?: { connection: string; model: string } | null;
   /** When the plan's usage limit stops a member: wait for the reset and continue (default), or stop the run. */
   onLimit?: 'wait' | 'stop';
   /**

@@ -47,6 +47,23 @@ function ClaudeAccount() {
             <span className="help tiny faint">Models and thinking for team members are set per team (Team → Settings) and per member (Members).</span>
           </section>
         )}
+        {settings && (
+          <section className="form-section" id="brain-model">
+            <h3 className="small">Summarizing project brains</h3>
+            <ModelPicker
+              compact
+              value={{ model: settings.brainModel ?? undefined, effort: settings.brainEffort ?? undefined }}
+              inherit="Sonnet (default)"
+              provider={settings.brainProvider ? { id: settings.brainProvider.connection, model: settings.brainProvider.model } : undefined}
+              onProvider={(c) => void save({ brainProvider: { connection: c.id, model: c.model }, brainModel: null, brainEffort: null })}
+              onChange={(k, v) => {
+                if (k === 'model') void save({ brainModel: (v as string | null) ?? null, brainProvider: null });
+                else if (k === 'effort') void save({ brainEffort: (v as AppSettings['brainEffort']) ?? null });
+              }}
+            />
+            <span className="help tiny faint">Used by Summarize on a project's Brain tab: it rewrites the notes in fewer words. Reading and rewriting every note is work for a capable model; a cheap one may drop facts.</span>
+          </section>
+        )}
       </div>
     </div>
   );

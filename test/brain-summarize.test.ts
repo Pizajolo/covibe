@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { brainLog, ensureBrain, listNotes, summarizeBrain, SUMMARIZER } from '../src/engine/brain.js';
+import { brainLoad, brainLog, ensureBrain, listNotes, summarizeBrain, SUMMARIZER } from '../src/engine/brain.js';
 import { EventStore } from '../src/events/store.js';
 import { ScriptedRunner, tempRepo } from './helpers.js';
 
@@ -55,5 +55,34 @@ describe('summarizing the brain', () => {
     await expect(summarizeBrain({ store, runner, repo, runId: run.id })).rejects.toThrow(/exited with code 1/);
     expect(readFileSync(join(dir, 'decisions.md'), 'utf8')).toBe(LONG);
     expect(existsSync(join(dir, 'new.md'))).toBe(false);
+  });
+
+  it('runs on the model, effort and provider from Settings', async () => {
+    const { repo } = await brainWith({ 'decisions.md': LONG });
+    const store = new EventStore(':memory:');
+    const run = store.createRun({ id: 'r3', kind: 'curate', team: SUMMARIZER, teamFile: '', repo, goal: 'Summarize' });
+    const runner = new ScriptedRunner({ [SUMMARIZER]: () => ({ text: 'Nothing to merge.' }) });
+    const resolved: unknown[] = [];
+    const backends = { resolve: async (b: { type: string; connection?: string }) => (resolved.push(b), { env: {}, warnings: [], via: b.connection ?? 'claude' }) };
+    await summarizeBrain({ store, runner, repo, runId: run.id, model: 'haiku', effort: 'low', backends });
+    expect(runner.calls[0]).toMatchObject({ model: 'haiku', effort: 'low' });
+    await summarizeBrain({ store, runner, repo, runId: run.id, model: 'haiku', backend: { type: 'connection', connection: 'deepseek', model: 'deepseek-chat' }, backends });
+    // A provider's model wins over the Claude model.
+    expect(runner.calls[1]).toMatchObject({ model: 'deepseek-chat' });
+    expect(resolved).toEqual([{ type: 'subscription' }, { type: 'connection', connection: 'deepseek', model: 'deepseek-chat' }]);
+    expect(store.events(run.id).filter((e) => e.type === 'agent.started').map((e) => e.data.via)).toEqual(['claude', 'deepseek']);
+  });
+});
+
+describe('what the brain costs members', () => {
+  it('estimates the list in every prompt, each note, and what recent runs read', async () => {
+    const { repo, dir } = await brainWith({ 'decisions.md': LONG, 'prices.md': '# Prices\n\nCents.\n' });
+    const load = brainLoad(repo, { runs: 2, reads: [join(dir, 'decisions.md'), join(dir, 'decisions.md'), join(dir, 'prices.md'), '/elsewhere/prices.md'] });
+    expect(load.notes['decisions.md']).toBe(Math.ceil(LONG.length / 4));
+    expect(load.notesTokens).toBe(Object.values(load.notes).reduce((a, b) => a + b, 0));
+    // The prompt lists the notes, it does not include them.
+    expect(load.promptTokens).toBeGreaterThan(20);
+    expect(load.promptTokens).toBeLessThan(load.notes['decisions.md']!);
+    expect(load.recent).toEqual({ runs: 2, reads: 3, tokens: 2 * load.notes['decisions.md']! + load.notes['prices.md']! });
   });
 });

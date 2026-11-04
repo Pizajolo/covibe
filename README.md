@@ -262,6 +262,12 @@ cannot write there. The curator may edit the brain directly. With `curate: after
 pending proposals at the end of a run, merging accepted ones into notes and recording a decision for each.
 Each review is a session of its own, so `min_proposals` lets proposals collect over several runs first.
 
+The project's **Brain** tab shows what the brain costs in tokens (estimated at about four characters a token): the
+list of notes that goes into every member's system prompt with every request, each note and all of them read in
+full, and what members actually read in the project's last ten runs. **Summarize** has a model rewrite the notes in
+fewer words; choose that model (a Claude model, its effort, or a provider's model) under **Settings → Claude →
+Summarizing project brains**. Sonnet is the default.
+
 ### Signing in to plugin servers
 
 Some plugins connect to a remote MCP server that needs your account, such as Notion's. Their page under
