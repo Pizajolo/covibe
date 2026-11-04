@@ -163,12 +163,12 @@ export class ClaudeSdkRunner implements AgentRunner {
       tools,
       allowedTools: [...tools, ...(inv.canMessage.length ? [SEND_MESSAGE_TOOL] : []), ...custom.map((t) => `mcp__${COVIBE_SERVER}__${t.name}`), ...(inv.plugins?.mcpTools ?? [])],
       permissionMode: 'dontAsk',
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: inv.systemPrompt },
+      systemPrompt: inv.ownSystemPrompt ? inv.systemPrompt : { type: 'preset', preset: 'claude_code', append: inv.systemPrompt },
       settingSources: inv.settingSources,
       maxTurns: inv.maxTurns,
       maxBudgetUsd: inv.maxBudgetUsd,
       hooks: { PreToolUse: [{ hooks: [preToolUse], timeout: MAX_WAIT_MS / 1000 }] },
-      outputFormat: inv.outputSchema ? { type: 'json_schema', schema: inv.outputSchema } : undefined,
+      outputFormat: inv.outputSchema ? { type: 'json_schema', schema: forClaudeCode(inv.outputSchema) } : undefined,
       mcpServers: Object.keys(mcpServers).length ? mcpServers : undefined,
       // Shell commands run in the OS sandbox: writes stay in the working folder,
       // temp and the allowed caches; network only to listed domains; no escape hatch.
@@ -686,6 +686,16 @@ function teamServer(inv: AgentInvocation) {
       ),
     ],
   });
+}
+
+/**
+ * A report schema as Claude Code takes it: without the $schema line, which its
+ * validator does not know for draft 2020-12 (it refuses to start) and which
+ * means nothing to the model. covibe validates reports against the full schema.
+ */
+export function forClaudeCode(schema: Record<string, unknown>): Record<string, unknown> {
+  const { $schema: _drop, ...rest } = schema;
+  return rest;
 }
 
 /** In-process MCP server for the tools covibe offers an agent. */

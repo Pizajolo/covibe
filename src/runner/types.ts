@@ -9,6 +9,8 @@ export interface AgentInvocation {
   prompt: string;
   /** Role prompt plus team protocol; appended to Claude Code's own system prompt. */
   systemPrompt: string;
+  /** Use systemPrompt instead of Claude Code's own (a turn without tools, such as writing a summary). */
+  ownSystemPrompt?: boolean;
   cwd: string;
   /** Resume this session instead of starting a new one. */
   resumeSessionId?: string;

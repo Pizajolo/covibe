@@ -70,6 +70,7 @@ export function ModelPicker({
   compact,
   provider,
   onProvider,
+  noModel,
 }: {
   value: ModelSettings;
   onChange: (key: keyof ModelSettings, v: string | number | null) => void;
@@ -80,11 +81,14 @@ export function ModelPicker({
   provider?: { id: string; model?: string };
   /** Offer the providers' models; called when one is chosen. */
   onProvider?: (c: ProviderChoice) => void;
+  /** Choosing no model is a choice of its own (a summary covibe writes): its label. Effort shows once a model is chosen. */
+  noModel?: string;
 }) {
   const models = useModels();
   const connections = useConnections();
   const providers = onProvider ? (connections?.connections ?? []).filter((c) => c.kind !== 'claude' && c.models?.length) : [];
-  const known = provider ? undefined : models.find((m) => m.value === value.model || m.resolved === value.model);
+  // No model chosen matches none (a model without a resolved id would match an unset one).
+  const known = provider || !value.model ? undefined : models.find((m) => m.value === value.model || m.resolved === value.model);
   const custom = !provider && !!value.model && !known;
   const [customOpen, setCustomOpen] = useState(custom);
   const levels = known ? known.efforts : EFFORTS.map((e) => e.value);
@@ -115,7 +119,7 @@ export function ModelPicker({
             if (v !== '__custom') onChange('model', v || null);
           }}
         >
-          <option value="">{inherit}</option>
+          <option value="">{noModel ?? inherit}</option>
           {providers.length ? <optgroup label="Claude">{claudeOptions}</optgroup> : claudeOptions}
           {providers.map((c) => (
             <optgroup key={c.id} label={`${c.label} · ${KIND_LABEL[c.kind]}`}>
@@ -136,26 +140,28 @@ export function ModelPicker({
         </select>
         {!provider && (customOpen || custom) && <IdField value={value.model} onCommit={(v) => onChange('model', v || null)} />}
         {known?.resolved && known.resolved !== known.value && <span className="help mono">{known.resolved}</span>}
-        {provider && <span className="help">Runs on {connections?.connections.find((c) => c.id === provider.id)?.label ?? provider.id}, with Claude Code's tools.</span>}
+        {provider && <span className="help">Runs on {connections?.connections.find((c) => c.id === provider.id)?.label ?? provider.id}{noModel ? '' : ", with Claude Code's tools"}.</span>}
       </label>
-      <label className="field">
-        Effort
-        <select
-          className="input"
-          value={value.effort ?? ''}
-          onChange={(e) => onChange('effort', e.target.value || null)}
-          disabled={(!!known && !levels.length && !value.effort) || !!provider}
-        >
-          <option value="">{provider ? 'Not adjustable for this provider' : known && !levels.length ? 'Not adjustable for this model' : `${inherit} (model's default)`}</option>
-          {EFFORTS.filter((e) => levels.includes(e.value) || e.value === value.effort).map((e) => (
-            <option key={e.value} value={e.value}>
-              {e.label}: {e.help}
-              {!levels.includes(e.value) ? ' (not supported by this model)' : ''}
-            </option>
-          ))}
-        </select>
-        <span className="help">How much thinking and care goes into each answer. Higher costs more tokens and time.</span>
-      </label>
+      {(!noModel || value.model || provider) && (
+        <label className="field">
+          Effort
+          <select
+            className="input"
+            value={value.effort ?? ''}
+            onChange={(e) => onChange('effort', e.target.value || null)}
+            disabled={(!!known && !levels.length && !value.effort) || !!provider}
+          >
+            <option value="">{provider ? 'Not adjustable for this provider' : known && !levels.length ? 'Not adjustable for this model' : noModel ? "The model's default" : `${inherit} (model's default)`}</option>
+            {EFFORTS.filter((e) => levels.includes(e.value) || e.value === value.effort).map((e) => (
+              <option key={e.value} value={e.value}>
+                {e.label}: {e.help}
+                {!levels.includes(e.value) ? ' (not supported by this model)' : ''}
+              </option>
+            ))}
+          </select>
+          <span className="help">How much thinking and care goes into each answer. Higher costs more tokens and time.</span>
+        </label>
+      )}
       {!compact && (
         <label className="field">
           Thinking

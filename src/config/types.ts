@@ -105,6 +105,8 @@ interface StepBase {
   instructions?: string;
   gate?: string;
   onGateFail?: GateFailPolicy;
+  /** Runs in full whatever the planner chose (see engine/selection.ts): the planner cannot leave it out, and a fix round reruns all its branches. */
+  required?: boolean;
 }
 
 export interface AgentStep extends StepBase {
@@ -119,7 +121,20 @@ export interface ParallelStep extends StepBase {
   branches: Branch[];
 }
 
-export type Step = AgentStep | ParallelStep;
+/**
+ * The run's summary. covibe gathers it from the reports, the todo list and the
+ * log; without a model that is the summary, with one the model writes it up
+ * from those facts alone (one request, no tools, no member's session).
+ */
+export interface SummaryStep extends StepBase {
+  kind: 'summary';
+  model?: string;
+  effort?: Effort;
+  /** Where the model runs (the team's default backend unless the step names one). */
+  backend?: BackendConfig;
+}
+
+export type Step = AgentStep | ParallelStep | SummaryStep;
 
 export interface TeamConfig {
   name: string;

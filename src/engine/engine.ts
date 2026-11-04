@@ -1,6 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
-import type { AgentConfig, Branch, JsonSchema, Step, TeamConfig } from '../config/types.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { AgentConfig, Branch, JsonSchema, Step, SummaryStep, TeamConfig } from '../config/types.js';
 import type { EventStore } from '../events/store.js';
 import type { InboxMessage, NewEvent, RunStatus } from '../events/types.js';
 import type { Connections } from '../connections/store.js';
@@ -26,6 +29,8 @@ import { denyWritePaths, type Writer } from './folder.js';
 import { Workspace, type CollectResult } from './workspace.js';
 import { attachFiles, attachmentNote, ensureAttachmentsDir, takeUploads, type Attachment } from './attachments.js';
 import { boardPrompt, planTasksOf, planTasksTool, replayBoard, TaskBoard, updateTaskTool, type BoardTask } from './tasks.js';
+import { SUMMARY_SYSTEM, summaryPrompt, writeSummary } from './summary.js';
+import { candidates, feedbackOwners, HANDOFF_NOTE, isPlanningStep, namesOf, plannerOf, Selection, selectionNote, selectTool, stepAgents, type Candidate } from './selection.js';
 
 export interface RunOptions {
   team: TeamConfig;
@@ -158,6 +163,8 @@ export interface ResumePoint {
   costUsd: number;
   /** The todo list as it stood. */
   tasks?: BoardTask[];
+  /** The members the planner chose, if it did. */
+  selected?: { members: string[]; reason?: string };
 }
 
 /**
@@ -175,9 +182,13 @@ export async function resumePoint(team: TeamConfig, events: { type: string; step
   let status: string | undefined;
   let reason: string | undefined;
   let costUsd = 0;
+  let selected: ResumePoint['selected'];
   for (const e of events) {
     const d = e.data;
     switch (e.type) {
+      case 'members.selected':
+        selected = { members: (d.members as string[]) ?? [], ...(typeof d.reason === 'string' ? { reason: d.reason } : {}) };
+        break;
       case 'run.started':
         context.goal = String(d.goal ?? '');
         break;
@@ -214,7 +225,7 @@ export async function resumePoint(team: TeamConfig, events: { type: string; step
   if (status === 'succeeded') return undefined;
   const tasks = replayBoard(events).map(({ updatedAt: _u, by: _b, ...t }) => t);
   const point = await resumeAt(team, context, { started, open, done, failedGate, maxLoops, reason, costUsd });
-  return point && (tasks.length ? { ...point, tasks } : point);
+  return point && { ...point, ...(tasks.length ? { tasks } : {}), ...(selected ? { selected } : {}) };
 }
 
 async function resumeAt(
@@ -305,6 +316,15 @@ class Engine {
   private resumeNotes = new Set<string>();
   /** The run's todo list. */
   private readonly board: TaskBoard;
+  /** The member that plans the run (see selection.ts), and the members it chooses among. */
+  private readonly planner: { agent: string; index: number } | undefined;
+  private readonly candidates: Candidate[];
+  private readonly selection: Selection;
+  /** What the members changed so far, file by file, so the next ones need not search for it. */
+  private readonly changed = new Map<string, Set<string>>();
+  /** The leads' sessions for answering questions, and the desk that takes one question at a time. */
+  private readonly leadSessions = new Map<string, { id: string; cwd: string }>();
+  private readonly desk = new Semaphore(1);
 
   constructor(
     private readonly opts: RunOptions,
@@ -320,9 +340,12 @@ class Engine {
     this.context = from ? { ...from.context, goal: opts.goal } : { goal: opts.goal, loop: 0, feedback: {} };
     this.maxLoops = from?.maxLoops;
     this.costUsd = from?.costUsd ?? 0;
-    if (from?.kind === 'step') this.resumeNotes = new Set(this.stepAgents(this.team.steps[from.index]!));
+    if (from?.kind === 'step') this.resumeNotes = new Set(stepAgents(this.team.steps[from.index]!));
     this.slots = new Semaphore(this.team.maxParallel);
     this.board = new TaskBoard((e) => this.emit(e), from?.tasks);
+    this.planner = plannerOf(this.team);
+    this.candidates = this.planner ? candidates(this.team, this.planner) : [];
+    this.selection = new Selection(from?.selected);
     this.pause = new RunPause((paused, questions) =>
       this.emit(paused ? { type: 'run.paused', data: { questions } } : { type: 'run.resumed', data: {} }),
     );
@@ -370,19 +393,39 @@ class Engine {
           throw new StepError(`${a.name}: ${(err as Error).message}`);
         }
       }
+      for (const s of steps) {
+        if (s.kind !== 'summary' || !s.backend) continue;
+        try {
+          checkBackend(s.backend, this.opts.connections);
+        } catch (err) {
+          throw new StepError(`step ${s.id}: ${(err as Error).message}`);
+        }
+      }
       let i = from?.index ?? 0;
       while (i < steps.length) {
         this.opts.signal?.throwIfAborted();
         const step = steps[i]!;
+        // Nobody in this step is needed (the planner left them out): no session, and no gate to check.
+        const skips = stepAgents(step).map((a) => this.skipReason(step, a));
+        if (skips.length && skips.every((r) => r !== undefined)) {
+          stepAgents(step).forEach((agent, n) => this.emit({ type: 'step.skipped', step: step.id, agent, data: { reason: skips[n]! } }));
+          i += 1;
+          continue;
+        }
         this.emit({ type: 'step.started', step: step.id, data: { loop: this.context.loop } });
         const output = await this.runStep(step);
         this.context[step.id] = output;
         // The report goes into the log too, so the plan and every other report can be read while the run goes.
-        const agents = step.kind === 'agent' ? [step.agent] : Object.keys(output as object);
+        const agents = step.kind === 'agent' ? [step.agent] : step.kind === 'parallel' ? Object.keys(output as object) : [];
         this.emit({ type: 'step.finished', step: step.id, data: { loop: this.context.loop, agents, parallel: step.kind === 'parallel', output: clipReport(output) } });
         // A report that lists tasks (the plan) becomes the run's todo list.
         const planned = step.kind === 'agent' ? planTasksOf(output) : undefined;
         if (planned && step.kind === 'agent') this.board.plan(planned, { step: step.id, agent: step.agent }, 'report');
+        // The planner's report may name the members the goal needs.
+        if (this.planner && i === this.planner.index) {
+          const members = namesOf((output as { members?: unknown } | undefined)?.members);
+          if (members) this.select(members.filter((m) => this.candidates.some((c) => c.name === m)), undefined, step.id);
+        }
 
         if (step.gate) {
           const { passed, value } = await evaluateGate(step.gate, this.context);
@@ -444,6 +487,7 @@ class Engine {
       const task = step.task ? await evaluate(step.task, this.context) : undefined;
       return this.invoke(step.agent, step, task, step.outputSchema);
     }
+    if (step.kind === 'summary') return { text: await this.summarize(step) };
 
     const output: Record<string, unknown> = {};
     // Continuing a run: branches that finished before it stopped keep their reports.
@@ -452,6 +496,14 @@ class Engine {
       if (b.agent in done) {
         output[b.agent] = done[b.agent];
         this.emit({ type: 'step.skipped', step: step.id, agent: b.agent, data: { reason: 'finished before the run stopped' } });
+        return;
+      }
+      const skip = this.skipReason(step, b.agent);
+      if (skip) {
+        // Its report from an earlier round still stands.
+        const before = (this.context[step.id] as Record<string, unknown> | undefined)?.[b.agent];
+        if (before !== undefined) output[b.agent] = before;
+        this.emit({ type: 'step.skipped', step: step.id, agent: b.agent, data: { reason: skip } });
         return;
       }
       const task = b.task ? await evaluate(b.task, this.context) : undefined;
@@ -490,6 +542,7 @@ class Engine {
           maxLoops: this.maxLoops,
           instructions: step.instructions,
           task,
+          fromPlan: task !== undefined && !!this.planner && this.team.steps.indexOf(step) > this.planner.index,
           feedback: this.context.feedback,
           messages,
           structured: !!outputSchema,
@@ -506,6 +559,104 @@ class Engine {
     }
   }
 
+  /**
+   * A summary step: covibe gathers the facts from the run; with a model set,
+   * that model writes them up in one request (no tools, no member's session,
+   * no git status or CLAUDE.md). If the model fails, covibe's own summary
+   * stands, so the run does not fail over its summary.
+   */
+  private async summarize(step: SummaryStep): Promise<string> {
+    const facts = (forModel: boolean) =>
+      writeSummary({
+        goal: this.opts.goal,
+        events: this.store.events(this.runId),
+        tasks: this.board.list,
+        planStep: this.planner ? this.team.steps[this.planner.index]?.id : undefined,
+        step: step.id,
+        loops: this.context.loop,
+        costUsd: this.costUsd,
+        forModel,
+      });
+    if (!step.model || !step.backend) return facts(false);
+    const fallback = (why: string) => `${facts(false)}\n\n_${step.model} could not write the summary (${why}), so this is covibe's own._`;
+    // An empty folder: no git status or CLAUDE.md goes along.
+    const dir = mkdtempSync(join(tmpdir(), 'covibe-summary-'));
+    try {
+      const connections = this.opts.connections;
+      const balanced = !!connections && step.backend.type === 'subscription' && !step.backend.account;
+      const account = balanced ? await connections!.pick() : undefined;
+      const built = await resolverOf(connections).resolve(account ? { ...step.backend, account } : step.backend, this.opts.env ?? process.env);
+      const timeout = AbortSignal.timeout(SUMMARY_TIMEOUT_MS);
+      const result = await this.opts.runner.run({
+        agentName: step.id,
+        prompt: summaryPrompt(facts(true), step.instructions),
+        systemPrompt: SUMMARY_SYSTEM,
+        ownSystemPrompt: true,
+        cwd: dir,
+        model: step.model,
+        effort: step.effort,
+        tools: [],
+        env: built.env,
+        pricing: built.pricing,
+        maxTurns: 2,
+        settingSources: [],
+        signal: this.opts.signal ? AbortSignal.any([this.opts.signal, timeout]) : timeout,
+        canMessage: [],
+        checkToolUse: () => 'writing the summary takes no tools',
+        sendMessage: () => 'writing the summary takes no messages',
+        onEvent: () => {},
+      });
+      this.costUsd += result.costUsd;
+      const text = result.ok ? result.text.trim() : '';
+      const error = text ? undefined : result.error || 'it wrote nothing';
+      this.emit({
+        step: step.id,
+        type: 'summary.written',
+        data: { model: step.model, via: built.via, ok: !error, cost_usd: result.costUsd, tokens: result.tokens ?? null, turns: result.turns, duration_ms: result.durationMs, ...(error ? { error } : {}) },
+      });
+      return error ? fallback(error) : `${text}\n\n_Written by ${step.model} from covibe's record of the run._`;
+    } catch (err) {
+      this.opts.signal?.throwIfAborted();
+      const error = (err as Error).message;
+      this.emit({ step: step.id, type: 'summary.written', data: { model: step.model, ok: false, cost_usd: 0, error } });
+      return fallback(error);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Why a member's turn in a step is not needed, or undefined when it runs: in
+   * a fix round whose feedback names its owners, a parallel branch with nothing
+   * to fix; otherwise a member the planner left out and gave no task.
+   */
+  private skipReason(step: Step, agent: string): string | undefined {
+    if (step.required) return undefined;
+    const owners = this.context.loop > 0 ? feedbackOwners(this.context.feedback) : undefined;
+    if (owners && step.kind === 'parallel' && step.branches.some((b) => owners.has(b.agent)) && !owners.has(agent)) return 'nothing in the feedback is its to fix';
+    const candidate = this.candidates.some((c) => c.name === agent);
+    if (candidate && this.selection.leftOut(agent) && !this.board.owned(agent).length && !owners?.has(agent)) {
+      return `not needed for this goal (${this.planner!.agent} left it out${this.selection.reason ? `: ${this.selection.reason}` : ''})`;
+    }
+    return undefined;
+  }
+
+  /** The planner chose the members the goal needs. */
+  private select(members: string[], reason: string | undefined, step: string) {
+    this.selection.set(members, reason);
+    const skipped = this.candidates.filter((c) => !members.includes(c.name) && !c.required).map((c) => c.name);
+    this.emit({ type: 'members.selected', step, agent: this.planner?.agent, data: { members, skipped, ...(this.selection.reason ? { reason: this.selection.reason } : {}) } });
+  }
+
+  /** The files changed in this run so far and by whom, for a member's next turn. */
+  private changedNote(): string | undefined {
+    if (!this.changed.size) return undefined;
+    const files = [...this.changed.entries()];
+    const shown = files.slice(0, CHANGED_SHOWN).map(([f, by]) => `- ${f} (${[...by].join(', ')})`);
+    const more = files.length > CHANGED_SHOWN ? `\n- … and ${files.length - CHANGED_SHOWN} more` : '';
+    return `## Changed in this run so far\nFiles teammates changed (already merged where you work), so you can go straight to them:\n${shown.join('\n')}${more}`;
+  }
+
   /** The tasks on the todo list a member's step is about: those its task hands it, or else its own that are not done. */
   private tasksFor(agent: string, task: unknown): string[] {
     if (!this.board.size) return [];
@@ -515,9 +666,15 @@ class Engine {
 
   /** Whether a member writes the todo list in this step: a planning step (or the lead's first step) whose report does not list tasks itself. */
   private plans(agent: AgentConfig, stepId: string, outputSchema: JsonSchema | undefined): boolean {
-    const planning = /^plan(ning)?$/i.test(stepId) || (this.team.lead === agent.name && this.team.steps[0]?.id === stepId);
+    const planning = isPlanningStep(this.team, agent.name, stepId);
     const listsTasks = !!(outputSchema as { properties?: Record<string, unknown> } | undefined)?.properties?.tasks;
     return planning && !listsTasks;
+  }
+
+  /** Whether the planner writes the todo list with plan_tasks (its planning step's report does not list tasks). */
+  private plansByTool(): boolean {
+    const step = this.planner && this.team.steps[this.planner.index];
+    return !!step && step.kind === 'agent' && this.plans(this.team.agents[step.agent]!, step.id, step.outputSchema);
   }
 
   /**
@@ -552,8 +709,20 @@ class Engine {
       const previous = this.store.getSession(this.runId, agent.name);
       const resume = previous && previous.cwd === cwd ? previous.sessionId : undefined;
       const planning = !request && this.plans(agent, stepId, outputSchema);
+      // The planner's own planning turn: hand over what it finds, and choose who is needed.
+      const plannerTurn = !request && !!this.planner && this.planner.agent === agent.name && this.team.steps[this.planner.index]?.id === stepId;
+      const viaReport = !!(outputSchema as { properties?: Record<string, unknown> } | undefined)?.properties?.members;
       const todo = boardPrompt(this.board, agent.name, true);
-      const text = [prompt(messages), todo, planning ? PLAN_NOTE : undefined].filter(Boolean).join('\n\n');
+      const text = [
+        prompt(messages),
+        todo,
+        this.changedNote(),
+        planning ? PLAN_NOTE : undefined,
+        plannerTurn ? HANDOFF_NOTE : undefined,
+        plannerTurn ? selectionNote(this.candidates, viaReport) : undefined,
+      ]
+        .filter(Boolean)
+        .join('\n\n');
       const requested = request ? { request: request.id, request_from: request.from } : {};
 
       this.emit({
@@ -628,6 +797,7 @@ class Engine {
         const c = await this.workspace.collect(agent.name, agent.writeScope, label);
         for (const e of collectEvents(c, agent, this.workspace.branch)) this.emit({ ...base, ...e });
         files = c.files;
+        for (const f of c.files) this.changed.set(f, (this.changed.get(f) ?? new Set()).add(agent.name));
       }
       return { ...result, files };
     } finally {
@@ -635,10 +805,6 @@ class Engine {
       releaseMember();
       unclaim();
     }
-  }
-
-  private stepAgents(step: Step): string[] {
-    return step.kind === 'agent' ? [step.agent] : step.branches.map((b) => b.agent);
   }
 
   private member(name: string): Semaphore {
@@ -672,6 +838,7 @@ class Engine {
     // The time limit does not count while the member waits for an answer or the run is paused.
     const deadline = new Deadline(agent.limits.timeout_min * 60_000);
     const untrack = this.pause.track(deadline);
+    const isPlanner = this.planner?.agent === agent.name;
     const signal = this.opts.signal ? AbortSignal.any([this.opts.signal, deadline.signal]) : deadline.signal;
     const inv = buildInvocation(this.team, this.store, this.runId, agent, {
       ...p,
@@ -679,12 +846,15 @@ class Engine {
       signal,
       repo: this.workspace.repo,
       folder: !!this.workspace.folder,
+      // A member's tools stay the same on all its turns: Claude caches the prompt
+      // from the tool list on, so a tool that comes or goes between turns makes
+      // the member's whole conversation be read again at full price.
       extraTools: [
         this.askTool(agent.name, p.step, deadline),
         ...(agent.canRequest.length ? [this.requestTool(agent, p.step, deadline)] : []),
-        ...(p.planning ? [planTasksTool(this.board, Object.values(this.team.agents).filter((a) => a.name !== agent.name), { step: p.step, agent: agent.name })] : []),
-        // Tools are fixed for the turn: a planner gets update_task with plan_tasks, so it can mark progress on the list it writes.
-        ...(this.board.size || p.planning ? [updateTaskTool(this.board, agent.name, this.team.lead === agent.name || !!p.planning, p.step)] : []),
+        ...(p.planning || (isPlanner && this.plansByTool()) ? [planTasksTool(this.board, Object.values(this.team.agents).filter((a) => a.name !== agent.name), { step: p.step, agent: agent.name })] : []),
+        ...(this.board.size || this.planner || p.planning ? [updateTaskTool(this.board, agent.name, this.team.lead === agent.name || isPlanner || !!p.planning, p.step)] : []),
+        ...(isPlanner && this.candidates.some((c) => !c.required) ? [selectTool(this.candidates, (members, reason) => this.select(members, reason, p.step))] : []),
       ],
       // A paused run holds working members at their next tool call.
       beforeToolUse: () => this.pause.wait(signal),
@@ -805,46 +975,81 @@ class Engine {
   }
 
   /**
-   * The lead answers in a read-only copy of its session from this run, so it
-   * knows the plan without its own session being touched. If anything goes
-   * wrong, the question goes on to the human.
+   * The lead answers read-only, in a session for questions of its own: the
+   * first question starts it with what the run has settled (the plan, the todo
+   * list, the files changed), later ones resume it, one at a time. Forking the
+   * lead's planning session instead would send its whole conversation again,
+   * with other tools than it planned with, so without the prompt cache. If
+   * anything goes wrong, the question goes on to the human.
    */
   private async consultLead(leadName: string, from: string, step: string, question: string, context: string | undefined, options: string[] | undefined): Promise<LeadVerdict> {
     const lead = readOnly(this.team.agents[leadName]!);
     const base = { step: QUESTION_STEP, agent: leadName };
     const passOn = (why: string): LeadVerdict => ({ forHuman: question, note: `${leadName} could not answer: ${why}`, options });
+    const release = await this.desk.acquire();
     try {
-      const account = isBalanced(lead, this.opts.connections) ? await this.opts.connections!.pick() : undefined;
-      const built = await resolverOf(this.opts.connections).resolve(account ? { ...lead.backend, account } : lead.backend, this.opts.env ?? process.env);
-      const session = this.store.getSession(this.runId, leadName);
-      const cwd = session?.cwd ?? (await this.workspace.prepare(leadName, false));
-      this.emit({ ...base, type: 'agent.started', data: { model: lead.model ?? null, backend: lead.backend.type, via: built.via, cwd, resumed: !!session, question: true } });
-      const timeout = AbortSignal.timeout(lead.limits.timeout_min * 60_000);
-      const inv = buildInvocation(this.team, this.store, this.runId, lead, {
-        cwd,
-        root: this.workspace.isolation === 'none' ? this.workspace.repo : cwd,
-        folder: !!this.workspace.folder,
-        prompt: leadPrompt({ goal: this.goalText, lead: leadName, from, step, question, context, options }),
-        resume: session?.sessionId,
-        fork: true,
-        env: built.env,
-        pricing: built.pricing,
-        account: accountOf(built),
-        via: built.via,
-        outputSchema: LEAD_SCHEMA,
-        step: QUESTION_STEP,
-        signal: this.opts.signal ? AbortSignal.any([this.opts.signal, timeout]) : timeout,
-        repo: this.workspace.repo,
-      });
-      const result = await this.opts.runner.run(inv).finally(() => inv.onControl?.(null));
-      this.costUsd += result.costUsd;
-      this.emit({ ...base, type: result.ok ? 'agent.finished' : 'agent.error', data: finishedData(lead, result, built.via) });
+      let session = this.leadSessions.get(leadName);
+      let result = await this.answerAsLead(lead, base, session, { from, step, question, context, options });
+      // Its question session could not be picked up again: start a new one.
+      if (!result.ok && session && !this.opts.signal?.aborted) {
+        this.leadSessions.delete(leadName);
+        session = undefined;
+        result = await this.answerAsLead(lead, base, undefined, { from, step, question, context, options });
+      }
       if (!result.ok) return passOn(result.error ?? 'unknown error');
       return leadVerdict(result.structured ?? extractJson(result.text), question);
     } catch (err) {
       this.opts.signal?.throwIfAborted();
       return passOn((err as Error).message);
+    } finally {
+      release();
     }
+  }
+
+  /** What the run has settled, for a lead answering a question: the plan's report, the todo list, the files changed. */
+  private settled(lead: string): string[] {
+    const planStep = this.planner ? this.team.steps[this.planner.index] : undefined;
+    const plan = planStep ? this.context[planStep.id] : undefined;
+    return [
+      plan !== undefined ? `## The plan (${planStep!.id})\n\`\`\`json\n${clip(JSON.stringify(clipReport(plan), null, 1), PLAN_SHOWN)}\n\`\`\`` : undefined,
+      boardPrompt(this.board, lead, false),
+      this.changedNote(),
+    ].filter((x): x is string => !!x);
+  }
+
+  /** One answering turn of the lead, in its question session (`session`) or a new one. */
+  private async answerAsLead(
+    lead: AgentConfig,
+    base: { step: string; agent: string },
+    session: { id: string; cwd: string } | undefined,
+    q: { from: string; step: string; question: string; context?: string; options?: string[] },
+  ): Promise<AgentResult> {
+    const leadName = lead.name;
+    const account = isBalanced(lead, this.opts.connections) ? await this.opts.connections!.pick() : undefined;
+    const built = await resolverOf(this.opts.connections).resolve(account ? { ...lead.backend, account } : lead.backend, this.opts.env ?? process.env);
+    const cwd = session?.cwd ?? (await this.workspace.prepare(leadName, false));
+    this.emit({ ...base, type: 'agent.started', data: { model: lead.model ?? null, backend: lead.backend.type, via: built.via, cwd, resumed: !!session, question: true } });
+    const timeout = AbortSignal.timeout(lead.limits.timeout_min * 60_000);
+    const inv = buildInvocation(this.team, this.store, this.runId, lead, {
+      cwd,
+      root: this.workspace.isolation === 'none' ? this.workspace.repo : cwd,
+      folder: !!this.workspace.folder,
+      prompt: leadPrompt({ goal: this.goalText, lead: leadName, ...q, known: this.settled(leadName), again: !!session }),
+      resume: session?.id,
+      env: built.env,
+      pricing: built.pricing,
+      account: accountOf(built),
+      via: built.via,
+      outputSchema: LEAD_SCHEMA,
+      step: QUESTION_STEP,
+      signal: this.opts.signal ? AbortSignal.any([this.opts.signal, timeout]) : timeout,
+      repo: this.workspace.repo,
+    });
+    const result = await this.opts.runner.run(inv).finally(() => inv.onControl?.(null));
+    this.costUsd += result.costUsd;
+    this.emit({ ...base, type: result.ok ? 'agent.finished' : 'agent.error', data: finishedData(lead, result, built.via) });
+    if (result.ok && result.sessionId) this.leadSessions.set(leadName, { id: result.sessionId, cwd });
+    return result;
   }
 
   private output(agent: AgentConfig, stepId: string, result: AgentResult, schema: JsonSchema | undefined): unknown {
@@ -1044,6 +1249,15 @@ export function buildInvocation(
     onEvent: eventSink(store, runId, base, { account: p.account, via: p.via, model: agent.model }),
   };
 }
+
+/** Longest a model may take to write a summary. */
+const SUMMARY_TIMEOUT_MS = 10 * 60_000;
+
+/** How much of the plan a lead answering a question is given (characters). */
+const PLAN_SHOWN = 12_000;
+
+/** How many changed files a member's turn lists. */
+const CHANGED_SHOWN = 60;
 
 /** For a member who writes the todo list (see Engine.plans). */
 const PLAN_NOTE =

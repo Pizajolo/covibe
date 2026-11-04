@@ -70,3 +70,12 @@ describe('token savers', () => {
     expect(stats.tokens).toMatchObject({ input: 10, cacheRead: 800, cacheWrite: 190 });
   });
 });
+
+describe('report schemas for Claude Code', () => {
+  it('leave out the $schema line, which Claude Code refuses for draft 2020-12', async () => {
+    const { forClaudeCode } = await import('../src/runner/claude-sdk.js');
+    const schema = { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { a: { type: 'string' } } };
+    expect(forClaudeCode(schema)).toEqual({ type: 'object', properties: { a: { type: 'string' } } });
+    expect(schema.$schema).toBeDefined();
+  });
+});

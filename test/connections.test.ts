@@ -352,3 +352,13 @@ describe('OpenAI translator', () => {
     }
   });
 });
+
+describe('toChatRequest and Claude Code\'s system messages', () => {
+  it('keeps them as system messages and gives OpenAI a cache key', () => {
+    const req = { model: 'm', messages: [{ role: 'user' as const, content: 'Hi' }, { role: 'system' as const, content: [{ type: 'text' as const, text: '# Environment' }] }] };
+    const out = toChatRequest(req, { openaiHost: true, cacheKey: 's1' });
+    expect(out.messages).toEqual([{ role: 'user', content: 'Hi' }, { role: 'system', content: '# Environment' }]);
+    expect(out.prompt_cache_key).toBe('s1');
+    expect(toChatRequest(req, { cacheKey: 's1' }).prompt_cache_key).toBeUndefined();
+  });
+});

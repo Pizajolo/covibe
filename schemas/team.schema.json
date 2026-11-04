@@ -462,6 +462,10 @@
         },
         "on_gate_fail": {
           "$ref": "#/$defs/gateFailPolicy"
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Always run this step in full: the planner cannot leave its members out, and a fix round reruns all its branches."
         }
       }
     },
@@ -491,6 +495,10 @@
         },
         "on_gate_fail": {
           "$ref": "#/$defs/gateFailPolicy"
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Always run this step in full: the planner cannot leave its members out, and a fix round reruns all its branches."
         }
       }
     },
@@ -518,7 +526,18 @@
               "$ref": "#/$defs/parallelStep"
             },
             "else": {
-              "$ref": "#/$defs/agentStep"
+              "if": {
+                "type": "object",
+                "required": [
+                  "summary"
+                ]
+              },
+              "then": {
+                "$ref": "#/$defs/summaryStep"
+              },
+              "else": {
+                "$ref": "#/$defs/agentStep"
+              }
             }
           }
         }
@@ -650,6 +669,38 @@
           "type": "string",
           "minLength": 1,
           "description": "Docker compose: the service that serves the app."
+        }
+      }
+    },
+    "summaryStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "summary"
+      ],
+      "description": "The run's summary. covibe gathers it from the plan, the todo list, every step's report, the files changed, the checks and the decisions made on the way. Without a model that is the summary and it costs nothing; with a model, that model writes it up from those facts in one request, without tools or anyone's session.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "summary": {
+          "const": true
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The model that writes the summary up. Leave it out to have covibe write it, with no model."
+        },
+        "effort": {
+          "$ref": "#/$defs/effort"
+        },
+        "backend": {
+          "$ref": "#/$defs/backend"
+        },
+        "instructions": {
+          "type": "string",
+          "description": "How the model should write it (only with a model)."
         }
       }
     }
