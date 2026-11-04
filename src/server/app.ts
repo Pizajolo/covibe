@@ -8,7 +8,7 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { ConfigError, DEFAULT_SANDBOX_NETWORK, DEFAULT_SANDBOX_WRITE } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
-import { acceptIntoNote, brainLog, BrainError, brainSize, curate, deleteNote, ensureBrain, listNotes, readNote, summarizeBrain, SUMMARIZER, writeNote } from '../engine/brain.js';
+import { acceptIntoNote, brainLoad, brainLog, BrainError, brainSize, curate, deleteNote, ensureBrain, listNotes, readNote, summarizeBrain, SUMMARIZER, writeNote } from '../engine/brain.js';
 import { ask, chat, type ChatOutcome } from '../engine/chat.js';
 import { cleanupWorktrees, worktreeReport } from '../engine/cleanup.js';
 import { checkGoal, goalFilesKey, goalPrompt } from '../engine/backlog.js';
@@ -50,7 +50,7 @@ import { EventStore } from '../events/store.js';
 import type { DeliveryMode, Goal, RunEvent, RunRecord } from '../events/types.js';
 import { ClaudeSdkRunner } from '../runner/claude-sdk.js';
 import type { AgentRunner } from '../runner/types.js';
-import type { AccountInfo, AppViewInfo, BacklogSettings, BacklogState, BacklogView, ConnectionsInfo, GoalView, DiffResult, DoctorDetail, FeedbackList, MemberInfo, OpenedFile, PreviewSite, RunApp, RunAppSettings, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UndoResult, UsageReport } from './api-types.js';
+import type { AccountInfo, AppSettings, AppViewInfo, BacklogSettings, BacklogState, BacklogView, ConnectionsInfo, GoalView, DiffResult, DoctorDetail, FeedbackList, MemberInfo, OpenedFile, PreviewSite, RunApp, RunAppSettings, RunDetail, RunFile, RunFiles, RunSummary, Stats, TeamDetail, UndoResult, UsageReport } from './api-types.js';
 import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Project } from './library.js';
 import * as gitops from './gitops.js';
 import { GitProblem, gitOverview, gitShow } from './gitops.js';
@@ -1235,7 +1235,16 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
         const doc = rawDoc(library.readFile(t.id, 'team.yaml')) as { brain?: { curator?: string } };
         return doc.brain?.curator ? [{ teamId: t.id, team: t.name, curator: doc.brain.curator }] : [];
       });
-      return { dir: brainRoot(project.path), notes: listNotes(project.path), proposals: store.proposals(), log: await brainLog(project.path), curators, summarizing: summarizing.has(project.id) };
+      return {
+        dir: brainRoot(project.path),
+        notes: listNotes(project.path),
+        proposals: store.proposals(),
+        log: await brainLog(project.path),
+        curators,
+        summarizing: summarizing.has(project.id),
+        load: brainLoad(project.path, recentBrainReads(store, brainRoot(project.path))),
+        summarizer: summarizerChoice(library.settings()),
+      };
     }],
     ['GET', '/api/projects/:pid/brain/note', (p, _b, q) => ({ path: q.get('path'), content: readNote(library.project(p.pid!).path, q.get('path') ?? '') })],
     ['PUT', '/api/projects/:pid/brain/note', async (p, body) => {
@@ -1289,7 +1298,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       store.append(run.id, { type: 'run.started', data: { team: SUMMARIZER, goal: run.goal, kind: 'curate', steps: ['summarize'] } });
       let status: 'succeeded' | 'failed' = 'succeeded';
       let reason: string | undefined;
-      void summarizeBrain({ store, runner, repo: project.path, runId: run.id, model: library.settings().designerModel, backends: connections })
+      const settings = library.settings();
+      const brainBackend = settings.brainProvider ? { type: 'connection' as const, connection: settings.brainProvider.connection, model: settings.brainProvider.model } : undefined;
+      void summarizeBrain({ store, runner, repo: project.path, runId: run.id, model: settings.brainModel ?? undefined, effort: settings.brainEffort ?? undefined, backend: brainBackend, backends: connections })
         .catch((err) => {
           status = 'failed';
           reason = (err as Error).message;
@@ -2164,4 +2175,27 @@ function uploadIds(body: unknown): string[] {
   if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) throw new BadRequest('"attachments" is a list of upload ids');
   if (list.length > 50) throw new BadRequest('at most 50 files at a time');
   return list as string[];
+}
+
+/** How many workflow runs the brain's "read in recent runs" looks at. */
+const BRAIN_RUNS = 10;
+
+/** The notes members read (Read calls into the brain folder) in this project's recent workflow runs. */
+function recentBrainReads(store: EventStore, dir: string): { runs: number; reads: string[] } {
+  const runs = store.listRuns(50).filter((r) => r.kind === 'workflow').slice(0, BRAIN_RUNS);
+  const reads: string[] = [];
+  for (const r of runs) {
+    for (const e of store.events(r.id)) {
+      if (e.type !== 'agent.tool' || e.data.tool !== 'Read') continue;
+      const file = (e.data.input as { file_path?: unknown } | undefined)?.file_path;
+      if (typeof file === 'string' && file.startsWith(dir + sep)) reads.push(file);
+    }
+  }
+  return { runs: runs.length, reads };
+}
+
+/** Which model summarizes project brains, as the brain page shows it. */
+function summarizerChoice(settings: AppSettings): string {
+  if (settings.brainProvider) return `${settings.brainProvider.model} on ${settings.brainProvider.connection}`;
+  return settings.brainModel ?? 'sonnet';
 }

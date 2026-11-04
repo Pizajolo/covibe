@@ -107,4 +107,6 @@ your plan usage, not just the token count.
 - End with `{ id: report, summary: true }` instead of a member's report step, which resumes that member's whole
   session. Add `model: haiku` (or another cheap model) to it if you want the summary in prose.
 - Keep `CLAUDE.md` short. With `setting_sources: [project]` every member sends it with every request.
+- Watch the brain on the project's Brain tab: the list of notes goes into every member's prompt, and each note a
+  member reads stays in its conversation. **Summarize** compresses the notes; pick its model in Settings.
 - Prefer providers that cache for members that make many tool calls.

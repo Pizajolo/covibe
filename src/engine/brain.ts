@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-import type { AgentConfig, TeamConfig } from '../config/types.js';
+import type { AgentConfig, BackendConfig, Effort, TeamConfig } from '../config/types.js';
 import type { EventStore } from '../events/store.js';
 import type { BrainProposal } from '../events/types.js';
 import { brainRoot } from '../home.js';
@@ -171,6 +171,40 @@ export function brainPrompt(repo: string, agent: AgentConfig, team: TeamConfig):
   ].join('\n');
 }
 
+/** A rough token count: about four characters a token for English prose and Markdown. */
+export const tokensOf = (text: string) => Math.ceil(text.length / 4);
+
+export interface BrainLoad {
+  /** The brain's part of every member's system prompt (where it is, the list of notes, what to do with them). Sent with every request. */
+  promptTokens: number;
+  /** Every note, read in full. */
+  notesTokens: number;
+  /** Each note, read in full. */
+  notes: Record<string, number>;
+  /** What members read of the brain in recent runs of this project. */
+  recent?: { runs: number; reads: number; tokens: number };
+}
+
+/**
+ * What the brain costs members, in tokens (estimated, see tokensOf). Every
+ * member gets the list of notes in its system prompt; the notes themselves it
+ * reads with its file tools when they relate to its task.
+ */
+export function brainLoad(repo: string, recent?: { runs: number; reads: string[] }): BrainLoad {
+  const dir = brainRoot(repo);
+  const member = { name: 'member' } as AgentConfig;
+  const team = { brain: { curator: 'curator' } } as TeamConfig;
+  const notes: Record<string, number> = {};
+  for (const n of listNotes(repo)) notes[n.path] = tokensOf(readFileSync(join(dir, n.path), 'utf8'));
+  const load: BrainLoad = { promptTokens: tokensOf(brainPrompt(repo, member, team)), notesTokens: Object.values(notes).reduce((a, b) => a + b, 0), notes };
+  if (recent) {
+    // A read of a note as it is now (it may have been longer or shorter then).
+    const read = recent.reads.map((p) => relative(dir, p).split(sep).join('/')).filter((rel) => rel in notes);
+    load.recent = { runs: recent.runs, reads: read.length, tokens: read.reduce((n, rel) => n + notes[rel]!, 0) };
+  }
+  return load;
+}
+
 /** propose_brain_note, for every member except the curator. */
 export function proposeTool(store: EventStore, runId: string | undefined, agent: string, step?: string): CustomTool {
   return {
@@ -289,7 +323,11 @@ export async function summarizeBrain(opts: {
   repo: string;
   /** The run the events go to (a dedicated one, kind "curate"). */
   runId: string;
+  /** A Claude model (default sonnet), unless `backend` is a provider's, which names its own model. */
   model?: string;
+  effort?: Effort;
+  /** Where it runs: your Claude login by default, or a provider from Settings → Advanced. */
+  backend?: BackendConfig;
   env?: Env;
   backends?: BackendResolver;
   signal?: AbortSignal;
@@ -301,7 +339,8 @@ export async function summarizeBrain(opts: {
   const notes = listNotes(opts.repo);
   const before = brainSize(opts.repo);
   const base = { step: 'summarize', agent: SUMMARIZER };
-  const model = opts.model ?? 'sonnet';
+  const backend: BackendConfig = opts.backend ?? { type: 'subscription' };
+  const model = (backend.type === 'connection' ? backend.model : undefined) ?? opts.model ?? 'sonnet';
   const tools = ['Read', 'Write', 'Edit', 'MultiEdit', 'Grep', 'Glob'];
   let deleted = 0;
   const remove: CustomTool = {
@@ -333,17 +372,18 @@ ${notes.map((n) => `- ${n.path} (${n.size} bytes): ${n.title}`).join('\n')}
 
 When you are done, say in two or three lines what you merged, deleted and shortened.`;
 
-  const built = await (opts.backends ?? plainBackends).resolve({ type: 'subscription' }, opts.env ?? process.env);
+  const built = await (opts.backends ?? plainBackends).resolve(backend, opts.env ?? process.env);
   store.append(runId, { type: 'step.started', step: 'summarize', data: { loop: 0, notes: notes.length, bytes: before } });
-  store.append(runId, { ...base, type: 'agent.started', data: { model, backend: 'subscription', via: built.via, cwd: dir, resumed: false } });
+  store.append(runId, { ...base, type: 'agent.started', data: { model, backend: backend.type, via: built.via, cwd: dir, resumed: false } });
   const { eventSink, finishedData } = await import('./engine.js');
-  const agent: AgentConfig = { name: SUMMARIZER, prompt: '', model, tools, canMessage: [], canRequest: [], backend: { type: 'subscription' }, limits: { max_turns: 80, timeout_min: 30 }, writes: true, skills: [], plugins: [], browser: false, app: false };
+  const agent: AgentConfig = { name: SUMMARIZER, prompt: '', model, ...(opts.effort ? { effort: opts.effort } : {}), tools, canMessage: [], canRequest: [], backend, limits: { max_turns: 80, timeout_min: 30 }, writes: true, skills: [], plugins: [], browser: false, app: false };
   const result = await opts.runner.run({
     agentName: SUMMARIZER,
     prompt,
     systemPrompt: `You maintain the project brain: a folder of Markdown notes about a project that every member of its agent team reads. You work only in ${dir}, with file tools.`,
     cwd: dir,
     model,
+    effort: opts.effort,
     tools,
     env: built.env,
     pricing: built.pricing,

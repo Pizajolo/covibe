@@ -32,7 +32,13 @@ interface BrainView {
   curators: { teamId: string; team: string; curator: string }[];
   /** An agent is compressing the notes right now. */
   summarizing: boolean;
+  /** What the brain costs members, in estimated tokens. */
+  load: { promptTokens: number; notesTokens: number; notes: Record<string, number>; recent?: { runs: number; reads: number; tokens: number } };
+  /** The model Summarize uses (Settings). */
+  summarizer: string;
 }
+
+const tokens = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`);
 
 const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`);
 
@@ -199,11 +205,18 @@ function Brain({ projectId }: { projectId: string }) {
               className="btn sm"
               disabled={starting || brain.summarizing || total < 1024}
               onClick={() => void summarize()}
-              title={total < 1024 ? 'The brain is still small' : 'An agent compresses the notes: same facts, fewer words, so members read less'}
+              title={total < 1024 ? 'The brain is still small' : `${brain.summarizer} compresses the notes: same facts, fewer words, so members read less`}
             >
               <IconSparkle width={13} height={13} /> {brain.summarizing ? 'Summarizing…' : 'Summarize'}
             </button>
           </div>
+          <div className="tiny faint" style={{ padding: '0 4px 4px', textAlign: 'right' }}>
+            with <span className="mono">{brain.summarizer}</span> ·{' '}
+            <a href="#/settings" title="Settings → Claude → Summarizing project brains">
+              change
+            </a>
+          </div>
+          <BrainCost load={brain.load} />
           {brain.notes.map((n) => (
             <div key={n.path} className={`list-row clickable ${n.path === sel ? 'selected' : ''}`} style={{ borderRadius: 8, border: 0, padding: '6px 10px' }} onClick={() => setSel(n.path)}>
               <IconFile width={14} height={14} style={{ color: 'var(--text-3)', flex: 'none' }} />
@@ -211,6 +224,11 @@ function Brain({ projectId }: { projectId: string }) {
                 <span className="ellipsis small">{n.title}</span>
                 <span className="tiny faint mono ellipsis">{n.path}</span>
               </div>
+              {brain.load.notes[n.path] !== undefined && (
+                <span className="tiny faint" style={{ flex: 'none' }} title="Tokens to read this note (estimated)">
+                  ~{tokens(brain.load.notes[n.path]!)}
+                </span>
+              )}
             </div>
           ))}
           {newNote === null ? (
@@ -412,3 +430,32 @@ function AcceptProposal({ projectId, proposal, notes, onClose, onDone }: { proje
   );
 }
 
+/**
+ * What the brain costs members in tokens: the list of notes in every member's
+ * system prompt (sent with every request, cached after the first), and the notes
+ * themselves, which members read when they relate to their task.
+ */
+function BrainCost({ load }: { load: BrainView['load'] }) {
+  const r = load.recent;
+  return (
+    <div className="card" style={{ margin: '0 4px 10px', padding: '8px 10px' }}>
+      <div className="tiny" style={{ fontWeight: 600, marginBottom: 4 }}>
+        Tokens to load the brain (estimated)
+      </div>
+      <dl className="kv tiny" style={{ margin: 0 }}>
+        <dt>Every member, every request</dt>
+        <dd title="Where the brain is, the list of notes and what to do with them, in each member's system prompt. Sent with every request; cached after the first.">~{tokens(load.promptTokens)}</dd>
+        <dt>Reading every note</dt>
+        <dd title="Members read only the notes that relate to their task, but each note they read stays in their conversation and is sent again with their later requests.">~{tokens(load.notesTokens)}</dd>
+        {r && r.runs > 0 && (
+          <>
+            <dt>Read in the last {r.runs === 1 ? 'run' : `${r.runs} runs`}</dt>
+            <dd title="Notes members opened with Read in this project's recent workflow runs, at their current size.">
+              {r.reads ? `${r.reads} note${r.reads === 1 ? '' : 's'}, ~${tokens(Math.round(r.tokens / r.runs))} per run` : 'none'}
+            </dd>
+          </>
+        )}
+      </dl>
+    </div>
+  );
+}

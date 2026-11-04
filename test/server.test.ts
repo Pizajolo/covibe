@@ -466,6 +466,16 @@ describe('server', () => {
     await expect(api('PUT', `/api/projects/${project.id}/brain/note`, { path: '../escape.md', content: 'x' })).rejects.toMatchObject({ status: 400 });
     const after = await api('GET', `/api/projects/${project.id}/brain`);
     expect(after.notes.map((n: { title: string }) => n.title)).toEqual(['Project brain', 'Deploying']);
+    // What loading it costs members, and who summarizes it.
+    expect(after.load.notes['deploy.md']).toBe(Math.ceil('# Deploying\n\nUse make deploy.\n'.length / 4));
+    expect(after.load.promptTokens).toBeGreaterThan(after.load.notes['deploy.md']);
+    expect(after.load.recent).toEqual({ runs: 0, reads: 0, tokens: 0 });
+    expect(after.summarizer).toBe('sonnet');
+    await api('PUT', '/api/settings', { brainModel: 'haiku', brainEffort: 'low' });
+    expect((await api('GET', `/api/projects/${project.id}/brain`)).summarizer).toBe('haiku');
+    await api('PUT', '/api/settings', { brainProvider: { connection: 'deepseek', model: 'deepseek-chat' }, brainModel: null });
+    expect((await api('GET', `/api/projects/${project.id}/brain`)).summarizer).toBe('deepseek-chat on deepseek');
+    await expect(api('PUT', '/api/settings', { brainProvider: { connection: 'deepseek' } })).rejects.toThrow(/brainProvider/);
     expect(after.log[0]).toMatchObject({ author: 'you', message: 'Edit deploy.md' });
   });
 
