@@ -15,6 +15,8 @@ export type EventType =
   | 'step.skipped'
   // The planner chose the members the goal needs (see engine/selection.ts).
   | 'members.selected'
+  // A model wrote a summary step from covibe's record of the run: its cost and tokens (see Engine.summarize).
+  | 'summary.written'
   | 'step.branch_finished'
   | 'gate.passed'
   | 'gate.failed'

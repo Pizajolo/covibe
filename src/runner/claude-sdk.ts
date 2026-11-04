@@ -163,7 +163,7 @@ export class ClaudeSdkRunner implements AgentRunner {
       tools,
       allowedTools: [...tools, ...(inv.canMessage.length ? [SEND_MESSAGE_TOOL] : []), ...custom.map((t) => `mcp__${COVIBE_SERVER}__${t.name}`), ...(inv.plugins?.mcpTools ?? [])],
       permissionMode: 'dontAsk',
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: inv.systemPrompt },
+      systemPrompt: inv.ownSystemPrompt ? inv.systemPrompt : { type: 'preset', preset: 'claude_code', append: inv.systemPrompt },
       settingSources: inv.settingSources,
       maxTurns: inv.maxTurns,
       maxBudgetUsd: inv.maxBudgetUsd,

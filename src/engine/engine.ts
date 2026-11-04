@@ -1,6 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
-import type { AgentConfig, Branch, JsonSchema, Step, TeamConfig } from '../config/types.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { AgentConfig, Branch, JsonSchema, Step, SummaryStep, TeamConfig } from '../config/types.js';
 import type { EventStore } from '../events/store.js';
 import type { InboxMessage, NewEvent, RunStatus } from '../events/types.js';
 import type { Connections } from '../connections/store.js';
@@ -26,7 +29,7 @@ import { denyWritePaths, type Writer } from './folder.js';
 import { Workspace, type CollectResult } from './workspace.js';
 import { attachFiles, attachmentNote, ensureAttachmentsDir, takeUploads, type Attachment } from './attachments.js';
 import { boardPrompt, planTasksOf, planTasksTool, replayBoard, TaskBoard, updateTaskTool, type BoardTask } from './tasks.js';
-import { writeSummary } from './summary.js';
+import { SUMMARY_SYSTEM, summaryPrompt, writeSummary } from './summary.js';
 import { candidates, feedbackOwners, HANDOFF_NOTE, isPlanningStep, namesOf, plannerOf, Selection, selectionNote, selectTool, stepAgents, type Candidate } from './selection.js';
 
 export interface RunOptions {
@@ -390,6 +393,14 @@ class Engine {
           throw new StepError(`${a.name}: ${(err as Error).message}`);
         }
       }
+      for (const s of steps) {
+        if (s.kind !== 'summary' || !s.backend) continue;
+        try {
+          checkBackend(s.backend, this.opts.connections);
+        } catch (err) {
+          throw new StepError(`step ${s.id}: ${(err as Error).message}`);
+        }
+      }
       let i = from?.index ?? 0;
       while (i < steps.length) {
         this.opts.signal?.throwIfAborted();
@@ -476,18 +487,7 @@ class Engine {
       const task = step.task ? await evaluate(step.task, this.context) : undefined;
       return this.invoke(step.agent, step, task, step.outputSchema);
     }
-    if (step.kind === 'summary') {
-      const text = writeSummary({
-        goal: this.opts.goal,
-        events: this.store.events(this.runId),
-        tasks: this.board.list,
-        planStep: this.planner ? this.team.steps[this.planner.index]?.id : undefined,
-        step: step.id,
-        loops: this.context.loop,
-        costUsd: this.costUsd,
-      });
-      return { text };
-    }
+    if (step.kind === 'summary') return { text: await this.summarize(step) };
 
     const output: Record<string, unknown> = {};
     // Continuing a run: branches that finished before it stopped keep their reports.
@@ -556,6 +556,72 @@ class Engine {
       throw err;
     } finally {
       release();
+    }
+  }
+
+  /**
+   * A summary step: covibe gathers the facts from the run; with a model set,
+   * that model writes them up in one request (no tools, no member's session,
+   * no git status or CLAUDE.md). If the model fails, covibe's own summary
+   * stands, so the run does not fail over its summary.
+   */
+  private async summarize(step: SummaryStep): Promise<string> {
+    const facts = (forModel: boolean) =>
+      writeSummary({
+        goal: this.opts.goal,
+        events: this.store.events(this.runId),
+        tasks: this.board.list,
+        planStep: this.planner ? this.team.steps[this.planner.index]?.id : undefined,
+        step: step.id,
+        loops: this.context.loop,
+        costUsd: this.costUsd,
+        forModel,
+      });
+    if (!step.model || !step.backend) return facts(false);
+    const fallback = (why: string) => `${facts(false)}\n\n_${step.model} could not write the summary (${why}), so this is covibe's own._`;
+    // An empty folder: no git status or CLAUDE.md goes along.
+    const dir = mkdtempSync(join(tmpdir(), 'covibe-summary-'));
+    try {
+      const connections = this.opts.connections;
+      const balanced = !!connections && step.backend.type === 'subscription' && !step.backend.account;
+      const account = balanced ? await connections!.pick() : undefined;
+      const built = await resolverOf(connections).resolve(account ? { ...step.backend, account } : step.backend, this.opts.env ?? process.env);
+      const timeout = AbortSignal.timeout(SUMMARY_TIMEOUT_MS);
+      const result = await this.opts.runner.run({
+        agentName: step.id,
+        prompt: summaryPrompt(facts(true), step.instructions),
+        systemPrompt: SUMMARY_SYSTEM,
+        ownSystemPrompt: true,
+        cwd: dir,
+        model: step.model,
+        effort: step.effort,
+        tools: [],
+        env: built.env,
+        pricing: built.pricing,
+        maxTurns: 2,
+        settingSources: [],
+        signal: this.opts.signal ? AbortSignal.any([this.opts.signal, timeout]) : timeout,
+        canMessage: [],
+        checkToolUse: () => 'writing the summary takes no tools',
+        sendMessage: () => 'writing the summary takes no messages',
+        onEvent: () => {},
+      });
+      this.costUsd += result.costUsd;
+      const text = result.ok ? result.text.trim() : '';
+      const error = text ? undefined : result.error || 'it wrote nothing';
+      this.emit({
+        step: step.id,
+        type: 'summary.written',
+        data: { model: step.model, via: built.via, ok: !error, cost_usd: result.costUsd, tokens: result.tokens ?? null, turns: result.turns, duration_ms: result.durationMs, ...(error ? { error } : {}) },
+      });
+      return error ? fallback(error) : `${text}\n\n_Written by ${step.model} from covibe's record of the run._`;
+    } catch (err) {
+      this.opts.signal?.throwIfAborted();
+      const error = (err as Error).message;
+      this.emit({ step: step.id, type: 'summary.written', data: { model: step.model, ok: false, cost_usd: 0, error } });
+      return fallback(error);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   }
 
@@ -1183,6 +1249,9 @@ export function buildInvocation(
     onEvent: eventSink(store, runId, base, { account: p.account, via: p.via, model: agent.model }),
   };
 }
+
+/** Longest a model may take to write a summary. */
+const SUMMARY_TIMEOUT_MS = 10 * 60_000;
 
 /** How much of the plan a lead answering a question is given (characters). */
 const PLAN_SHOWN = 12_000;

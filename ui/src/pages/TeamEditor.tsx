@@ -894,17 +894,15 @@ function Workflow({ doc, edit }: { doc: Doc; edit: Edit }) {
                 <button className={Array.isArray(step.parallel) ? 'on' : ''} onClick={() => !Array.isArray(step.parallel) && setStep(i, { ...withoutKeys(step, ['agent', 'task', 'output_schema', 'summary']), parallel: [{ agent: step.agent ?? agents[0], ...(step.task ? { task: step.task } : {}) }] })}>
                   Several in parallel
                 </button>
-                <button className={step.summary ? 'on' : ''} title="covibe writes the run's summary from the reports, without a model" onClick={() => !step.summary && setStep(i, { id: step.id, summary: true })}>
-                  Summary by covibe
+                <button className={step.summary ? 'on' : ''} title="The run's summary: written by covibe from the reports, or by a model you choose" onClick={() => !step.summary && setStep(i, { id: step.id, summary: true })}>
+                  Summary
                 </button>
               </div>
             </label>
           </div>
 
           {step.summary ? (
-            <p className="small muted">
-              covibe writes the run's summary here from what the run already has: the plan, the todo list, every step's report, the files changed, the checks, and the questions answered on the way. No member and no model, so it costs nothing.
-            </p>
+            <SummaryStepFields step={step} path={['workflow', 'steps', i]} teamBackend={doc.defaults?.backend} edit={edit} />
           ) : !Array.isArray(step.parallel) ? (
             <div className="grid grid-2">
               <label className="field">
@@ -1020,6 +1018,50 @@ const DRAG_TYPE = 'application/x-covibe';
  * gated step's loop handle onto an earlier step to choose where failed work
  * goes back to. Every change is a comment-preserving edit of team.yaml.
  */
+/** Who writes a summary step: covibe from the run's record (no model), or a model of the team's choice. */
+function SummaryStepFields({ step, path, teamBackend, edit }: { step: Doc; path: (string | number)[]; teamBackend: Doc | undefined; edit: Edit }) {
+  const at = (k: string) => [...path, k];
+  // A provider's model lives in the step's backend; a Claude model in `model` (it runs on the team's login).
+  const own = providerOf(step.backend);
+  const withModel = !!step.model || !!own;
+  return (
+    <div className="col">
+      <ModelPicker
+        compact
+        noModel="None: covibe writes it, no model"
+        inherit="Team default"
+        value={{ model: step.model, effort: step.effort }}
+        provider={own}
+        onProvider={(c) => void edit([{ op: 'set', path: at('backend'), value: providerBackend(c) }, { op: 'set', path: at('model'), value: null }])}
+        onChange={(k, v) => {
+          const ops: EditOp[] = [{ op: 'set', path: at(k), value: v }];
+          if (k === 'model') {
+            // A Claude model, or none: the step leaves the provider it had (and, with no model, what only a model uses).
+            if (own) ops.push({ op: 'set', path: at('backend'), value: v !== null && providerOf(teamBackend) ? { type: 'subscription' } : null });
+            if (v === null) ops.push({ op: 'set', path: at('effort'), value: null }, { op: 'set', path: at('instructions'), value: null });
+          }
+          void edit(ops);
+        }}
+      />
+      {withModel ? (
+        <>
+          <p className="small muted">
+            covibe gathers the facts (the plan, the todo list, every step's report, the files changed, the checks, the questions answered) and this model writes them up in one request, with no tools and without anyone's session. If it fails, covibe's own summary is used.
+          </p>
+          <label className="field">
+            How to write it (optional)
+            <TextField multiline value={step.instructions} placeholder="e.g. Write it as release notes for the team, in German." onCommit={(v) => void edit([{ op: 'set', path: at('instructions'), value: v || null }])} />
+          </label>
+        </>
+      ) : (
+        <p className="small muted">
+          covibe writes the run's summary from what the run already has: the plan, the todo list, every step's report, the files changed, the checks, and the questions answered on the way. No model, so it costs nothing. Pick a model above to have it written up in prose.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function WorkflowGraph({
   steps,
   agents,
@@ -1207,7 +1249,7 @@ function WorkflowGraph({
                     </span>
                   ))
                 ) : s.summary ? (
-                  <span className="tiny faint">Written by covibe, no model</span>
+                  <span className="tiny faint">{s.model || s.backend?.model ? `Written up by ${s.model ?? s.backend.model}` : 'Written by covibe, no model'}</span>
                 ) : (
                   <span className="tiny faint">Drop a member here</span>
                 )}

@@ -187,6 +187,10 @@ interface RawStep {
   on_gate_fail?: RawPolicy;
   required?: boolean;
   summary?: boolean;
+  /** A summary step's writer (see SummaryStep). */
+  model?: string;
+  effort?: Effort;
+  backend?: BackendConfig;
 }
 interface RawTeam {
   name: string;
@@ -377,7 +381,12 @@ function resolveTeam(raw: RawTeam, file: string, opts: LoadOptions): TeamConfig 
     if (s.task) checkExpr(s.task, `${where}/task`);
     const onGateFail = resolvePolicy(s.on_gate_fail, `${where}/on_gate_fail`) ?? (s.gate ? defaultPolicy : undefined);
     const base = { id: s.id, instructions: s.instructions, gate: s.gate, onGateFail, ...(s.required ? { required: true } : {}) };
-    if (s.summary) return { id: s.id, kind: 'summary' };
+    if (s.summary) {
+      // Without a model or a backend of its own, covibe writes it; with one, that model does.
+      if (!s.model && !s.backend) return { id: s.id, kind: 'summary', ...(s.instructions ? { instructions: s.instructions } : {}) };
+      const { backend, model } = memberBackend({ backend: s.backend, model: s.model }, { backend: defaultBackend }, opts.providerFor);
+      return { id: s.id, kind: 'summary', model, backend, ...(s.effort ? { effort: s.effort } : {}), ...(s.instructions ? { instructions: s.instructions } : {}) };
+    }
     if (s.parallel) {
       const seen = new Set<string>();
       const branches = s.parallel.map((b, j): Branch => {

@@ -88,9 +88,12 @@ your plan usage, not just the token count.
   what the run has settled: the plan's report, the todo list and the files changed. Later questions in the run
   resume that session, one at a time, with the same tools and report schema, so it is cached and the lead stays
   consistent with its earlier answers. The planning session is no longer copied.
-- **covibe can write the summary.** A step `{ id: report, summary: true }` has no member and no model: covibe
-  writes the summary from the run's log (goal, plan, tasks, each member's latest report, files changed, gates and
-  fix rounds, members left out, questions answered, open minor findings). The example team uses it.
+- **covibe can write the summary.** A step `{ id: report, summary: true }` has no member: covibe gathers the
+  summary from the run's log (goal, plan, tasks, each member's latest report, files changed, gates and fix rounds,
+  members left out, questions answered, open minor findings). Without a model it costs nothing; the example team
+  uses it that way. With a `model`, that model writes those facts up in prose in one request, with its own short
+  system prompt, no tools, no git status or `CLAUDE.md` and no member's session: a few thousand tokens however
+  long the run was.
 
 ## What you can do in the team file
 
@@ -101,7 +104,7 @@ your plan usage, not just the token count.
 - Use `cache_ttl: 1h` for members resumed after long waits, such as builders between fix rounds. A 1-hour cache
   write costs more than a 5-minute one, but less than writing the whole conversation again after it expired.
 - Give review findings and test failures an `owner` (the example schemas do), so fix rounds stay narrow.
-- End with `{ id: report, summary: true }` instead of a member's report step. If you want a member's own words,
-  give that step a cheaper model; it resumes that member's whole session.
+- End with `{ id: report, summary: true }` instead of a member's report step, which resumes that member's whole
+  session. Add `model: haiku` (or another cheap model) to it if you want the summary in prose.
 - Keep `CLAUDE.md` short. With `setting_sources: [project]` every member sends it with every request.
 - Prefer providers that cache for members that make many tool calls.

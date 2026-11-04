@@ -321,9 +321,18 @@ A variable you have not saved is taken from the environment covibe runs in, as b
   engine against the context: step outputs, plus `goal`, `loop` (the current fix round) and `feedback`. A gate
   passes only when it evaluates to literal `true`. A missing field or a number counts as failing.
 - **Tasks.** If a branch's `task` selects nothing (`undefined` or `[]`), that branch is skipped.
-- **Summary steps.** `{ id: report, summary: true }` is a step covibe writes itself, with no member and no model:
-  the run's summary from its log (plan, tasks, each member's latest report, files changed, gates, fix rounds,
-  questions answered, open minor findings). Its output is `{ "text": "…" }`, shown in the Plan tab.
+- **Summary steps.** `{ id: report, summary: true }` is the run's summary, with no member. covibe gathers it from the
+  log (plan, tasks, each member's latest report, files changed, gates, fix rounds, questions answered, open minor
+  findings). Without a model that is the summary, and it costs nothing. With `model` (and optionally `effort`, a
+  `backend` for another provider, and `instructions` on how to write it), that model writes the facts up in one
+  request: no tools, no member's session, no git status or `CLAUDE.md`. If it fails, covibe's own summary is used.
+  Its output is `{ "text": "…" }`, shown in the Plan tab. In the app: **Workflow**, the step, **Summary**, **Model**.
+
+  ```yaml
+  - { id: report, summary: true }                                  # covibe writes it, no model
+  - { id: report, summary: true, model: haiku, effort: low,        # Haiku writes it up
+      instructions: "Release notes for the team, in German." }
+  ```
 - **Who is needed.** The planner (the member of a step named `plan`, or the lead's first step) names the members the
   goal needs, with the `select_members` tool or a `members` list in its plan report. Steps of members it leaves out
   and gives no task are skipped, gates included. `required: true` on a step keeps it running in full. If the planner

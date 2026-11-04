@@ -4,6 +4,7 @@ import { ConfigError, loadTeam } from '../src/config/load.js';
 import { runTeam } from '../src/engine/engine.js';
 import { reportLine } from '../src/engine/summary.js';
 import { EventStore } from '../src/events/store.js';
+import { computeStats } from '../src/server/projections.js';
 import { ScriptedRunner, tempDir, tempRepo, writeFiles, type Script } from './helpers.js';
 
 const EXAMPLE = new URL('../examples/feature-team/team.yaml', import.meta.url).pathname;
@@ -84,5 +85,76 @@ describe('a summary step', () => {
     expect(reportLine({ text: 'Long\n\nanswer' })).toBe('Long answer');
     expect(reportLine({ blocking_count: 0, findings: [] })).toBe('blocking_count 0 · findings: 0');
     expect(reportLine(undefined)).toBe('');
+  });
+});
+
+describe('a summary step with a model', () => {
+  const team = (step: string) => {
+    const dir = tempDir();
+    writeFiles(dir, {
+      'team.yaml': `version: 1\nname: t\nagents:\n  builder: { prompt: "Build.\\n", tools: [Read, Write] }\nworkflow:\n  steps:\n    - { id: build, agent: builder }\n    - ${step}\n`,
+    });
+    return loadTeam(join(dir, 'team.yaml'));
+  };
+  const builder: Script = () => ({ write: { 'value.txt': '2' }, text: 'Changed the value to 2.' });
+
+  it('reads the model, effort, backend and instructions from the team file', () => {
+    expect(team('{ id: report, summary: true, model: haiku, effort: low, instructions: "In German." }').steps[1]).toEqual({
+      id: 'report',
+      kind: 'summary',
+      model: 'haiku',
+      effort: 'low',
+      backend: { type: 'subscription' },
+      instructions: 'In German.',
+    });
+    // No model: covibe writes it, and there is nothing to run it on.
+    expect(team('{ id: report, summary: true }').steps[1]).toEqual({ id: 'report', kind: 'summary' });
+  });
+
+  it('has the model write the summary up from covibe\'s record, in one request without tools', async () => {
+    const repo = tempRepo();
+    const store = new EventStore(':memory:');
+    const runner = new ScriptedRunner({ builder, report: () => ({ text: 'The value is now 2.' }) });
+    const outcome = await runTeam({ team: team('{ id: report, summary: true, model: haiku, instructions: "One sentence." }'), repo, goal: 'Set the value to 2', store, runner, env: {} });
+
+    expect(outcome.status).toBe('succeeded');
+    const [call] = runner.callsFor('report');
+    expect(call).toBeDefined();
+    expect(call!.model).toBe('haiku');
+    expect(call!.tools).toEqual([]);
+    expect(call!.customTools).toBeUndefined();
+    expect(call!.ownSystemPrompt).toBe(true);
+    expect(call!.systemPrompt).toContain('You have no tools');
+    expect(call!.settingSources).toEqual([]);
+    expect(call!.resumeSessionId).toBeUndefined();
+    expect(call!.cwd.startsWith(repo)).toBe(false);
+    // The model gets the facts covibe gathered, and the team's instructions.
+    expect(call!.prompt).toContain('# What covibe recorded');
+    expect(call!.prompt).toContain('**Goal:** Set the value to 2');
+    expect(call!.prompt).toContain('- value.txt (builder)');
+    expect(call!.prompt).toContain('# How to write it\n\nOne sentence.');
+    expect(call!.prompt).not.toContain('without a model');
+
+    expect((outcome.context.report as { text: string }).text).toBe("The value is now 2.\n\n_Written by haiku from covibe's record of the run._");
+    const written = store.events(outcome.runId).find((e) => e.type === 'summary.written')!;
+    expect(written.agent ?? null).toBeNull();
+    expect(written).toMatchObject({ step: 'report', data: { model: 'haiku', ok: true, cost_usd: 0.01 } });
+    // Its cost counts with the run's, under the step's name, without it becoming a member.
+    expect(outcome.costUsd).toBeCloseTo(0.02);
+    const stats = computeStats([{ runs: store.listRuns(10), events: store.events(outcome.runId), live: () => false, activeAgents: 0 }]);
+    expect(stats.byAgent.map((a) => a.agent).sort()).toEqual(['builder', 'report']);
+  });
+
+  it('falls back to covibe\'s own summary when the model fails', async () => {
+    const repo = tempRepo();
+    const store = new EventStore(':memory:');
+    const runner = new ScriptedRunner({ builder, report: () => ({ fail: 'overloaded' }) });
+    const outcome = await runTeam({ team: team('{ id: report, summary: true, model: haiku }'), repo, goal: 'Set the value to 2', store, runner, env: {} });
+
+    expect(outcome.status).toBe('succeeded');
+    const text = (outcome.context.report as { text: string }).text;
+    expect(text).toContain('# Summary');
+    expect(text).toContain("_haiku could not write the summary (overloaded), so this is covibe's own._");
+    expect(store.events(outcome.runId).find((e) => e.type === 'summary.written')).toMatchObject({ data: { ok: false, error: 'overloaded' } });
   });
 });

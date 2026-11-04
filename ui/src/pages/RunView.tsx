@@ -757,6 +757,7 @@ function describe(e: RunEvent, roots: string[] = []): { cls: string; text: strin
     case 'step.started': return { cls: 'step', text: `Step ${e.step}${d.loop ? ` (round ${d.loop})` : ''}` };
     case 'step.finished': return null;
     case 'step.skipped': return { cls: '', text: `Skipped: ${d.reason}` };
+    case 'summary.written': return d.ok ? { cls: 'step', text: `Summary written by ${d.model}${typeof d.cost_usd === 'number' ? ` · $${d.cost_usd.toFixed(4)}` : ''}` } : { cls: 'warn', text: `${d.model} could not write the summary (${d.error}); covibe's own is used` };
     case 'members.selected': return { cls: 'step', text: `Needed for this goal: ${(d.members as string[]).join(', ') || 'nobody else'}${(d.skipped as string[] | undefined)?.length ? ` · left out: ${(d.skipped as string[]).join(', ')}` : ''}${d.reason ? ` (${d.reason})` : ''}` };
     case 'gate.passed': return { cls: 'good', text: `Gate passed: ${d.gate}` };
     case 'gate.failed': return { cls: 'error', text: `Gate failed: ${d.gate} → ${JSON.stringify(d.value)}` };

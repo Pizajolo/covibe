@@ -679,13 +679,28 @@
         "id",
         "summary"
       ],
-      "description": "covibe writes the run's summary for you from the plan, the todo list, every step's report, the files changed, the checks and the decisions made on the way. No member and no model: it costs nothing.",
+      "description": "The run's summary. covibe gathers it from the plan, the todo list, every step's report, the files changed, the checks and the decisions made on the way. Without a model that is the summary and it costs nothing; with a model, that model writes it up from those facts in one request, without tools or anyone's session.",
       "properties": {
         "id": {
           "$ref": "#/$defs/identifier"
         },
         "summary": {
           "const": true
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The model that writes the summary up. Leave it out to have covibe write it, with no model."
+        },
+        "effort": {
+          "$ref": "#/$defs/effort"
+        },
+        "backend": {
+          "$ref": "#/$defs/backend"
+        },
+        "instructions": {
+          "type": "string",
+          "description": "How the model should write it (only with a model)."
         }
       }
     }

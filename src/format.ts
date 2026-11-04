@@ -60,6 +60,9 @@ export function formatEvent(e: RunEvent): string {
     case 'step.skipped':
       text = dim(`skipped (${d.reason})`);
       break;
+    case 'summary.written':
+      text = d.ok ? `summary written by ${d.model}` + dim(` ($${Number(d.cost_usd ?? 0).toFixed(4)})`) : yellow(`${d.model} could not write the summary (${d.error}); covibe's own is used`);
+      break;
     case 'members.selected': {
       const skipped = (d.skipped as string[] | undefined) ?? [];
       text = `needed: ${(d.members as string[]).join(', ') || 'nobody else'}` + (skipped.length ? dim(` · left out: ${skipped.join(', ')}`) : '') + (d.reason ? dim(` (${d.reason})`) : '');

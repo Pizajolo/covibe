@@ -66,6 +66,17 @@ export interface SummaryInput {
   step: string;
   loops: number;
   costUsd: number;
+  /** Leave out the closing line (the facts go to a model, which writes the summary). */
+  forModel?: boolean;
+}
+
+/** What the model writing a summary is told: it has the facts and nothing else. */
+export const SUMMARY_SYSTEM =
+  "You write the summary of a covibe run for the person who asked for it. A team of AI members worked on their goal; covibe recorded what happened and gives you that record. You have no tools: write only from the record, and do not invent work, files, results or checks it does not show. Write plain Markdown for a busy reader: what was built or changed and why, how it was checked, decisions made on the way, and anything left open. Keep file paths and numbers exact. Be brief.";
+
+/** The model's turn: the record, and how the team wants the summary written. */
+export function summaryPrompt(facts: string, instructions?: string): string {
+  return [`# What covibe recorded\n\n${facts}`, ...(instructions?.trim() ? [`# How to write it\n\n${instructions.trim()}`] : []), 'Write the summary now.'].join('\n\n');
 }
 
 /** The run's summary, as Markdown. */
@@ -149,6 +160,6 @@ export function writeSummary(p: SummaryInput): string {
   const later = [...unfinished.map((t) => `- ${t.id} ${t.title} is ${t.status}${t.note ? `: ${one(t.note, 200)}` : ''}`), ...open];
   if (later.length) out.push('## Left for later', list(later, (x) => x));
 
-  out.push(`Estimated cost: $${p.costUsd.toFixed(2)}. Written by covibe from the reports, without a model.`);
+  out.push(p.forModel ? `Estimated cost so far: $${p.costUsd.toFixed(2)}.` : `Estimated cost: $${p.costUsd.toFixed(2)}. Written by covibe from the reports, without a model.`);
   return out.join('\n\n');
 }

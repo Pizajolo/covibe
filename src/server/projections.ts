@@ -539,8 +539,10 @@ export function computeStats(
       day.tokens += tok;
     }
     const team = teamOf.get(e.runId) ?? '?';
-    const ak = `${team}/${e.agent}`;
-    const a = byAgent.get(ak) ?? { agent: e.agent ?? '?', team, costUsd: 0, tokens: 0, turns: 0 };
+    // A summary a model wrote counts under the step's name.
+    const who = e.agent ?? (e.type === 'summary.written' ? (e.step ?? 'summary') : '?');
+    const ak = `${team}/${who}`;
+    const a = byAgent.get(ak) ?? { agent: who, team, costUsd: 0, tokens: 0, turns: 0 };
     a.costUsd += cost;
     a.tokens += tok;
     a.turns += d.turns ?? 0;
@@ -599,7 +601,7 @@ export function computeStats(
         live.set(turnKey, e);
         continue;
       }
-      if (e.type !== 'agent.finished' && e.type !== 'agent.error' && e.type !== 'agent.limited') continue;
+      if (e.type !== 'agent.finished' && e.type !== 'agent.error' && e.type !== 'agent.limited' && e.type !== 'summary.written') continue;
       live.delete(turnKey);
       tally(e, teamOf);
     }
