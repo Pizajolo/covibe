@@ -78,6 +78,12 @@ your plan usage, not just the token count.
 - **Members see what changed.** Each turn lists the files teammates changed and who changed them, so QA and the
   tester go straight to them instead of searching (QA has no git).
 - **A member's tools stay the same on all its turns**, so its prompt cache holds from turn to turn.
+- **Builders can write less code.** `ponytail: true` adds [Ponytail](https://github.com/dietrichgebert/ponytail)'s
+  rules (about 900 tokens) to a writing member's system prompt: the smallest complete change, reusing what the
+  project has, without cutting validation, error handling, security or tests. Its author measured 26% lower cost and
+  45% fewer output tokens with Claude Code. The rules are in the system prompt rather than a skill because they
+  apply to every task, so the cache holds them. Only the core rules are included: Ponytail's review and audit
+  skills spend tokens rather than save them, and its debt, gain and help skills are commands for a person.
 - **The translators send the right roles.** Claude Code sends its environment as a system message. It used to
   reach GPT models as an assistant message (as if the model had said it). It is now a system or developer
   message. OpenAI's Chat Completions also gets the session as `prompt_cache_key`.

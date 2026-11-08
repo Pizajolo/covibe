@@ -171,6 +171,7 @@ agents:
     scope: { write: ["web/**"] }    # enforced, see below
     can_message: [backend]          # gets a send_message tool for these teammates
     can_request: [designer]         # may ask the designer for work (request_work), if and when it wants
+    ponytail: true                  # Ponytail's rules: the smallest complete change, so less code and fewer tokens
     output_schema: schemas/build.json
   designer:                         # in no workflow step: works only when someone asks
     prompt: prompts/designer.md

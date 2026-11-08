@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadTeam } from '../src/config/load.js';
 import { runTeam, withCacheTtl } from '../src/engine/engine.js';
+import { systemPrompt } from '../src/engine/prompts.js';
 import { EventStore } from '../src/events/store.js';
 import { computeStats } from '../src/server/projections.js';
 import { ScriptedRunner, tempDir, tempRepo, writeFiles } from './helpers.js';
@@ -62,6 +63,14 @@ describe('token savers', () => {
     await runTeam({ team: t, repo, goal: 'g', store, runner, env: {} });
     expect(runner.callsFor('librarian')).toHaveLength(1);
     expect(runner.callsFor('librarian')[0]!.env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe('5m');
+  });
+
+  it('gives Ponytail rules only to members that ask for them and can change files', () => {
+    const t = team('', '\n    ponytail: true');
+    const builder = t.agents.builder!;
+    expect(systemPrompt(t, builder)).toContain('# The smallest complete change');
+    expect(systemPrompt(t, t.agents.librarian!)).not.toContain('# The smallest complete change');
+    expect(systemPrompt(t, { ...builder, writes: false })).not.toContain('# The smallest complete change');
   });
 
   it('counts cache writes, for the cache hit rate on Home', () => {

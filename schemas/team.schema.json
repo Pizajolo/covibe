@@ -375,6 +375,10 @@
           "type": "boolean",
           "description": "Give the member the app tools (app_start, app_status, app_logs, app_stop): run the project's app (its dev server, a site) in the sandbox or in Docker, so it and the people watching can open it. Members without Bash can only start it the way the team file, the project or covibe's detection says. Default true for members with Bash or a browser."
         },
+        "ponytail": {
+          "type": "boolean",
+          "description": "Give a member that changes files Ponytail's rules (github.com/dietrichgebert/ponytail): the smallest complete change, reusing what the project already has, with no unrequested features, abstractions or dependencies, and without cutting validation, error handling, security or tests. Less code means fewer output tokens and turns. Ignored for members that cannot change files. Default false."
+        },
         "cache_ttl": {
           "enum": [
             "5m",
