@@ -156,6 +156,7 @@ interface RawAgent {
   plugins?: string[];
   browser?: boolean;
   app?: boolean;
+  ponytail?: boolean;
 }
 interface RawApp {
   runtime?: 'sandbox' | 'docker';
@@ -350,6 +351,7 @@ function resolveTeam(raw: RawTeam, file: string, opts: LoadOptions): TeamConfig 
       plugins: [...new Set([...(defaults.plugins ?? []), ...(a.plugins ?? [])])],
       browser: a.browser ?? defaults.browser ?? false,
       app: a.app ?? defaults.app ?? (a.tools.includes('Bash') || (a.browser ?? defaults.browser ?? false)),
+      ponytail: a.ponytail,
     };
     if (a.scope?.write && !agents[name].writes) {
       problems.push(`${where}/scope: has a write scope but no tool that can write`);

@@ -78,6 +78,8 @@ export interface AgentConfig {
   browser: boolean;
   /** Has the app tools: run the project's app (see apps/tools.ts). */
   app: boolean;
+  /** Gets Ponytail's smallest-complete-change rules (engine/ponytail.ts) when it can change files. */
+  ponytail?: boolean;
 }
 
 export interface BrainConfig {

@@ -360,6 +360,19 @@ function MemberForm({ teamId, name, index, agent, names, edit, files, onFiles, o
         </div>
       </section>
 
+      {writes && (
+        <section className="form-section">
+          <h3>Ponytail</h3>
+          <label className="check">
+            <input type="checkbox" checked={agent.ponytail === true} onChange={(e) => void edit([{ op: 'set', path: p('ponytail'), value: e.target.checked ? true : null }])} />
+            Write the smallest complete change
+          </label>
+          <span className="tiny faint">
+            Ponytail's rules: reuse what the project already has, add no features, abstractions or dependencies nobody asked for, and never cut validation, error handling, security or tests. Less code means fewer tokens and turns.
+          </span>
+        </section>
+      )}
+
       <section className="form-section">
         <h3>Browser</h3>
         <div className="seg">

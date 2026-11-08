@@ -1,5 +1,6 @@
 import type { AgentConfig, TeamConfig } from '../config/types.js';
 import type { InboxMessage } from '../events/types.js';
+import { PONYTAIL_RULES } from './ponytail.js';
 
 /** Role prompt plus the team protocol, appended to Claude Code's system prompt. */
 export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAsk?: boolean; canRequest?: boolean; app?: boolean; folder?: string } = {}): string {
@@ -78,6 +79,7 @@ export function systemPrompt(team: TeamConfig, agent: AgentConfig, opts: { canAs
     );
   }
   lines.push('', '# Your role', agent.prompt.trim());
+  if (agent.ponytail && agent.writes) lines.push('', PONYTAIL_RULES);
   return lines.join('\n');
 }
 
