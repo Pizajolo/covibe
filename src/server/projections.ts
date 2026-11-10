@@ -489,7 +489,8 @@ export function computeStats(
   };
   const daily = new Map<string, { day: string; costUsd: number; tokens: number; runs: number }>();
   for (let i = 13; i >= 0; i--) {
-    const k = dayKey(startOfDay - i * DAY);
+    // By calendar day, not 24 hours back: a day is 23 or 25 hours long when the clocks change.
+    const k = dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - i).getTime());
     daily.set(k, { day: k, costUsd: 0, tokens: 0, runs: 0 });
   }
   const stats: Stats = {
@@ -616,6 +617,9 @@ export function computeStats(
   stats.gatePassRate = gates ? gatesPassed / gates : undefined;
   return stats;
 }
+
+/** The events computeStats reads: what it is given must be all of these. */
+export const STATS_EVENTS = ['agent.usage', 'agent.finished', 'agent.error', 'agent.limited', 'summary.written', 'gate.passed', 'gate.failed', 'usage.limit'];
 
 /** The events notifications come from. */
 export const NOTIFY_EVENTS = ['question.asked', 'question.escalated', 'question.answered', 'usage.limit', 'agent.limited', 'run.finished', 'goal.checked'];

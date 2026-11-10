@@ -55,7 +55,7 @@ import { BadRequest, Library, NeedsGit, NotFound, rawDoc, type EditOp, type Proj
 import * as gitops from './gitops.js';
 import { GitProblem, gitOverview, gitShow } from './gitops.js';
 import { replayBoard } from '../engine/tasks.js';
-import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, stepReports, summarizeRun, usageReport } from './projections.js';
+import { chatThreads, collectNotifications, computeStats, NOTIFY_EVENTS, STATS_EVENTS, stepReports, summarizeRun, usageReport } from './projections.js';
 import { diskSource, FEEDBACK_BRIDGE, gitSource, isText, relPath, SITE_MIME, SiteServer, type SiteSource } from './site.js';
 import { browserHub, type LiveTab } from '../browser/hub.js';
 import { AppConfigError, forgetApp, rememberedApp, rememberedFile, resolveApp, type AppConfig, type AppSpec } from '../apps/config.js';
@@ -136,6 +136,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   const answering = new Set<string>();
   /** Projects whose brain is being summarized right now. */
   const summarizing = new Set<string>();
+  /** A member of this run is answering a chat right now, in its worktree. */
+  const chatting = (runId: string) => busyIn(runId).size > 0;
   const busyIn = (runId: string) => new Set([...answering].filter((k) => k.startsWith(`${runId}/`)).map((k) => k.slice(runId.length + 1)));
   const cursors = new Map<string, number>();
   /** The git helper's proposals waiting for the person, and how to stop a conversation's turn. */
@@ -311,7 +313,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           const activeAgents = live.reduce((n, r) => n + summary(p, r, undefined, roster).agents.filter((a) => a.status === 'working').length, 0);
           return {
             runs,
-            events: store.eventsOfType(['agent.usage', 'agent.finished', 'agent.error', 'agent.limited', 'gate.passed', 'gate.failed', 'usage.limit'], since),
+            events: store.eventsOfType(STATS_EVENTS, since),
             live: (r: RunRecord) => store.isLive(r),
             activeAgents,
           };
@@ -1048,7 +1050,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     if (days === null) return;
     for (const p of library.projects()) {
       if (!existsSync(p.path)) continue;
-      await cleanupWorktrees(p.path, storeFor(p), { olderThanDays: days }).catch((err) => console.error(`auto-clean ${p.name}:`, err));
+      await cleanupWorktrees(p.path, storeFor(p), { olderThanDays: days, busy: chatting }).catch((err) => console.error(`auto-clean ${p.name}:`, err));
     }
   };
   const autoCleanFirst = setTimeout(() => void autoClean(), 10_000);
@@ -1425,7 +1427,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       const b = body as { runIds?: unknown; olderThanDays?: unknown };
       const runIds = Array.isArray(b.runIds) ? b.runIds.filter((x): x is string => typeof x === 'string') : undefined;
       const olderThanDays = typeof b.olderThanDays === 'number' ? b.olderThanDays : undefined;
-      return cleanupWorktrees(project.path, storeFor(project), { runIds, olderThanDays });
+      return cleanupWorktrees(project.path, storeFor(project), { runIds, olderThanDays, busy: chatting });
     }],
     // ---- git in the project's own checkout
     ['GET', '/api/projects/:pid/git', (p) => gitOverview(library.project(p.pid!).path)],
@@ -1557,7 +1559,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       return backlogView(project);
     }],
 
-    ['GET', '/api/runs', (_p, _b, q) => allRuns(Number(q.get('limit') ?? 100), q.get('project') ?? undefined)],
+    ['GET', '/api/runs', (_p, _b, q) => allRuns(Math.max(1, Math.min(1000, Math.trunc(Number(q.get('limit') ?? 100)) || 100)), q.get('project') ?? undefined)],
     ['GET', '/api/runs/:pid/:rid', async (p): Promise<RunDetail> => {
       const { project, store, run } = findRun(p.pid!, p.rid!);
       const events = store.events(run.id);

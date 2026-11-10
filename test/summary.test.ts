@@ -4,7 +4,7 @@ import { ConfigError, loadTeam } from '../src/config/load.js';
 import { runTeam } from '../src/engine/engine.js';
 import { reportLine } from '../src/engine/summary.js';
 import { EventStore } from '../src/events/store.js';
-import { computeStats } from '../src/server/projections.js';
+import { computeStats, STATS_EVENTS } from '../src/server/projections.js';
 import { ScriptedRunner, tempDir, tempRepo, writeFiles, type Script } from './helpers.js';
 
 const EXAMPLE = new URL('../examples/feature-team/team.yaml', import.meta.url).pathname;
@@ -141,7 +141,8 @@ describe('a summary step with a model', () => {
     expect(written).toMatchObject({ step: 'report', data: { model: 'haiku', ok: true, cost_usd: 0.01 } });
     // Its cost counts with the run's, under the step's name, without it becoming a member.
     expect(outcome.costUsd).toBeCloseTo(0.02);
-    const stats = computeStats([{ runs: store.listRuns(10), events: store.events(outcome.runId), live: () => false, activeAgents: 0 }]);
+    // Read the way the app reads them for Home: only the kinds of events the stats are made from.
+    const stats = computeStats([{ runs: store.listRuns(10), events: store.eventsOfType(STATS_EVENTS), live: () => false, activeAgents: 0 }]);
     expect(stats.byAgent.map((a) => a.agent).sort()).toEqual(['builder', 'report']);
   });
 

@@ -44,9 +44,13 @@ const CRASH_RESUMES = 2;
  * - Claude Code's own memory: it is kept per repository, so members would read
  *   the person's private notes and write theirs into them. The team's memory
  *   is the project brain.
+ * - Claude Code's commit and pull-request instructions and its git status
+ *   snapshot: covibe commits and merges, and members are told not to.
+ * Measured on a builder's request (docs/token-use.md): memory and the git
+ * parts are about 3,900 characters, sent again with every request.
  */
 export function memberEnv(env: Env): Env {
-  return { MCP_TOOL_TIMEOUT: String(MAX_WAIT_MS), ENABLE_CLAUDEAI_MCP_SERVERS: 'false', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...env };
+  return { MCP_TOOL_TIMEOUT: String(MAX_WAIT_MS), ENABLE_CLAUDEAI_MCP_SERVERS: 'false', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: '1', ...env };
 }
 
 /** The prompt that picks a session up again after Claude Code's process stopped mid-turn. */

@@ -100,8 +100,8 @@ describe('model providers', () => {
 });
 
 describe('what a member is not given', () => {
-  it('leaves out claude.ai connectors and Claude Code memory, unless the environment says otherwise', () => {
-    expect(memberEnv({ HOME: '/h' })).toMatchObject({ HOME: '/h', ENABLE_CLAUDEAI_MCP_SERVERS: 'false', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' });
+  it('leaves out claude.ai connectors, Claude Code memory and its git instructions, unless the environment says otherwise', () => {
+    expect(memberEnv({ HOME: '/h' })).toMatchObject({ HOME: '/h', ENABLE_CLAUDEAI_MCP_SERVERS: 'false', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: '1' });
     expect(memberEnv({ ENABLE_CLAUDEAI_MCP_SERVERS: 'true', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' })).toMatchObject({ ENABLE_CLAUDEAI_MCP_SERVERS: 'true', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' });
   });
 
@@ -206,5 +206,25 @@ describe('the git helper and uncommitted changes', () => {
     expect(proposals).toHaveLength(1);
     expect(proposals[0]!.warning).toMatch(/1 file has changes that are not committed and will not be included: left\.txt/);
     await api('POST', `/api/git-helper/${runId}/decide`, { id: proposals[0]!.proposal, run: false });
+  });
+});
+
+describe('the daily chart', () => {
+  it('has fourteen different days when the clocks change in between', async () => {
+    const { computeStats } = await import('../src/server/projections.js');
+    const before = process.env.TZ;
+    process.env.TZ = 'Europe/Berlin';
+    try {
+      // 29 March 2026: the day is 23 hours long in Berlin.
+      const stats = computeStats([], new Date(2026, 3, 2, 12));
+      const days = stats.daily.map((d) => d.day);
+      expect(new Set(days).size).toBe(14);
+      expect(days).toContain('2026-03-29');
+      expect(days[0]).toBe('2026-03-20');
+      expect(days.at(-1)).toBe('2026-04-02');
+    } finally {
+      if (before === undefined) delete process.env.TZ;
+      else process.env.TZ = before;
+    }
   });
 });

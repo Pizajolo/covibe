@@ -42,13 +42,22 @@ export async function worktreeReport(repo: string, store: EventStore): Promise<W
  * Remove worktrees of finished runs: the given runs, or all finished more than
  * `olderThanDays` ago (0 = all finished). Live runs are never touched.
  */
-export async function cleanupWorktrees(repo: string, store: EventStore, opts: { runIds?: string[]; olderThanDays?: number; dryRun?: boolean } = {}): Promise<CleanupResult> {
+export async function cleanupWorktrees(
+  repo: string,
+  store: EventStore,
+  /** `busy`: whether a member of a finished run is working in its worktree right now (answering a chat). */
+  opts: { runIds?: string[]; olderThanDays?: number; dryRun?: boolean; busy?: (runId: string) => boolean } = {},
+): Promise<CleanupResult> {
   const cutoff = opts.olderThanDays === undefined ? undefined : Date.now() - opts.olderThanDays * 86_400_000;
   const result: CleanupResult = { cleaned: [], skipped: [], freedKb: 0 };
   for (const w of await worktreeReport(repo, store)) {
     if (opts.runIds && !opts.runIds.includes(w.runId)) continue;
     if (w.live) {
       result.skipped.push({ runId: w.runId, reason: 'still running' });
+      continue;
+    }
+    if (opts.busy?.(w.runId)) {
+      result.skipped.push({ runId: w.runId, reason: 'a member is answering a message' });
       continue;
     }
     if (cutoff !== undefined && w.finishedAt && Date.parse(w.finishedAt) > cutoff) {
