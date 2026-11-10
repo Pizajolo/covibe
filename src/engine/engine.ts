@@ -325,6 +325,7 @@ class Engine {
   /** The leads' sessions for answering questions, and the desk that takes one question at a time. */
   private readonly leadSessions = new Map<string, { id: string; cwd: string }>();
   private readonly desk = new Semaphore(1);
+  private readonly brainNotes = new Map<string, string>();
 
   constructor(
     private readonly opts: RunOptions,
@@ -648,6 +649,19 @@ class Engine {
     this.emit({ type: 'members.selected', step, agent: this.planner?.agent, data: { members, skipped, ...(this.selection.reason ? { reason: this.selection.reason } : {}) } });
   }
 
+  /**
+   * The brain's part of a member's system prompt, as it was on the member's
+   * first turn in this run. The list of notes changes when the curator adds one
+   * mid-run; a system prompt that changes between a member's turns makes its
+   * whole conversation be read again at full price instead of from the cache.
+   * A member starting later gets the list as it is then.
+   */
+  private brainNote(agent: AgentConfig): string {
+    let note = this.brainNotes.get(agent.name);
+    if (note === undefined) this.brainNotes.set(agent.name, (note = brainPrompt(this.workspace.repo, agent, this.team)));
+    return note;
+  }
+
   /** The files changed in this run so far and by whom, for a member's next turn. */
   private changedNote(): string | undefined {
     if (!this.changed.size) return undefined;
@@ -845,6 +859,7 @@ class Engine {
       root: this.workspace.isolation === 'none' ? this.workspace.repo : p.cwd,
       signal,
       repo: this.workspace.repo,
+      brainNote: this.brainNote(agent),
       folder: !!this.workspace.folder,
       // A member's tools stay the same on all its turns: Claude caches the prompt
       // from the tool list on, so a tool that comes or goes between turns makes
@@ -1044,6 +1059,7 @@ class Engine {
       step: QUESTION_STEP,
       signal: this.opts.signal ? AbortSignal.any([this.opts.signal, timeout]) : timeout,
       repo: this.workspace.repo,
+      brainNote: this.brainNote(lead),
     });
     const result = await this.opts.runner.run(inv).finally(() => inv.onControl?.(null));
     this.costUsd += result.costUsd;
@@ -1142,6 +1158,8 @@ export function buildInvocation(
     beforeToolUse?: () => Promise<void>;
     /** The member works directly in a plain folder (no git): `root` is that folder. */
     folder?: boolean;
+    /** The brain's part of the system prompt as this member first got it in the run (see Engine.brainNote). */
+    brainNote?: string;
   },
 ): AgentInvocation {
   const base = { step: p.step, agent: agent.name };
@@ -1196,7 +1214,7 @@ export function buildInvocation(
   return {
     agentName: agent.name,
     prompt: p.prompt,
-    systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL), canRequest: tools.some((t) => t.name === REQUEST_TOOL), app: tools.some((t) => t.name === 'app_start'), folder: p.folder ? p.root : undefined }), ...(p.repo && !p.curating ? [brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
+    systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL), canRequest: tools.some((t) => t.name === REQUEST_TOOL), app: tools.some((t) => t.name === 'app_start'), folder: p.folder ? p.root : undefined }), ...(p.repo && !p.curating ? [p.brainNote ?? brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
     // The brain, and the files the human gave the run (its folder exists from the first turn, so files sent later in chat are readable too).
     readDirs: [...(brain && !p.curating ? [brain] : []), ...(p.repo && !p.curating ? [ensureAttachmentsDir(p.repo, runId)] : [])],
     skills: resolveSkills(agent.skills),

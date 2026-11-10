@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { replaceFile } from '../home.js';
 
 /** Where API keys live. Only the connection ids are in covibe's own files. */
 export interface SecretStore {
@@ -64,8 +65,7 @@ export class FileSecrets implements SecretStore {
   }
 
   private write(all: Record<string, string>) {
-    writeFileSync(this.file, JSON.stringify(all, null, 2) + '\n', { mode: 0o600 });
-    chmodSync(this.file, 0o600);
+    replaceFile(this.file, JSON.stringify(all, null, 2) + '\n', 0o600);
   }
 
   get(id: string): string | undefined {

@@ -33,6 +33,22 @@ const USAGE_EVERY_MS = 3_000;
 /** How many times a member whose Claude Code process stopped mid-turn picks its session up again. */
 const CRASH_RESUMES = 2;
 
+/**
+ * A member's environment for Claude Code, with what covibe turns off unless
+ * the environment covibe was started in says otherwise:
+ * - MCP_TOOL_TIMEOUT: a member waiting for an answer sits in a tool call
+ *   (ask_question) or a hook (run paused); both may take the longest wait.
+ * - claude.ai connectors (Gmail, Drive, Notion…): Claude Code would load the
+ *   account's connectors into every member, where their tools are not allowed
+ *   and only make each request longer.
+ * - Claude Code's own memory: it is kept per repository, so members would read
+ *   the person's private notes and write theirs into them. The team's memory
+ *   is the project brain.
+ */
+export function memberEnv(env: Env): Env {
+  return { MCP_TOOL_TIMEOUT: String(MAX_WAIT_MS), ENABLE_CLAUDEAI_MCP_SERVERS: 'false', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...env };
+}
+
 /** The prompt that picks a session up again after Claude Code's process stopped mid-turn. */
 export function crashResumePrompt(unread: string[]): string {
   const note =
@@ -147,9 +163,14 @@ export class ClaudeSdkRunner implements AgentRunner {
       plugins: plugins.length ? plugins : undefined,
       // Only the listed skills are visible to this agent.
       skills: skillNames.length ? skillNames : undefined,
-      // A member waiting for an answer sits in a tool call (ask_question) or a
-      // hook (run paused); lift Claude Code's limits on both to the longest wait.
-      env: { MCP_TOOL_TIMEOUT: String(MAX_WAIT_MS), ...inv.env },
+      env: memberEnv(inv.env),
+      // Nothing but covibe's own servers and the member's plugins: MCP servers from the
+      // person's own Claude Code setup would only add their tool lists to every request
+      // (their tools are not on the member's allow list). Plugins bring servers of their
+      // own, and a team that reads settings files may allow a project's servers there.
+      strictMcpConfig: !inv.plugins?.dirs.length && !inv.settingSources.length,
+      // Named here, so Claude Code does not ask a model for a title.
+      title: inv.resumeSessionId ? undefined : `covibe: ${inv.agentName}`,
       model: inv.model,
       effort: inv.effort,
       thinking: inv.thinking === undefined ? undefined : inv.thinking === 'adaptive' ? { type: 'adaptive' } : inv.thinking === 'off' ? { type: 'disabled' } : { type: 'enabled', budgetTokens: inv.thinking },

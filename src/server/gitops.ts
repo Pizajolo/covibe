@@ -430,6 +430,11 @@ const current = async (repo: string): Promise<string> => {
   return name;
 };
 
+/** The files with changes that are not committed (staged or not, and new files). */
+export async function gitUncommitted(repo: string): Promise<string[]> {
+  return parseStatus(await read(repo, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])).map((f) => f.path);
+}
+
 const hasHead = async (repo: string) => !!(await tryRead(repo, ['rev-parse', '--verify', '--quiet', 'HEAD'])).trim();
 const conflicted = async (repo: string): Promise<string[]> => (await tryRead(repo, ['diff', '--name-only', '--diff-filter=U', '-z'])).split('\0').filter(Boolean);
 

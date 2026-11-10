@@ -173,6 +173,7 @@ function Item({ it, onDecide }: { it: HelperItem; onDecide: (id: string, run: bo
         {it.program} {it.args.map((a) => (/[\s'"]/.test(a) ? JSON.stringify(a) : a)).join(' ')}
       </code>
       {it.why && <div className="small">{it.why}</div>}
+      {it.warning && it.state === 'waiting' && <div className="small text-warn">⚠ {it.warning}</div>}
       {it.state === 'waiting' && (
         <div className="row" style={{ gap: 6 }}>
           <button className="btn sm primary" onClick={() => onDecide(it.proposal, true)}>

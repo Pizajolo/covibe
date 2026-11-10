@@ -764,7 +764,7 @@ export type HelperItem =
   /** A read-only command it ran by itself. */
   | { id: number; ts: string; kind: 'command'; program: 'git' | 'gh'; args: string[]; ok: boolean; output: string }
   /** A command that changes something, waiting for the person (or run, declined, or no longer waiting). */
-  | { id: number; ts: string; kind: 'proposal'; proposal: string; program: 'git' | 'gh'; args: string[]; why?: string; state: 'waiting' | 'ran' | 'skipped' | 'expired'; ok?: boolean; output?: string };
+  | { id: number; ts: string; kind: 'proposal'; proposal: string; program: 'git' | 'gh'; args: string[]; why?: string; warning?: string; state: 'waiting' | 'ran' | 'skipped' | 'expired'; ok?: boolean; output?: string };
 
 export interface HelperDetail {
   runId: string;

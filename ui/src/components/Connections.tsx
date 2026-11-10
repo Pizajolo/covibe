@@ -43,6 +43,30 @@ const PRESETS: { key: string; label: string; kind: 'anthropic' | 'openai'; baseU
   { key: 'deepseek', label: 'DeepSeek', kind: 'anthropic', baseUrl: 'https://api.deepseek.com/anthropic', models: ['deepseek-chat', 'deepseek-reasoner'] },
   { key: 'moonshot', label: 'Moonshot (Kimi)', kind: 'anthropic', baseUrl: 'https://api.moonshot.ai/anthropic' },
   { key: 'zai', label: 'Z.ai (GLM)', kind: 'anthropic', baseUrl: 'https://api.z.ai/api/anthropic' },
+  {
+    key: 'alibaba-coding',
+    label: 'Alibaba Cloud: Coding Plan',
+    kind: 'anthropic',
+    baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/apps/anthropic',
+    models: ['qwen3.7-plus', 'qwen3.6-plus', 'kimi-k2.5', 'glm-5', 'MiniMax-M2.5'],
+    help: 'Use the plan\'s own key (sk-sp-…), not a general Model Studio key. The plan counts requests, not tokens, so no prices are needed. Alibaba allows plan keys in coding tools you use yourself, not in unattended automation: check its terms before lining up a long backlog.',
+  },
+  {
+    key: 'alibaba-token',
+    label: 'Alibaba Cloud: Token Plan',
+    kind: 'anthropic',
+    baseUrl: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic',
+    models: ['qwen3.8-max', 'qwen3.8-flash', 'qwen3.6-flash'],
+    help: 'Use the Token Plan key from Model Studio (Personal Edition, or your seat in a Team Edition). Like the Coding Plan, it is meant for coding tools you use yourself.',
+  },
+  {
+    key: 'alibaba',
+    label: 'Alibaba Cloud: Model Studio (pay as you go)',
+    kind: 'anthropic',
+    baseUrl: 'https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/apps/anthropic',
+    models: ['qwen3.8-max', 'qwen3.7-max', 'qwen3.8-flash', 'qwen3.6-flash'],
+    help: 'Replace {WorkspaceId} in the address with your workspace\'s id (Model Studio shows it), and the region if yours is not Singapore. Add each model\'s prices to see what it spends.',
+  },
   { key: 'anthropic', label: 'Anthropic API key', kind: 'anthropic', baseUrl: 'https://api.anthropic.com', help: 'Pay as you go on your Anthropic Console account.' },
   { key: 'openai', label: 'OpenAI', kind: 'openai', baseUrl: 'https://api.openai.com/v1' },
   { key: 'openrouter', label: 'OpenRouter', kind: 'openai', baseUrl: 'https://openrouter.ai/api/v1' },
@@ -508,6 +532,8 @@ function ProviderDialog({ existing, onClose }: { existing?: ConnectionView; onCl
   });
 
   const help = PRESETS.find((p) => p.key === preset)?.help;
+  /** A preset's placeholder still in the address (Alibaba's {WorkspaceId}). */
+  const blank = /\{[^}]*\}/.exec(baseUrl)?.[0];
   return (
     <Modal
       wide
@@ -518,7 +544,7 @@ function ProviderDialog({ existing, onClose }: { existing?: ConnectionView; onCl
           <button className="btn ghost" onClick={onClose}>
             Cancel
           </button>
-          <button className="btn primary" disabled={saving || !label.trim() || (!account && !baseUrl.trim())} onClick={() => void save()}>
+          <button className="btn primary" disabled={saving || !label.trim() || (!account && (!baseUrl.trim() || !!blank))} onClick={() => void save()}>
             {existing ? 'Save' : 'Add provider'}
           </button>
         </>
@@ -561,7 +587,9 @@ function ProviderDialog({ existing, onClose }: { existing?: ConnectionView; onCl
             <label className="field">
               Base URL
               <input className="input mono" value={baseUrl} placeholder={kind === 'openai' ? 'https://api.example.com/v1' : 'https://api.example.com/anthropic'} onChange={(e) => setBaseUrl(e.target.value)} />
-              <span className="help">{kind === 'openai' ? 'The part before /chat/completions.' : 'The part before /v1/messages.'}</span>
+              <span className="help">
+                {blank ? <strong>Replace {blank} with your own value.</strong> : kind === 'openai' ? 'The part before /chat/completions.' : 'The part before /v1/messages.'}
+              </span>
             </label>
             <label className="field">
               API key

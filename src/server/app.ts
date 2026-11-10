@@ -263,9 +263,26 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   /** Team name → member names, so a run shows every member, even ones that have not started yet. */
   const rosters = () => new Map(library.teams().map((t) => [t.name, t.agents]));
 
+  /**
+   * Summaries of runs that are over. Every refresh of the app lists the recent
+   * runs, and a finished run's summary only changes when its log does, so its
+   * whole log is not read and replayed again each time.
+   */
+  const summaries = new Map<string, { key: string; value: RunSummary }>();
   const summary = (project: Project, run: RunRecord, events?: RunEvent[], roster = rosters()): RunSummary => {
     const store = storeFor(project);
-    return summarizeRun(run, events ?? store.events(run.id), project, store.isLive(run), run.kind === 'ask' || run.kind === 'check' ? [] : (roster.get(run.team) ?? []), busyIn(run.id));
+    const live = store.isLive(run);
+    const busy = busyIn(run.id);
+    const members = run.kind === 'ask' || run.kind === 'check' ? [] : (roster.get(run.team) ?? []);
+    if (events || live || busy.size) return summarizeRun(run, events ?? store.events(run.id), project, live, members, busy);
+    const id = `${project.id}/${run.id}`;
+    const key = [store.lastEventIdOf(run.id), run.status, run.finishedAt ?? '', project.name, ...members].join('\x1f');
+    const kept = summaries.get(id);
+    if (kept?.key === key) return kept.value;
+    const value = summarizeRun(run, store.events(run.id), project, live, members, busy);
+    if (summaries.size >= 500) summaries.clear();
+    summaries.set(id, { key, value });
+    return value;
   };
 
   const allRuns = (limit: number, projectId?: string): RunSummary[] => {

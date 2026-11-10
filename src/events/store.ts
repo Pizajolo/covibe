@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS events (
   data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id, id);
+CREATE INDEX IF NOT EXISTS events_type ON events(type, ts);
 CREATE TABLE IF NOT EXISTS sessions (
   run_id TEXT NOT NULL REFERENCES runs(id),
   agent TEXT NOT NULL,
@@ -150,6 +151,12 @@ export class EventStore {
   /** Highest event id in the store (live feed cursor). */
   lastEventId(): number {
     const row = this.db.prepare('SELECT MAX(id) AS id FROM events').get() as Row;
+    return Number(row.id ?? 0);
+  }
+
+  /** A run's newest event id (0 when it has none): cheap to read, and it changes whenever the run's log does. */
+  lastEventIdOf(runId: string): number {
+    const row = this.db.prepare('SELECT MAX(id) AS id FROM events WHERE run_id = ?').get(runId) as Row;
     return Number(row.id ?? 0);
   }
 
@@ -393,17 +400,12 @@ export class EventStore {
     this.db.prepare(`UPDATE inbox SET delivered_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`).run(now(), ...ids);
   }
 
-  /** Take every undelivered message for an agent and mark it delivered. */
+  /** Take every undelivered message for an agent and mark it delivered, in one statement: two processes (the app and the CLI) never both take one. */
   drainInbox(runId: string, to: string): InboxMessage[] {
     const rows = this.db
-      .prepare('SELECT * FROM inbox WHERE run_id = ? AND to_agent = ? AND delivered_at IS NULL ORDER BY id')
-      .all(runId, to) as Row[];
-    if (rows.length) {
-      this.db
-        .prepare(`UPDATE inbox SET delivered_at = ? WHERE id IN (${rows.map(() => '?').join(',')})`)
-        .run(now(), ...rows.map((r) => Number(r.id)));
-    }
-    return rows.map((r) => toInbox(r, runId, to));
+      .prepare('UPDATE inbox SET delivered_at = ? WHERE run_id = ? AND to_agent = ? AND delivered_at IS NULL RETURNING *')
+      .all(now(), runId, to) as Row[];
+    return rows.map((r) => toInbox(r, runId, to)).sort((a, b) => a.id - b.id);
   }
 }
 
