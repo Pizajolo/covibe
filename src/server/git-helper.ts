@@ -11,7 +11,7 @@ import type { RunEvent } from '../events/types.js';
 import { backendEnv, type Env } from '../runner/backend.js';
 import type { AgentRunner, CustomTool } from '../runner/types.js';
 import type { GitOverview, HelperItem } from './api-types.js';
-import { gitOverview, gitRun, runCommand } from './gitops.js';
+import { gitOverview, gitRun, gitUncommitted, runCommand } from './gitops.js';
 import { toolLabel } from './projections.js';
 
 export const GIT_HELPER = 'git-helper';
@@ -29,6 +29,7 @@ const GUIDE = `You are the git helper in covibe, a desktop app where teams of Cl
 - Look first: start from the repository state you are given and check what you need with read-only commands.
 - Explain in plain words what is going on and what you propose, briefly. The person may not know git well.
 - Prefer the safe way: keep their work. Stash or branch before anything risky. Never discard uncommitted changes, reset --hard, force-push, delete branches with unmerged work, or rewrite commits that are already pushed unless the person clearly wants it, and say plainly what would be lost.
+- Only commits are pushed. Before you propose a push or a pull request, look at git status: if files have uncommitted changes, name them and ask the person whether they belong to this work (then commit them first) or should stay behind. Never assume.
 - Use --force-with-lease, never --force. Do not change global git config unless asked.
 - Commands run without a terminal: nothing can prompt for a password or open an editor (messages are kept as git writes them). When sign-in fails, explain how the person can fix it in their own terminal (gh auth login and gh auth setup-git for GitHub; ssh-add and ssh -T for SSH keys; a credential helper).
 - Resolving conflicts: read both sides, edit the file to the right result (no conflict markers left), then propose git add for it, and the continue step when all are resolved. When it is unclear which side is right, ask.
@@ -88,6 +89,24 @@ export function ghReadsOnly(args: string[]): boolean {
   if (area === 'run') return ['list', 'view'].includes(action ?? '');
   if (area === '--version' || area === 'version') return true;
   return false;
+}
+
+/**
+ * Whether a command sends the checked-out branch's commits somewhere others
+ * see them (a push of it, or a pull request for it), so uncommitted changes
+ * would silently stay behind. `branch`: the branch checked out now.
+ */
+export function sharesCheckout(program: 'git' | 'gh', args: string[], branch: string | undefined): boolean {
+  if (program === 'gh') {
+    if (args[0] !== 'pr' || args[1] !== 'create') return false;
+    const i = args.findIndex((a) => a === '--head' || a === '-H');
+    const head = i >= 0 ? args[i + 1] : args.find((a) => a.startsWith('--head='))?.slice(7);
+    return !head || head.split(':').at(-1) === branch;
+  }
+  if (args[0] !== 'push' || args.some((a) => a === '--delete' || a === '-d' || a === '--tags')) return false;
+  // After the remote: the branches pushed. None named means the current one.
+  const refs = args.slice(1).filter((a) => !a.startsWith('-')).slice(1);
+  return !refs.length || refs.some((r) => ['HEAD', branch, `refs/heads/${branch}`].includes(r.replace(/^\+/, '').split(':')[0]!));
 }
 
 export type Decision = { run: boolean };
@@ -240,6 +259,7 @@ function helperTools(opts: HelperStart & { runId: string; signal: AbortSignal; a
     params: {
       args: { type: 'list', description: `The arguments after "${program}", one per item.` },
       why: { type: 'string', optional: true, description: 'For a command that changes something: what it does and why, in a sentence the person can judge.' },
+      leave_uncommitted: { type: 'boolean', optional: true, description: 'For a push or a pull request while files have uncommitted changes: true once the person said those changes should stay out of it.' },
     },
     run: async (a) => {
       const args = Array.isArray(a.args) ? a.args.map(String) : [];
@@ -252,8 +272,21 @@ function helperTools(opts: HelperStart & { runId: string; signal: AbortSignal; a
         store.append(runId, { ...base, type: 'git.ran', data: { id: null, auto: true, program, args, ok: r.ok, code: r.code, output: clip(r.output, 4000) } });
         return `exit code ${r.code}\n${clip(r.output, 30_000) || '(no output)'}`;
       }
+      // A push or a pull request leaves uncommitted changes behind: the helper has to raise that first, and the person sees it on the proposal.
+      let warning: string | undefined;
+      const branch = (await runCommand(repo, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { read: true })).stdout.trim() || undefined;
+      if (sharesCheckout(program, args, branch)) {
+        const loose = await gitUncommitted(repo).catch(() => []);
+        if (loose.length) {
+          const list = `${loose.slice(0, 20).join(', ')}${loose.length > 20 ? `, … (${loose.length} in all)` : ''}`;
+          if (a.leave_uncommitted !== true) {
+            return `Not proposed yet: ${loose.length} file(s) have changes that are not committed, and would not be part of this: ${list}. Tell the person which, and ask whether to commit them first. If they want them left out, call this again with leave_uncommitted: true.`;
+          }
+          warning = `${loose.length} file${loose.length > 1 ? 's have' : ' has'} changes that are not committed and will not be included: ${list}`;
+        }
+      }
       const { id, decision } = approvals.wait(runId, signal);
-      store.append(runId, { ...base, type: 'git.proposed', data: { id, program, args, why: why || null } });
+      store.append(runId, { ...base, type: 'git.proposed', data: { id, program, args, why: why || null, ...(warning ? { warning } : {}) } });
       const d = await decision;
       if (!d.run) {
         store.append(runId, { ...base, type: 'git.skipped', data: { id } });
@@ -314,7 +347,7 @@ export function helperThread(events: RunEvent[], waiting: Set<string>): HelperIt
     } else if (e.type === 'scope.denied') items.push({ ...at, kind: 'note', text: `Not allowed: ${d.reason}` });
     else if (e.type === 'agent.error') items.push({ ...at, kind: 'error', text: String(d.error ?? 'failed') });
     else if (e.type === 'git.proposed') {
-      const item = { ...at, kind: 'proposal' as const, proposal: String(d.id), program: d.program, args: d.args as string[], why: d.why ?? undefined, state: waiting.has(String(d.id)) ? ('waiting' as const) : ('expired' as const) };
+      const item = { ...at, kind: 'proposal' as const, proposal: String(d.id), program: d.program, args: d.args as string[], why: d.why ?? undefined, ...(d.warning ? { warning: String(d.warning) } : {}), state: waiting.has(String(d.id)) ? ('waiting' as const) : ('expired' as const) };
       proposals.set(String(d.id), item);
       items.push(item);
     } else if (e.type === 'git.skipped') {

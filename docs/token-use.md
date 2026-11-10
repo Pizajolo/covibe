@@ -78,6 +78,13 @@ your plan usage, not just the token count.
 - **Members see what changed.** Each turn lists the files teammates changed and who changed them, so QA and the
   tester go straight to them instead of searching (QA has no git).
 - **A member's tools stay the same on all its turns**, so its prompt cache holds from turn to turn.
+- **Its system prompt stays the same too.** The list of brain notes is the one from the member's first turn of the
+  run, so a note the curator adds mid-run does not make every member's conversation be read again uncached.
+- **Parts of Claude Code a member cannot use are left out** (`memberEnv` in `runner/claude-sdk.ts`): its
+  per-repository memory, its commit and pull-request instructions with the git status snapshot, and the account's
+  claude.ai connectors. Measured the same way as the table above, on a builder with six tools: the system prompt
+  went from 6,000 to 3,800 characters without memory, and the tool definitions and context message from 13,100 to
+  11,500 without the git parts. Together about 3,900 characters (about 1,000 tokens) less on every request.
 - **Builders can write less code.** `ponytail: true` adds [Ponytail](https://github.com/dietrichgebert/ponytail)'s
   rules (about 900 tokens) to a writing member's system prompt: the smallest complete change, reusing what the
   project has, without cutting validation, error handling, security or tests. Its author measured 26% lower cost and

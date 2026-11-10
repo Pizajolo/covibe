@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { BackendConfig } from '../config/types.js';
-import { covibeHome } from '../home.js';
+import { covibeHome, replaceFile } from '../home.js';
 import { backendEnv, BackendError, type BackendEnv, type BackendResolver, type Env, type Link } from '../runner/backend.js';
 import type { PlanUsage } from '../runner/types.js';
 import { CODEX_ENDPOINTS, CODEX_MODELS, CodexAuth, planUsageFromHeaders, startCodexLogin, type CodexEndpoints, type CodexIdentity, type CodexLogin } from './codex-auth.js';
@@ -102,7 +102,7 @@ export class Connections implements BackendResolver {
   }
 
   private write(data: ConnectionsFile) {
-    writeFileSync(this.file, JSON.stringify(data, null, 2) + '\n');
+    replaceFile(this.file, JSON.stringify(data, null, 2) + '\n');
   }
 
   list(): Connection[] {
@@ -454,6 +454,9 @@ function uniqueId(base: string, taken: Set<string>): string {
 function checkUrl(url: string | undefined): string {
   const u = url?.trim().replace(/\/+$/, '');
   if (!u || !/^https?:\/\/[^/]+/.test(u)) throw new ConnectionError('the base URL starts with http:// or https://');
+  // A preset's placeholder that was not filled in (Alibaba's {WorkspaceId}).
+  const blank = /\{[^}]*\}/.exec(u)?.[0];
+  if (blank) throw new ConnectionError(`replace ${blank} in the base URL with your own value`);
   return u;
 }
 

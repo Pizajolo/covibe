@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { chmodSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 
@@ -37,4 +38,16 @@ export function appsRoot(repo: string): string {
 /** The project brain: notes every member reads and only the curator writes. */
 export function brainRoot(repo: string): string {
   return join(covibeHome(), 'brains', repoKey(repo));
+}
+
+/**
+ * Replace a file's contents in one step: written next to it, then moved into
+ * place. A stop halfway never leaves half a file, which the readers of these
+ * files (connections, keys) would take for an empty one and write back.
+ */
+export function replaceFile(file: string, text: string, mode?: number): void {
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, text, mode === undefined ? {} : { mode });
+  if (mode !== undefined) chmodSync(tmp, mode);
+  renameSync(tmp, file);
 }

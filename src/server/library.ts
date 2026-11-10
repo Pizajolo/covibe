@@ -8,6 +8,7 @@ import { isMap, isSeq, parseDocument } from 'yaml';
 import { ConfigError, loadTeam, type LoadOptions } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
 import { covibeHome } from '../home.js';
+import { UNATTENDED_GIT } from '../engine/workspace.js';
 import type { AppSettings, BacklogSettings, EditOp, NotificationKind, NotifyChoice, Project, TeamFileInfo, TeamListing } from './api-types.js';
 
 /**
@@ -474,7 +475,7 @@ function hasCommit(dir: string): boolean {
 const DEFAULT_GITIGNORE = ['node_modules/', '.env', '.env.*', '!.env.example', 'dist/', 'build/', '.next/', 'out/', 'target/', '.venv/', 'venv/', '__pycache__/', '*.pyc', '.DS_Store', '*.log', '.idea/', '.vscode/', ''].join('\n');
 
 function initRepo(dir: string) {
-  const env = { ...process.env, GIT_AUTHOR_NAME: 'covibe', GIT_AUTHOR_EMAIL: 'covibe@localhost', GIT_COMMITTER_NAME: 'covibe', GIT_COMMITTER_EMAIL: 'covibe@localhost' };
+  const env = { ...process.env, ...UNATTENDED_GIT, GIT_AUTHOR_NAME: 'covibe', GIT_AUTHOR_EMAIL: 'covibe@localhost', GIT_COMMITTER_NAME: 'covibe', GIT_COMMITTER_EMAIL: 'covibe@localhost' };
   const run = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore', env });
   if (!existsSync(join(dir, '.git'))) run('init', '-q', '-b', 'main');
   if (!existsSync(join(dir, '.gitignore'))) writeFileSync(join(dir, '.gitignore'), DEFAULT_GITIGNORE);

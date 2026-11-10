@@ -110,6 +110,12 @@ export function GitPanel({ projectId }: { projectId: string }) {
   const staged = g.files.filter((f) => f.staged);
   const ask = (c: Confirm) => setConfirm(c);
   const working = !!busy;
+  /** Push a branch. Only commits are pushed: with changes not committed yet on that branch, ask first. */
+  const push = (name: string) => {
+    const go = () => void act(`Pushed ${name}`, 'push', { branch: name });
+    if (name !== g.branch || !g.files.length) return go();
+    ask({ title: `Push ${name} without your uncommitted changes?`, text: `${uncommittedNote(g.files)} Only commits are pushed, so those changes stay on this computer. If they belong to this work, cancel and commit them first.`, action: 'Push anyway', run: go });
+  };
 
   return (
     <div className="git-layout">
@@ -158,6 +164,7 @@ export function GitPanel({ projectId }: { projectId: string }) {
                   : hasRemote
                     ? 'not pushed yet'
                     : 'no remote'}
+              {g.files.length > 0 && <span className="text-warn"> · {g.files.length} uncommitted</span>}
               {hasRemote && <span className="faint">{g.fetchedAt ? ` · fetched ${ago(g.fetchedAt)}` : ' · never fetched'}</span>}
             </span>
             <span className="grow" />
@@ -177,7 +184,7 @@ export function GitPanel({ projectId }: { projectId: string }) {
               </button>
             )}
             {hasRemote && current && (
-              <button className="btn sm" disabled={working} onClick={() => void act(`Pushed ${current.name}`, 'push', { branch: current.name })}>
+              <button className="btn sm" disabled={working} onClick={() => push(current.name)} title={g.files.length ? 'Pushes your commits; the uncommitted changes below are not part of it' : undefined}>
                 <IconUp /> {busy === 'push' ? 'Pushing…' : 'Push'}
               </button>
             )}
@@ -295,7 +302,7 @@ export function GitPanel({ projectId }: { projectId: string }) {
                         </button>
                       )}
                       {hasRemote && (
-                        <button className="btn sm ghost" disabled={working} onClick={() => void act(`Pushed ${b.name}`, 'push', { branch: b.name })}>
+                        <button className="btn sm ghost" disabled={working} onClick={() => push(b.name)}>
                           Push
                         </button>
                       )}
@@ -340,7 +347,7 @@ export function GitPanel({ projectId }: { projectId: string }) {
           onCreate={(name) => void act(`Created and switched to ${name}`, 'checkout', { branch: name, create: true, from: newBranch.from }).then(() => setNewBranch(null))}
         />
       )}
-      {pr && <PrDialog projectId={projectId} branch={pr} base={g.defaultBranch} branches={g.branches.map((b) => b.name)} onClose={() => setPr(undefined)} onDone={reload} />}
+      {pr && <PrDialog projectId={projectId} branch={pr} base={g.defaultBranch} branches={g.branches.map((b) => b.name)} uncommitted={pr === g.branch ? g.files : undefined} onClose={() => setPr(undefined)} onDone={reload} />}
       {commit && (
         <CommitDialog
           projectId={projectId}
@@ -1141,6 +1148,12 @@ function NewBranch({ from, onClose, onCreate }: { from?: string; onClose: () => 
   );
 }
 
+/** "2 files have changes that are not committed (a.ts, b.ts)." */
+export function uncommittedNote(files: { path: string }[]): string {
+  const shown = files.slice(0, 4).map((f) => f.path).join(', ');
+  return `${files.length} file${files.length > 1 ? 's have' : ' has'} changes that are not committed (${shown}${files.length > 4 ? ', …' : ''}).`;
+}
+
 /** Push a branch and open a pull request for it (with gh, or on the forge's page). */
 export function PrDialog({
   projectId,
@@ -1149,6 +1162,7 @@ export function PrDialog({
   branches,
   title: initialTitle,
   body: initialBody,
+  uncommitted,
   onClose,
   onDone,
 }: {
@@ -1158,6 +1172,8 @@ export function PrDialog({
   branches: string[];
   title?: string;
   body?: string;
+  /** Changes in the checkout that are not committed, when the pull request is for the branch checked out there. */
+  uncommitted?: { path: string }[];
   onClose: () => void;
   onDone?: () => unknown;
 }) {
@@ -1215,6 +1231,14 @@ export function PrDialog({
               </details>
             )}
           </div>
+        </div>
+      )}
+      {!!uncommitted?.length && (
+        <div className="banner warn small">
+          <IconAlert />
+          <span>
+            <strong>{uncommittedNote(uncommitted)}</strong> They will not be in the pull request. If they belong to it, cancel and commit them first.
+          </span>
         </div>
       )}
       <div className="grid grid-2">

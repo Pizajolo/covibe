@@ -63,7 +63,7 @@ To try the UI in a browser instead, run `covibe app`.
 | **Skills** | One library of skills for all teams: **write your own**, **add from GitHub** (a repository or a folder; private ones work if git can clone them), or install from **Anthropic's skills**. Claude Code's **built-in skills** are listed too. Give skills to a member, to every member of a team, or mark one **Everyone** to give it to all members of all teams. |
 | **Plugins** | Claude Code plugins (skills, slash commands, agents, hooks, MCP and LSP servers) from **Anthropic's directory** or **any GitHub repository or marketplace**, or **any MCP server** (ElevenLabs, Linear, your own) from its address, command or JSON snippet (see [Adding any MCP server](#adding-any-mcp-server)). Before installing, covibe shows what a plugin runs on your computer and where it sends data, and you choose its sandbox: the websites it may reach and the folders it may write. Every hook and server it runs is confined to that sandbox. Keys its servers need are saved on its page, with covibe's other keys. Give plugins to members like skills. |
 | **Projects** | Each project has **Runs**, **Backlog**, **Brain** and **Git** tabs. **Backlog** lines goals up: each is checked for anything only you can settle, then the team works them off one after another (see [Backlog](#backlog)). **Git** works with your checkout (see [The Git tab](#the-git-tab)): fetch, pull, push, stage and commit, stashes, branches local and on the remote, merges and rebases with conflicts resolved file by file, a commit graph to revert, cherry-pick, branch, tag or reset from, remotes, any git command, and a **git helper** to chat with when something is stuck. The project list shows the disk space run worktrees use, with a **Clean up** dialog; a finished run has **Free disk space**, and Settings can remove worktrees automatically after a number of days. |
-| **Settings → Advanced** | Sign in more **Claude accounts** (each in its own Claude Code folder), turn on **sharing work across them**, sign in **ChatGPT accounts** (the sign-in Codex uses) to put members on OpenAI's models within your ChatGPT plan, and add **model providers** with an API key (DeepSeek, Moonshot, Z.ai, OpenAI, OpenRouter, Groq, a local Ollama, or any Anthropic- or OpenAI-compatible API). Their models then appear in every team's model list. See [Accounts and providers](#accounts-and-providers). |
+| **Settings → Advanced** | Sign in more **Claude accounts** (each in its own Claude Code folder), turn on **sharing work across them**, sign in **ChatGPT accounts** (the sign-in Codex uses) to put members on OpenAI's models within your ChatGPT plan, and add **model providers** with an API key (DeepSeek, Moonshot, Z.ai, Alibaba Cloud, OpenAI, OpenRouter, Groq, a local Ollama, or any Anthropic- or OpenAI-compatible API). Their models then appear in every team's model list. See [Accounts and providers](#accounts-and-providers). |
 | **Brain** | The project's shared notes. Every member reads them before working and can **propose** additions; only the team's **curator** (or you) writes. Review proposals yourself (accept into a new or existing note, or reject) or ask the curator. Edit notes directly; every change is in the brain's own git history. |
 
 ![A live run: members, board and gates](docs/screenshots/run-board.png)
@@ -372,7 +372,7 @@ The rules in the team file are enforced in code, not left to prompts:
 |---|---|
 | Only listed tools | `tools` restricts Claude Code's built-in tool set; `permissionMode: dontAsk` denies anything not pre-approved |
 | Write scope | A `PreToolUse` hook blocks `Write`/`Edit`/`MultiEdit`/`NotebookEdit` outside `scope.write`, outside the agent's worktree, or in `.git` |
-| Write scope, Bash | A hook cannot see what a shell command writes. After every turn, the engine diffs the agent's worktree and **discards out-of-scope changes** before merging (`scope.violation` event) |
+| Write scope, Bash | A hook cannot see what a shell command writes. After every turn, the engine diffs the agent's worktree and **discards out-of-scope changes** before merging (`scope.violation` event). Commits a member made itself with a shell are taken back first, so they are checked and merged like the rest |
 | Shell sandbox | Bash runs in Claude Code's OS sandbox (Seatbelt on macOS, bubblewrap on Linux): writes only inside the agent's own worktree, temp folders and `allow_write`; network only to the `network` domains; the sandbox cannot be bypassed and the run fails if it is unavailable |
 | Gates | JSONata, evaluated by the engine against schema-validated reports |
 | Bounded loops | `max_loops`, `max_turns`, `timeout_min`, optional `max_budget_usd`, `max_parallel` |
@@ -495,7 +495,7 @@ listed under the provider's name) or under Connection.
 
 | API style | How covibe calls it |
 |---|---|
-| Anthropic-compatible (DeepSeek, Moonshot, Z.ai, Anthropic's own API) | Claude Code calls the provider directly (`ANTHROPIC_BASE_URL`), with the key as a bearer token (`x-api-key` for api.anthropic.com) |
+| Anthropic-compatible (DeepSeek, Moonshot, Z.ai, Alibaba Cloud Model Studio, Anthropic's own API) | Claude Code calls the provider directly (`ANTHROPIC_BASE_URL`), with the key as a bearer token (`x-api-key` for api.anthropic.com) |
 | OpenAI-compatible (OpenAI, OpenRouter, Groq, Ollama, vLLM…) | A translator inside covibe, on 127.0.0.1, turns Claude Code's Messages requests into Chat Completions (streaming and tool calls included) and back. The agent only gets a per-start token for the translator; the provider's key stays in covibe |
 | ChatGPT account (above) | The same translator, speaking Responses to the ChatGPT backend's Codex API with the account's sign-in |
 
@@ -507,6 +507,13 @@ Keys are stored in the macOS Keychain (through the `security` tool, so the app a
 `~/.covibe/secrets.json`, readable only by you, where there is no Keychain. Spend estimates use the prices per
 million tokens you enter for each model; without a price, a model's spend shows as $0. Home shows spend per account
 and provider.
+
+**Alibaba Cloud Model Studio** comes as three presets, each with its own key and address: the **Coding Plan**
+(`https://coding-intl.dashscope.aliyuncs.com/apps/anthropic`, a key starting with `sk-sp-`; qwen3.7-plus, qwen3.6-plus,
+kimi-k2.5, glm-5, MiniMax-M2.5), the **Token Plan** (`https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic`)
+and **pay as you go** (`https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/apps/anthropic`, with your workspace's id
+filled in). The plans count requests rather than tokens, so their models need no prices. Alibaba allows plan keys only
+in coding tools you use yourself, not in unattended automation: read its terms before you line up a long backlog on one.
 
 Other models are less predictable than Claude with Claude Code's prompts and tools, especially on long tool-heavy
 turns and structured reports. Some can't read images, so screenshot-based testing may not work for them. Try a
@@ -665,7 +672,7 @@ Each project's **Git** tab works with your own checkout (runs never touch it; th
 - **Where you stand.** The branch, how far it is ahead of and behind its remote branch, and when the remotes were last fetched; the tab fetches by itself when that was more than five minutes ago, so the numbers are real.
 - **Changes.** Tick files to stage them, click one for its diff, discard one or all, stash, commit what is staged (or everything), amend the last commit, or undo a commit you have not pushed yet.
 - **Branches.** Switch (uncommitted changes in the way can be stashed first), create one from any branch or commit, merge, rebase, rename, delete, push, open a pull request. Branches on the remote are listed too: switching to one makes a local branch that tracks it, and you can delete it on the remote.
-- **Pull and push.** Pull fast-forwards; when both sides have new commits it rebases yours on top, or merges. Uncommitted changes are put aside and brought back. A push the remote refuses offers to pull first, or a force push with lease (it refuses if someone pushed since your last fetch).
+- **Pull and push.** Only commits are pushed: pushing the branch you are on, or opening a pull request for it, while files have uncommitted changes names those files and asks first. Pull fast-forwards; when both sides have new commits it rebases yours on top, or merges. Uncommitted changes are put aside and brought back. A push the remote refuses offers to pull first, or a force push with lease (it refuses if someone pushed since your last fetch).
 - **Conflicts.** A merge, rebase, cherry-pick, revert or stash that stops on conflicts stays in progress: keep either side per file, or edit the file and mark it resolved, then continue (or skip a commit, or abort).
 - **History.** Click a commit to see it, revert it, cherry-pick it onto your branch, check it out, branch or tag from it, or reset your branch to it.
 - **Remotes and tags,** your name and email when git has none yet, and a box to **run any git command** in the checkout.
@@ -674,7 +681,7 @@ Each project's **Git** tab works with your own checkout (runs never touch it; th
 
 Git runs without a terminal, so it can never hang waiting for a password or an editor: sign-in problems come back as an explanation instead (for GitHub: `gh auth login` and `gh auth setup-git` once in a terminal). Reading the repository takes no locks, so refreshing the tab never trips up a commit, and a lock left by another git program is waited out (or, when it is stale, removed on request).
 
-**The git helper** is a chat beside the tab. It reads the repository by itself (status, log, diff, branches… and the state of the checkout comes with every message) and explains what is going on. Every command that would change something (the repository, your files or a remote) appears as a proposal with its reason; nothing runs until you click **Run it**. It may edit files only while they have merge conflicts, to resolve them.
+**The git helper** is a chat beside the tab. It reads the repository by itself (status, log, diff, branches… and the state of the checkout comes with every message) and explains what is going on. Every command that would change something (the repository, your files or a remote) appears as a proposal with its reason; nothing runs until you click **Run it**. It may edit files only while they have merge conflicts, to resolve them. A push or a pull request while files have uncommitted changes is not proposed until the helper has asked you about them, and the proposal lists them.
 
 ## Requests between members
 
@@ -931,6 +938,17 @@ Code's exact figure replaces the estimate. Home, the sidebar, runs and the Offic
   `cache_ttl: 1h` costs more per cache write (2× input instead of 1.25×) and avoids that. It applies only to
   Anthropic's API; members on other providers are left alone.
 - **Batched brain reviews.** `brain.min_proposals` (Team settings → Project brain → "once 5 or more are waiting").
+- **A steady system prompt.** A member's list of brain notes stays as it was on its first turn of a run. A note
+  added mid-run would otherwise change the member's system prompt, and its whole conversation would be read again
+  at full price instead of from the cache. Members starting later see the new note.
+- **Nothing a member cannot use.** Claude Code would give every member your claude.ai connectors (Gmail, Drive,
+  Notion…), its own per-repository memory, and its instructions for committing and opening pull requests with a
+  git status snapshot. Members may not call the connectors' tools, their memory is the project brain, and covibe
+  does the committing, so all three are left out. Memory and the git parts alone were about 3,900 characters
+  (about 1,000 tokens) of every request a builder sent, and your own Claude Code notes stay yours. To bring one
+  back, start covibe with `ENABLE_CLAUDEAI_MCP_SERVERS=true`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=0` or
+  `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=0`. A team that reads no settings files (`setting_sources: []`) and has
+  no plugins also skips MCP servers from your own Claude Code setup.
 - **Cache hit rate.** Home shows how much of what members sent was read from the cache. A low rate on a busy
   setup usually means caches expire between turns.
 

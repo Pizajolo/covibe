@@ -257,7 +257,7 @@ export function Settings() {
                 <dt>ChatGPT accounts</dt>
                 <dd>Signed in with ChatGPT under Advanced below, like Codex; members use OpenAI's models within your ChatGPT plan's limits, with Claude Code's tools.</dd>
                 <dt>Other providers</dt>
-                <dd>DeepSeek, OpenAI, OpenRouter, a local Ollama and others with an API key, set up under Advanced below; their models show up in every team's model list.</dd>
+                <dd>DeepSeek, Alibaba Cloud, OpenAI, OpenRouter, a local Ollama and others with an API key, set up under Advanced below; their models show up in every team's model list.</dd>
                 <dt>API key</dt>
                 <dd>Pay as you go, read from an environment variable.</dd>
                 <dt>Gateway</dt>

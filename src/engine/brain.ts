@@ -14,6 +14,7 @@ import { plainBackends, type Env } from '../runner/backend.js';
 import type { AgentRunner, CustomTool } from '../runner/types.js';
 import type { BackendResolver } from '../runner/backend.js';
 import { makeToolChecker } from './scope.js';
+import { UNATTENDED_GIT } from './workspace.js';
 
 const exec = promisify(execFile);
 const README = `# Project brain
@@ -40,7 +41,7 @@ export interface BrainCommit {
 
 function gitEnv(author: string): NodeJS.ProcessEnv {
   const name = author === 'you' ? 'you' : `covibe/${author}`;
-  return { ...process.env, GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: 'covibe@localhost', GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: 'covibe@localhost' };
+  return { ...process.env, ...UNATTENDED_GIT, GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: 'covibe@localhost', GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: 'covibe@localhost' };
 }
 
 async function git(dir: string, args: string[], author = 'covibe') {

@@ -190,6 +190,10 @@ export class Workspace {
     const dir = this.agentDirs.get(agent);
     if (this.isolation === 'none' || !dir) return { files: [], reverted: [], merged: false };
     return this.exclusive(async () => {
+      // A member that committed by itself (it is told not to, but a shell can): take its
+      // commits back into the index, so they are scope-checked and merged like the rest.
+      const base = (await git(dir, ['merge-base', 'HEAD', this.branch!]).catch(() => '')).trim();
+      if (base && base !== (await git(dir, ['rev-parse', 'HEAD'])).trim()) await git(dir, ['reset', '-q', '--soft', base]);
       await git(dir, ['add', '-A']);
       const files = (await git(dir, ['diff', '--cached', '--name-only', '--no-renames', '-z'])).split('\0').filter(Boolean);
       const inScope = scopeMatcher(writeScope);
@@ -289,10 +293,24 @@ export async function removeRunWorktrees(repo: string, runId: string): Promise<{
   return { removed, freedKb };
 }
 
+/**
+ * For commits covibe makes itself: nobody is there to unlock a signing key,
+ * and the project's hooks (lint, tests, husky) are for people's commits, not
+ * for every member's turn in a worktree without the project's dependencies.
+ */
+export const UNATTENDED_GIT = {
+  GIT_CONFIG_COUNT: '2',
+  GIT_CONFIG_KEY_0: 'commit.gpgsign',
+  GIT_CONFIG_VALUE_0: 'false',
+  GIT_CONFIG_KEY_1: 'core.hooksPath',
+  GIT_CONFIG_VALUE_1: '/dev/null',
+};
+
 function commitEnv(name: string): NodeJS.ProcessEnv {
   const id = { name: `covibe/${name}`, email: 'covibe@localhost' };
   return {
     ...process.env,
+    ...UNATTENDED_GIT,
     GIT_AUTHOR_NAME: id.name,
     GIT_AUTHOR_EMAIL: id.email,
     GIT_COMMITTER_NAME: id.name,
