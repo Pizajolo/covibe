@@ -21,7 +21,12 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p ui/tsconfig.json",
     "test": "vitest run",
     "desktop": "npm run build && electron .",
-    "dist:mac": "npm run build && electron-builder --mac"
+    "dist:mac": "npm run build && electron-builder --mac",
+    "market:relay": "node market/relay/server.mjs",
+    "market:storefront": "npm --prefix market/storefront run dev",
+    "market:deploy": "node market/scripts/deploy.mjs",
+    "market:contract": "bash market/scripts/build-contract.sh",
+    "test:contract": "cargo test --manifest-path market/contract/Cargo.toml"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.302",

@@ -1,0 +1,6 @@
+{
+  "network": "testnet",
+  "rpcUrl": "https://test.rpc.fastnear.com",
+  "contractId": "",
+  "relayUrl": "http://127.0.0.1:4480"
+}

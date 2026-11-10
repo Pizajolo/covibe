@@ -1,0 +1,93 @@
+// The contract's and the relay's shapes, as the storefront reads them
+// (the same as src/market/types.ts in covibe).
+export type OrderStatus = 'PLACED' | 'ACCEPTED' | 'DELIVERED' | 'DECLINED' | 'EXPIRED' | 'FAILED' | 'DISPUTED' | 'SETTLED';
+
+export interface Listing {
+  id: number;
+  owner: string;
+  title: string;
+  summary: string;
+  meta_hash: string;
+  price: string;
+  accept_window_s: number;
+  delivery_window_s: number;
+  review_window_s: number;
+  intake_pubkey: string;
+  active: boolean;
+  stats: { completed: number; declined: number; expired: number; failed: number; disputed: number };
+  created_at: number;
+}
+
+export interface Order {
+  id: number;
+  listing_id: number;
+  customer: string;
+  owner: string;
+  price: string;
+  fee_bps: number;
+  input_hash: string;
+  access_key: string | null;
+  status: OrderStatus;
+  created_at: number;
+  accepted_at: number | null;
+  delivered_at: number | null;
+  closed_at: number | null;
+  receipt_hash: string | null;
+  bundle_hash: string | null;
+  reason: string | null;
+}
+
+export interface InputField {
+  name: string;
+  label?: string;
+  help?: string;
+  type: 'text' | 'files';
+  required?: boolean;
+  max_chars?: number;
+  accept?: string[];
+  max_files?: number;
+}
+
+export interface ListingMeta {
+  v: 1;
+  title: string;
+  summary: string;
+  description: string;
+  inputs: InputField[];
+  examples: { title: string; text?: string; media?: string; media_type?: string }[];
+  privacy: string;
+  max_input_mb: number;
+  intake_mode: 'manual' | 'recommend' | 'auto';
+}
+
+export interface Receipt {
+  v: 1;
+  contract: string;
+  order_id: number;
+  listing_id: number;
+  input_hash: string;
+  bundle_hash: string;
+  run_status: string;
+  gates: { name: string; passed: boolean }[];
+  event_log_hash: string;
+  started: string;
+  finished: string;
+  owner: string;
+  public_key: string;
+  signature?: string;
+}
+
+export interface Config {
+  network: 'testnet' | 'mainnet' | 'custom';
+  rpcUrl: string;
+  contractId: string;
+  relayUrl: string;
+}
+
+/** The keys the browser keeps for one order. Without them its bundle cannot be opened. */
+export interface OrderKeys {
+  access: { publicKey: string; privateJwk: JsonWebKey };
+  reply: { publicKey: string; privateJwk: JsonWebKey };
+  listingId: number;
+  createdAt: number;
+}

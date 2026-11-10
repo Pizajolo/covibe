@@ -9,6 +9,9 @@ documents, video footage, research.
 The engine, not a model, decides control flow: which step runs next, whether a gate passed, when to loop back, and
 when to stop and hand the run to you. Models only do the work and return structured reports.
 
+New on this branch: the [covibe market on NEAR](#covibe-market-on-near), where a team's work is sold through an
+escrow contract that pays out only when the team's gates pass.
+
 There are two ways to use it: the **Mac app** (dashboard, team editor, live board, chat) and the **`covibe` CLI**.
 Both run the same engine on the same files, so a run started in the terminal shows up live in the app.
 
@@ -952,6 +955,273 @@ Code's exact figure replaces the estimate. Home, the sidebar, runs and the Offic
 - **Cache hit rate.** Home shows how much of what members sent was read from the cache. A low rate on a busy
   setup usually means caches expire between turns.
 
+## covibe market on NEAR
+
+> Hackathon submission (branch `hackathon-submission`). Tracks: `business` (primary), `agents` (the intake
+> agent), `swarms` (the teams).
+
+**Hire an AI team like you'd hire a studio.** A team owner publishes a storefront for one of their covibe teams
+("Landing-page team", "Reel cutter"). A customer orders in a browser and the price is locked in a NEAR escrow
+contract. An intake agent screens the order for the owner. If it is accepted, the covibe engine runs the team.
+**Payment is released only if the team's own hard gates pass.** Otherwise the customer is refunded.
+
+- **Pay-on-gate-pass.** covibe's engine, not a model, decides whether a run passed its gates. That gives escrow an
+  objective release condition.
+- **The owner's prompts never leave their machine.** Customers get the output and a signed receipt, never the team
+  file. (In this stage that rests on trusting the owner; see [limits](#limits-of-this-stage).)
+- **The intake agent is bounded.** It has no tools and returns a structured recommendation. The rules covibe
+  enforces itself (order form, sizes, file types, price floor, budget cap) come first.
+
+```
+ Customer browser                 Owner's covibe (app or CLI)
+ ┌───────────────┐                ┌──────────────────────────┐
+ │ Web storefront│                │ Market module            │
+ │ (NEAR wallet) │                │  - storefront editor     │
+ └──────┬────────┘                │  - order inbox + intake  │
+        │ order + deposit         │  - engine run + receipt  │
+        ▼                         └───────┬──────────────────┘
+ ┌──────────────┐  polls                  │
+ │ NEAR contract│◄────────────────────────┤ accept / decline /
+ │ listings,    │                         │ deliver (signed tx)
+ │ orders,      │                  ┌──────▼───────┐
+ │ escrow       │                  │ Relay service│  encrypted inputs,
+ └──────────────┘                  │ (off-chain)  │  listing pages and media,
+                                   └──────────────┘  bundles, receipts
+```
+
+| Part | Where | What it is |
+| --- | --- | --- |
+| Contract | [`market/contract`](market/contract) | Rust, `near-sdk`. Listings, orders, escrow, the platform fee. The source of truth for an order's state. |
+| Relay | [`market/relay`](market/relay) | A small Node service with no dependencies. Carries what should not go on-chain. Holds no funds or keys; who may read or write is decided from the contract's state, so anyone can run their own. |
+| Storefront | [`market/storefront`](market/storefront) | A static web app (React, Vite). Browse, order with a NEAR wallet, follow the order, download, confirm or dispute. Customers do not need covibe. |
+| Market module | [`src/market`](src/market) | In the owner's covibe: the **Market** page in the app, the `covibe market` CLI, the server routes. |
+
+### An order, step by step
+
+```
+            place_order (deposit = price)
+                    │
+                 PLACED ──decline(owner)──────────────────► DECLINED  → refund
+                    │ ──expire (anyone, after accept window) ► EXPIRED → refund
+              accept(owner)
+                    ▼
+                 ACCEPTED ─expire (after delivery window)──► EXPIRED  → refund
+                    │ ─fail(owner)─────────────────────────► FAILED   → refund
+              deliver(owner, receipt_hash, bundle_hash)
+                    ▼
+                DELIVERED ──dispute(customer, in window)───► DISPUTED → refund
+                    │ ──confirm(customer) or window ends───► SETTLED  → pay owner (minus fee)
+```
+
+1. **The owner publishes.** A `storefront.yaml` next to the team file describes the page, the order form, the
+   price, the three windows, the intake policy and the gates that must pass. `covibe market publish` (or
+   **Publish** in the app) calls `create_listing` and puts the page into the relay; the contract stores its hash.
+2. **The customer orders.** The storefront builds the form from the listing, encrypts the input in the browser
+   to the listing's `intake_pubkey` (X25519, HKDF-SHA256, AES-256-GCM), uploads it to the relay and calls
+   `place_order(listing_id, input_hash)` with the price attached.
+3. **covibe notices the order** by polling the contract, fetches the input, checks it against the hash on-chain
+   and decrypts it.
+4. **Pre-checks, with no model involved:** the input matches the form, size and file-type limits hold, the locked
+   price is at least the owner's floor, and the projected cost (the owner's estimate and the average of past runs)
+   fits the per-order budget cap. A failed pre-check never reaches the agent.
+5. **The intake agent** (a one-member covibe team in `~/.covibe/market/intake/`, no tools, structured output) reads
+   the order as untrusted data and returns
+   `{ decision: accept | decline | need_info, reason, scope_fit, estimated_cost, risks }`.
+   Per listing the owner picks **manual** (the owner decides), **recommend** (the agent suggests, the owner
+   confirms) or **auto** (the agent's accept is taken when every pre-check passed and `scope_fit` is at least
+   `auto_min_fit`; its decline is taken as it is, since it only refunds; anything else comes to the owner).
+   `need_info` is a decline with the reason.
+6. **Accept or decline** goes on-chain. A decline refunds at once, with the reason.
+7. **The run.** The order becomes a workspace folder (`ORDER.md`, the customer's files, an empty deliverables
+   folder) and the team runs on it as on any goal, with its gates and fix loops. The customer's text reaches the
+   members marked as data. The customer sees a status feed (steps and checks by name), never the board or prompts.
+   The engine stops the run at the listing's spend cap and hands the order to the owner.
+8. **Delivery, only if the required gates passed.** covibe zips the deliverables folder, encrypts it to the
+   customer's per-order key, uploads it, and writes a receipt signed with the owner's NEAR key:
+   `{ order_id, input_hash, bundle_hash, gates: [{ name, passed }], event_log_hash, started, finished, … }`.
+   The event log holds prompts, so only its hash is published. `deliver_order` puts the receipt and bundle
+   hashes on-chain. If the gates did not pass, the owner fails the order (auto mode does it alone) and the customer
+   is refunded.
+9. **The customer downloads**; the storefront checks the bundle against `bundle_hash`, the receipt against
+   `receipt_hash`, its signature, and that the signing key belongs to the owner's account. They confirm, dispute, or
+   let the window run out. Time-based steps (`expire_order`, `settle_order`) can be called by anyone, so nobody
+   has to be online.
+
+### Run the demo on testnet
+
+Requirements: Node ≥ 22.13, Claude Code signed in (`claude login`) for the team runs, and two NEAR testnet
+accounts with a little test NEAR: one for the owner (it can also hold the contract) and one for the customer.
+Rust is only needed to rebuild the contract; a built wasm is in `market/contract/res/`.
+
+```sh
+npm install                                   # covibe, with the market module
+npm --prefix market/storefront install        # the web storefront
+```
+
+**1. Accounts.** With [near-cli-rs](https://near.cli.rs), which saves each key to
+`~/.near-credentials/testnet/<account>.json`:
+
+```sh
+near account create-account sponsor-by-faucet-service my-market.testnet autogenerate-new-keypair save-to-legacy-keychain network-config testnet create
+near account create-account sponsor-by-faucet-service my-customer.testnet autogenerate-new-keypair save-to-legacy-keychain network-config testnet create
+```
+
+(Or create them in a testnet wallet and export the keys.)
+
+**2. Deploy the contract** (2.5% platform fee to the treasury, which defaults to the contract account):
+
+```sh
+npm run market:deploy -- --account my-market.testnet
+```
+
+**3. Start the relay and the storefront**, each in its own terminal:
+
+```sh
+RELAY_CONTRACT=my-market.testnet npm run market:relay          # http://127.0.0.1:4480
+```
+
+Put the contract into `market/storefront/public/config.json` (`"contractId": "my-market.testnet"`), then:
+
+```sh
+npm run market:storefront                                       # http://127.0.0.1:4490
+```
+
+**4. The owner: connect covibe and publish a team.**
+
+```sh
+npm run dev -- market config --contract my-market.testnet --account my-market.testnet \
+  --key-file ~/.near-credentials/testnet/my-market.testnet.json
+npm run dev -- market publish examples/landing-page
+npm run dev -- market watch                   # leave it running: it screens, runs, delivers, settles
+```
+
+The key goes to covibe's secret store (the Keychain on macOS). In the app the same is under **Market**: Settings,
+Storefronts (edit and publish), Incoming orders, Earnings; turn on **Watch for orders** there instead of
+`market watch`.
+
+**5. The customer: order.** Open http://127.0.0.1:4490, sign in (a NEAR wallet, or "Use a developer key" with
+`my-customer.testnet` and its key, which lets a script or a screener drive the flow without a wallet), open the
+listing, write a brief and pay 2 NEAR into escrow.
+
+**6. Watch it go.** The watcher prints the pre-checks and the intake agent's recommendation. In `recommend` mode,
+accept in a second terminal (or click **Accept** in the app):
+
+```sh
+npm run dev -- market orders
+npm run dev -- market accept 0
+```
+
+The team runs; the order page shows its progress. When the review gate passes the order turns to *Delivered*:
+download the zip, see the receipt checks, and confirm (the owner receives 1.95 NEAR, the treasury 0.05) or
+dispute (refund). Set `intake.mode: auto` in `examples/landing-page/storefront.yaml` and publish again to have
+the agent answer alone. The example's windows are short (5 minutes of review) so auto-settlement can be watched
+too.
+
+Other things to try: an order whose brief is not a landing page (the agent recommends declining), a file of the
+wrong type (a pre-check fails and the agent is never asked), `budget_cap_usd: 0.05` (the run stops at the cap and
+waits for the owner: `market run <id>` or `market fail <id>`), or stopping `market watch` until the accept window
+is over and pressing **Get the refund now** on the order page.
+
+### Tests
+
+```sh
+npm test                 # includes test/market.test.ts and test/market-server.test.ts
+npm run test:contract    # the contract's unit tests (needs Rust)
+npm run market:contract  # rebuild market/contract/res/covibe_market.wasm
+```
+
+The market tests run the whole owner side (publish, pre-checks, intake, run, gates, receipt, bundle, settlement,
+refunds, the spend cap) against a real relay and an in-memory stand-in for the contract, with scripted agents.
+The contract's own rules are covered by its Rust tests.
+
+### `storefront.yaml`
+
+```yaml
+storefront:
+  title: Reel cutter
+  summary: "Send your raw clips and a short brief; get back one vertical reel."
+  price_near: 5
+  windows: { accept_min: 60, delivery_min: 240, review_min: 1440 }
+  intake:
+    mode: recommend            # manual | recommend | auto
+    budget_cap_usd: 3          # the engine stops the run here
+    estimated_cost_usd: 1.5
+    min_price_near: 4
+    policy: |
+      Short reels from the customer's own footage only.
+  inputs:
+    - { name: footage, type: files, accept: [".mp4", ".mov"], folder: raw, required: true }
+    - { name: brief,   type: text,  required: true }
+  goal: |
+    Cut the customer's footage in raw/ into one vertical reel at out/reel.mp4.
+  deliverables: { folder: out, gates_required: [render_ok, review] }
+```
+
+`gates_required` names steps of the team that have a gate. The schema is
+[`schemas/storefront.schema.json`](schemas/storefront.schema.json); two complete examples are
+[`examples/landing-page`](examples/landing-page) and [`examples/reel-cutter`](examples/reel-cutter) (which adds a
+gate on measured facts: the render plays, is vertical and is 5 to 90 seconds long).
+
+### Contract methods
+
+| Method | Who | Notes |
+| --- | --- | --- |
+| `create_listing`, `update_listing`, `set_active` | owner | Payable: the owner pays the listing's storage; the rest comes back. |
+| `place_order(listing_id, input_hash, access_key?)` | customer | Payable. The deposit must equal the price. Rejected if the listing is closed or the customer has too many open orders. |
+| `accept_order`, `decline_order`, `fail_order` | owner | Within the accept window; `fail_order` is for a run that cannot succeed. |
+| `deliver_order(id, receipt_hash, bundle_hash)` | owner | Within the delivery window. Starts the review window. |
+| `confirm_order`, `dispute_order` | customer | A dispute only inside the review window. |
+| `expire_order`, `settle_order` | anyone | Time-based, checked against the block time. |
+| `claim` | anyone | Takes out NEAR that a transfer failed to deliver. |
+| `set_config` | admin | Fee (10% at most), treasury, price caps, open orders per customer. |
+| `get_listing(s)`, `get_listings_by_owner`, `get_order`, `get_orders`, `get_orders_by_customer`, `get_config`, `get_claimable` | view | |
+
+State changes before any transfer. A transfer that fails is credited to the receiver's claimable balance instead
+of being lost. The price and the fee are locked when the order is placed.
+
+### Risks and how they are handled
+
+| Risk | Handling |
+| --- | --- |
+| Customer input is untrusted and may carry prompt injection | It is treated as data everywhere. The intake agent has no tools. The team runs with covibe's role-scoped write permissions and shell sandbox, and file names from the customer cannot leave their folder. |
+| Runaway cost | A hard budget cap per order, enforced by the engine. When it is reached the run stops and the owner decides. |
+| The owner reports false gate results | In this stage that rests on trust. The review window and the dispute path are the mitigation; TEE attestation of the run is the real fix (Stage B). |
+| The owner is offline | Time-based expiry refunds the customer; anyone can call `expire_order`. |
+| Customer input privacy | Encrypted in the browser and at rest in the relay, but the owner and the owner's model provider see it. The listing says so. |
+| The relay goes down | No funds are at risk: orders expire or are refunded. A hackathon-level dependency. |
+| Illegal or abusive requests | The intake agent can decline, and each listing has an owner-written policy. Moderation is out of scope. |
+
+### Limits of this stage
+
+- **Disputes refund the customer, always.** A dispute is recorded on the listing's public stats and that counter is
+  the only deterrent against a customer who disputes unfairly after downloading. There is no arbiter. **This needs
+  to improve** before real money is involved: an arbiter or jury, a stake on disputes, or a partial-release rule.
+- **The receipt is the owner's word.** The contract cannot see the gates; it sees a hash of a receipt the owner
+  signed. Stage B is to run the engine where its result can be attested.
+- **Order storage is paid by the platform.** `place_order` takes exactly the price, as designed, so the few
+  hundred bytes of an order come out of the contract's balance (funded by fees). A storage deposit on orders
+  would close that.
+- **The keys to a delivery live in the customer's browser** (`localStorage`). Another browser cannot open the
+  bundle.
+- **Inputs travel as one encrypted blob**, files included, so orders are limited to tens of megabytes
+  (`RELAY_MAX_MB`, `intake.max_input_mb`).
+- **Unreferenced inputs are not cleaned up** in the relay, and uploads there are not rate-limited.
+- The watcher reads every order of the owner's listings on each poll; fine for a demo, not for thousands of orders.
+
+### Libraries
+
+| Library | Used for |
+| --- | --- |
+| [`near-sdk`](https://github.com/near/near-sdk-rs) 5.x (Rust) | The escrow contract |
+| [`near-api-js`](https://github.com/near/near-api-js) 7 | Signing and sending transactions from covibe, the deploy script, and the storefront's developer-key sign-in |
+| [`@hot-labs/near-connect`](https://github.com/hot-dao/near-selector) | The NEAR wallet chooser in the storefront |
+| [React](https://react.dev) 19, [Vite](https://vite.dev) 7, TypeScript | The storefront, and covibe's own UI |
+| [`@anthropic-ai/claude-agent-sdk`](https://docs.claude.com/en/api/agent-sdk/overview) | Running the teams and the intake agent (through covibe's engine) |
+| [`ajv`](https://ajv.js.org), [`yaml`](https://eemeli.org/yaml/) | `storefront.yaml`: parsing and schema validation |
+| [`jsonata`](https://jsonata.org) | Gate expressions (covibe's engine) |
+| Node's `node:crypto`, `node:zlib`, `node:http`, `node:sqlite`; the browser's WebCrypto | X25519 and AES-GCM sealing, ed25519 signatures, the zip bundle, the relay, the event store |
+| [`vitest`](https://vitest.dev) | Tests |
+
 ## Events
 
 All runtime output is JSON events in SQLite (`covibe log <run> --json`). Event types:
@@ -1009,6 +1279,10 @@ src/server/git-helper.ts   the git helper: reads freely, proposes changes for yo
 ui/src/components/Office.tsx    the run as a pixel office (office-art.ts draws it, office-state.ts maps member states)
 src/mcp-config.ts          reading an MCP server you paste (address, command or JSON) and taking keys out of it
 src/voice.ts               voice input: whisper.cpp on this computer (a whisper-server per recording), OpenAI or ElevenLabs; settings and model downloads
+src/market/                the market (owner's side): chain and relay clients (near.ts, relay.ts), sealing and signing
+                           (crypto.ts), storefront.yaml (storefront.ts), pre-checks and the intake agent (intake.ts), order
+                           processing (market.ts), receipts and bundles (delivery.ts, zip.ts), the CLI and the app's routes
+market/contract/           the escrow contract (Rust, near-sdk); market/relay/ the relay; market/storefront/ the web storefront
 src/main.ts                CLI
 ui/                        the app UI (React, Vite, CodeMirror)
 desktop/                   the macOS shell (Electron): window, menus, folder picker, quit guard, members' browser
