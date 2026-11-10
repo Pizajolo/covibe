@@ -21,6 +21,7 @@ import { Connections, loginCommand, openInBrowser } from './connections/store.js
 import { startSignIn } from './connections/mcp-auth.js';
 import { stopMcpProxy } from './connections/mcp-proxy.js';
 import { listPlugins, signInTarget } from './plugins.js';
+import { MarketError } from './market/types.js';
 
 /** Accounts and providers from Settings → Advanced, shared with the app. */
 /** Team files resolve models that only a provider offers against the connections in Settings → Advanced. */
@@ -54,6 +55,7 @@ Usage:
   covibe connections                           List accounts and providers (Settings → Advanced)
   covibe login <account>                       Sign in one of those Claude or ChatGPT accounts
   covibe login <plugin>                        Sign in to a plugin's servers (Notion, say) for your members
+  covibe market <command>                      Sell a team's work on the covibe market (covibe market help)
 
 Options:
   --repo <dir>   Repository or folder the team works on (default: current directory)
@@ -91,6 +93,16 @@ export async function main(argv: string[]): Promise<number> {
       run: { type: 'string' },
       'dry-run': { type: 'boolean' },
       attach: { type: 'string', multiple: true, short: 'a' },
+      // covibe market
+      account: { type: 'string' },
+      contract: { type: 'string' },
+      relay: { type: 'string' },
+      network: { type: 'string' },
+      rpc: { type: 'string' },
+      'storefront-url': { type: 'string' },
+      'key-file': { type: 'string' },
+      reason: { type: 'string' },
+      once: { type: 'boolean' },
     },
   });
   const [command, ...args] = positionals;
@@ -125,12 +137,14 @@ export async function main(argv: string[]): Promise<number> {
         return listConnections();
       case 'login':
         return await login(args[0]);
+      case 'market':
+        return await (await import('./market/cli.js')).marketCommand(args, values);
       default:
         console.error(`unknown command "${command}"\n\n${USAGE}`);
         return 1;
     }
   } catch (err) {
-    if (err instanceof ConfigError) console.error(red(err.message));
+    if (err instanceof ConfigError || err instanceof MarketError) console.error(red(err.message));
     else console.error(red(`error: ${(err as Error).message}`));
     return 1;
   } finally {

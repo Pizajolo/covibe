@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "probe",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["playable", "duration_s", "width", "height", "vertical", "has_audio"],
+  "properties": {
+    "playable": { "type": "boolean" },
+    "duration_s": { "type": "number", "minimum": 0 },
+    "width": { "type": "integer", "minimum": 0 },
+    "height": { "type": "integer", "minimum": 0 },
+    "vertical": { "type": "boolean" },
+    "has_audio": { "type": "boolean" },
+    "notes": { "type": "string" }
+  }
+}

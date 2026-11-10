@@ -68,6 +68,13 @@ import { AttachmentError, attachmentsDir, saveUpload, takeUploads, type Attachme
 import { withFiles } from '../engine/chat.js';
 import { covibeHome } from '../home.js';
 import type { BrowserProvider } from '../browser/types.js';
+import { runOnStore, type RunHost } from '../market/host.js';
+import { runIntake } from '../market/intake.js';
+import { Market } from '../market/market.js';
+import { marketRoutes } from '../market/routes.js';
+import { MarketError } from '../market/types.js';
+import type { MarketChain } from '../market/near.js';
+import type { Relay } from '../market/relay.js';
 
 const exec = promisify(execFile);
 /** Files listed in the Preview tab, at most. */
@@ -102,6 +109,8 @@ export interface ServerOptions {
   uiDir?: string;
   /** The browser members' browser tools use (the Mac app passes its built-in Chromium); default a headless one via Playwright. */
   browser?: BrowserProvider;
+  /** Stand-ins for the market's chain and relay (tests). */
+  market?: { chain?: MarketChain; relay?: Relay };
 }
 
 export interface CovibeServer {
@@ -1058,6 +1067,26 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
   autoCleanFirst.unref();
   autoCleanTimer.unref();
 
+  // ---- the market (see src/market): order workspaces are projects, so a team's run on an order shows like any other run.
+  const marketHost: RunHost = {
+    loadTeam: (file) => library.loadFile(file),
+    run: (o) => {
+      const project = library.addProject(o.repo, { folder: true });
+      const controller = new AbortController();
+      return runOnStore(storeFor(project), runner, connections, { ...o, signal: o.signal ? AbortSignal.any([o.signal, controller.signal]) : controller.signal }, project.id, (runId, done) => {
+        const key = `${project.id}/${runId}`;
+        active.set(key, controller);
+        void done.then(() => undefined, () => undefined).finally(() => active.delete(key));
+      });
+    },
+    intake: async (o) => {
+      const project = library.addProject(o.repo, { folder: true });
+      return { ...(await runIntake({ store: storeFor(project), runner, connections, ...o })), projectId: project.id };
+    },
+  };
+  const market = new Market({ home: library.home, secrets: connections.secrets, host: marketHost, ...opts.market });
+  if (market.settings().watch && market.overview().ready) market.start();
+
   const routes: Route[] = [
     ['GET', '/api/overview', () => ({ projects: library.projects(), teams: library.teams(), runs: allRuns(30), stats: stats(), home: library.home, defaultParent: library.defaultParent() })],
     ['GET', '/api/environment', () => discover()],
@@ -1907,6 +1936,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       return result;
     }],
   ];
+  routes.push(...marketRoutes(market, library, connections.secrets.kind));
 
   const server = createServer(async (req, res) => {
     try {
@@ -1961,7 +1991,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
           ? 409
           : err instanceof NotFound
             ? 404
-            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof McpAuthError || err instanceof BackendError || err instanceof VoiceError || err instanceof AppError || err instanceof AppConfigError || err instanceof AttachmentError
+            : err instanceof BadRequest || err instanceof ConfigError || err instanceof GitError || err instanceof SkillError || err instanceof plugins.PluginError || err instanceof GithubError || err instanceof BrainError || err instanceof ConnectionError || err instanceof CodexAuthError || err instanceof McpAuthError || err instanceof BackendError || err instanceof VoiceError || err instanceof AppError || err instanceof AppConfigError || err instanceof AttachmentError || err instanceof MarketError
               ? 400
               : 500;
       const message = err instanceof ConfigError ? `The team file has problems:\n${err.problems.map((p) => `• ${p}`).join('\n')}` : (err as Error).message;
@@ -1991,6 +2021,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       await Promise.all([...previews.values()].map((s) => s.then((x) => x.close(), () => undefined)));
       await Promise.all([...appViews.values()].map((v) => v.then((x) => x.close(), () => undefined)));
       await appHub.shutdown();
+      await market.close();
       for (const c of active.values()) c.abort();
       for (const res of sse) res.end();
       for (const res of streams) res.end();

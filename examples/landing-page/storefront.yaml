@@ -1,0 +1,37 @@
+# This team's page on the covibe market. Customers see the title, summary,
+# description, examples and the order form; never the team file or its prompts.
+# Publish it with: covibe market publish examples/landing-page
+storefront:
+  title: Landing-page team
+  summary: "A one-page website from your brief: hand-written HTML and CSS, reviewed against what you asked for."
+  description: |
+    Tell us about your product, who it is for, and what the page should say.
+    A builder agent writes a single responsive page (index.html and
+    styles.css, no frameworks or trackers) and a reviewer checks it against
+    your brief before it is delivered. If the review does not pass, you are
+    refunded. You get a zip you can host anywhere.
+  price_near: 2
+  # Short windows so the whole flow can be watched in a demo; raise them for real use.
+  windows: { accept_min: 30, delivery_min: 60, review_min: 5 }
+  intake:
+    mode: recommend            # manual | recommend | auto
+    budget_cap_usd: 2          # the run stops when it has spent this much
+    estimated_cost_usd: 0.6
+    min_price_near: 1
+    max_input_mb: 8
+    policy: |
+      One-page marketing sites only: no web apps, shops, logins or backends.
+      Nothing deceptive (fake reviews, impersonating a brand), illegal or
+      adult. The customer must say what the product or company is.
+  inputs:
+    - { name: brief, label: What is the page for?, type: text, required: true, max_chars: 4000, help: "Product or company, audience, the sections you want, tone, and the call to action." }
+    - { name: colours, label: Brand colours, type: text, max_chars: 200, help: "Hex codes or words. Leave empty to let the team choose." }
+    - { name: assets, label: Logo and images, type: files, accept: [".png", ".jpg", ".jpeg", ".svg", ".webp"], max_files: 4, folder: assets }
+  examples:
+    - { title: Bike repair shop, text: "Brief: 'Mobile bike repair in Leipzig, booking by phone, friendly and a bit cheeky, green and cream.' Result: hero with phone button, three services, prices the customer gave, and a map link." }
+  goal: |
+    Build the one-page website the customer ordered, as out/index.html with
+    out/styles.css, following their brief in ORDER.md.
+  deliverables:
+    folder: out
+    gates_required: [review]

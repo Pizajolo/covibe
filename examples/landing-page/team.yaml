@@ -1,0 +1,44 @@
+# A team you can sell on the covibe market (see storefront.yaml next to this
+# file): it builds a one-page website from a customer's brief. Each order is a
+# plain folder:
+#   ORDER.md   what the customer wrote
+#   assets/    the customer's logo and images, if they sent any
+#   out/       the finished page; only this folder is delivered
+version: 1
+name: landing-page
+description: Builds a one-page website from a brief, reviewed against it before it ships.
+
+defaults:
+  backend: { type: subscription }
+  max_parallel: 1
+  limits: { max_turns: 60, timeout_min: 30 }
+
+agents:
+  builder:
+    description: Writes the page (HTML and CSS, no build step) into out/.
+    prompt: prompts/builder.md
+    model: sonnet
+    effort: medium
+    tools: [Read, Write, Edit, Bash, Grep, Glob]
+    scope: { write: ["out/**"] }
+
+  reviewer:
+    description: Reads the page against the brief and checks that it stands on its own.
+    prompt: prompts/reviewer.md
+    model: sonnet
+    effort: medium
+    tools: [Read, Grep, Glob]
+    output_schema: schemas/review.json
+
+workflow:
+  on_gate_fail:
+    goto: build
+    max_loops: 2
+    feed: [review.findings]
+    then: escalate_to_human
+  steps:
+    - id: build
+      agent: builder
+    - id: review
+      agent: reviewer
+      gate: "review.blocking_count = 0"

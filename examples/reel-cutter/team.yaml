@@ -1,0 +1,57 @@
+# A team you can sell on the covibe market (see storefront.yaml next to this
+# file): it cuts a customer's footage into a short vertical reel with ffmpeg
+# (install it first: brew install ffmpeg). Each order is a plain folder:
+#   raw/     the customer's footage (never changed)
+#   out/     the finished reel; only this folder is delivered
+#   work/    notes, frame grabs and intermediate files
+version: 1
+name: reel-cutter
+description: Cuts your footage into a short vertical reel, measured and reviewed before it ships.
+
+defaults:
+  backend: { type: subscription }
+  max_parallel: 1
+  limits: { max_turns: 80, timeout_min: 60 }   # renders take a while
+
+agents:
+  editor:
+    description: Studies the footage, plans the cut and renders the reel to out/.
+    prompt: prompts/editor.md
+    model: opus
+    effort: high
+    tools: [Read, Write, Edit, Bash, Grep, Glob]
+    scope: { write: ["out/**", "work/**"] }      # raw/ stays as it is
+
+  prober:
+    description: Measures the rendered reel with ffprobe and reports the numbers.
+    prompt: prompts/prober.md
+    model: haiku
+    tools: [Read, Bash, Glob]
+    scope: { write: ["work/probe/**"] }
+    output_schema: schemas/probe.json
+
+  reviewer:
+    description: Watches the reel frame by frame against the customer's brief.
+    prompt: prompts/reviewer.md
+    model: sonnet
+    effort: medium
+    tools: [Read, Bash, Grep, Glob]
+    scope: { write: ["work/review/**"] }
+    output_schema: schemas/review.json
+
+workflow:
+  on_gate_fail:
+    goto: cut
+    max_loops: 2
+    feed: [render_ok, review.findings]
+    then: escalate_to_human
+  steps:
+    - id: cut
+      agent: editor
+    # Hard gate on measured facts: a playable vertical video with sound, 5 to 90 seconds long.
+    - id: render_ok
+      agent: prober
+      gate: "render_ok.playable and render_ok.vertical and render_ok.duration_s >= 5 and render_ok.duration_s <= 90"
+    - id: review
+      agent: reviewer
+      gate: "review.blocking_count = 0"

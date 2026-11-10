@@ -1,0 +1,11 @@
+{
+  "name": "covibe-market-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Off-chain relay for the covibe market: encrypted order inputs, listing pages and media, delivery bundles. Holds no funds.",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "bin": { "covibe-market-relay": "server.mjs" },
+  "scripts": { "start": "node server.mjs" }
+}

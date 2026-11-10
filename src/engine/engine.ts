@@ -50,6 +50,11 @@ export interface RunOptions {
   /** Files given with the goal: uploads (by id, see attachments.ts) and files on this computer (the CLI's --attach). */
   uploads?: string[];
   files?: string[];
+  /**
+   * The most the run may spend, in USD (a market order's cap). When it is
+   * reached the run stops as "escalated", so a person decides what happens next.
+   */
+  budgetUsd?: number;
 }
 
 export interface RunOutcome {
@@ -60,6 +65,8 @@ export interface RunOutcome {
   branch?: string;
   context: RunContext;
   costUsd: number;
+  /** The run stopped because it reached RunOptions.budgetUsd. */
+  budgetExceeded?: boolean;
 }
 
 /** What gates, task selectors and feed expressions see: step outputs keyed by step id. */
@@ -383,6 +390,8 @@ class Engine {
     let status: RunOutcome['status'] = 'succeeded';
     let reason: string | undefined;
     let limit: { resets_at: string | null } | undefined;
+    // The run was cut short by its spend cap (a run that finishes its last step over the cap still counts as finished).
+    let overBudget = false;
     try {
       // An account or provider that is not set up, or a plugin that cannot run
       // (missing, waiting for approval, no OS sandbox), fails the run now, not halfway.
@@ -405,6 +414,10 @@ class Engine {
       let i = from?.index ?? 0;
       while (i < steps.length) {
         this.opts.signal?.throwIfAborted();
+        if (this.overBudget()) {
+          overBudget = true;
+          break;
+        }
         const step = steps[i]!;
         // Nobody in this step is needed (the planner left them out): no session, and no gate to check.
         const skips = stepAgents(step).map((a) => this.skipReason(step, a));
@@ -461,6 +474,13 @@ class Engine {
       status = 'failed';
       reason = this.opts.signal?.aborted ? 'aborted' : (err as Error).message;
       if (err instanceof LimitError) limit = { resets_at: err.resetsAt ?? null };
+      if (this.overBudget()) overBudget = true;
+    }
+    // The spend cap comes before everything else: whatever the run was doing, a person takes over.
+    const budgetExceeded = overBudget && !this.opts.signal?.aborted;
+    if (budgetExceeded) {
+      status = 'escalated';
+      reason = `budget: the run spent $${this.costUsd.toFixed(2)} of the $${this.opts.budgetUsd!.toFixed(2)} it may cost`;
     }
     this.store.cancelQuestions(this.runId);
 
@@ -478,9 +498,14 @@ class Engine {
     this.store.finishRun(this.runId, status);
     this.emit({
       type: 'run.finished',
-      data: { status, reason, branch: this.workspace.branch, loops: this.context.loop, cost_usd: this.costUsd, feedback: this.context.feedback, ...(limit ? { limit } : {}) },
+      data: { status, reason, branch: this.workspace.branch, loops: this.context.loop, cost_usd: this.costUsd, feedback: this.context.feedback, ...(limit ? { limit } : {}), ...(budgetExceeded ? { budget_exceeded: true } : {}) },
     });
-    return { runId: this.runId, status, reason, branch: this.workspace.branch, context: this.context, costUsd: this.costUsd };
+    return { runId: this.runId, status, reason, branch: this.workspace.branch, context: this.context, costUsd: this.costUsd, ...(budgetExceeded ? { budgetExceeded } : {}) };
+  }
+
+  /** The run has a spend cap and reached it. */
+  private overBudget(): boolean {
+    return this.opts.budgetUsd !== undefined && this.costUsd >= this.opts.budgetUsd;
   }
 
   private async runStep(step: Step): Promise<unknown> {
@@ -874,6 +899,8 @@ class Engine {
       // A paused run holds working members at their next tool call.
       beforeToolUse: () => this.pause.wait(signal),
     });
+    // With a cap on the run, no turn may spend more than what is left of it.
+    if (this.opts.budgetUsd !== undefined) inv.maxBudgetUsd = Math.min(inv.maxBudgetUsd ?? Infinity, Math.max(this.opts.budgetUsd - this.costUsd, 0.01));
     try {
       // Stop live delivery even if a runner forgets to signal the end of its turn.
       return await this.opts.runner.run(inv).finally(() => inv.onControl?.(null));

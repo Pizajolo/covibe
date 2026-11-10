@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://covibe.dev/schemas/storefront.schema.json",
+  "title": "covibe storefront",
+  "description": "A team's page on the covibe market (storefront.yaml, next to team.yaml).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["storefront"],
+  "properties": {
+    "storefront": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "price_near", "inputs", "deliverables"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "summary": { "type": "string", "maxLength": 500 },
+        "description": { "type": "string", "maxLength": 8000 },
+        "price_near": { "type": "number", "exclusiveMinimum": 0 },
+        "windows": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "accept_min": { "type": "number", "minimum": 0.5, "maximum": 43200 },
+            "delivery_min": { "type": "number", "minimum": 0.5, "maximum": 43200 },
+            "review_min": { "type": "number", "minimum": 0.5, "maximum": 43200 }
+          }
+        },
+        "intake": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "enum": ["manual", "recommend", "auto"] },
+            "budget_cap_usd": { "type": "number", "exclusiveMinimum": 0 },
+            "estimated_cost_usd": { "type": "number", "minimum": 0 },
+            "min_price_near": { "type": "number", "minimum": 0 },
+            "auto_min_fit": { "type": "number", "minimum": 0, "maximum": 1 },
+            "max_input_mb": { "type": "number", "exclusiveMinimum": 0, "maximum": 512 },
+            "policy": { "type": "string", "maxLength": 4000 }
+          }
+        },
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "type"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$" },
+              "label": { "type": "string", "maxLength": 100 },
+              "help": { "type": "string", "maxLength": 500 },
+              "type": { "enum": ["text", "files"] },
+              "required": { "type": "boolean" },
+              "max_chars": { "type": "integer", "minimum": 1, "maximum": 100000 },
+              "accept": { "type": "array", "items": { "type": "string", "pattern": "^\\.[A-Za-z0-9]{1,10}$" }, "minItems": 1 },
+              "max_files": { "type": "integer", "minimum": 1, "maximum": 50 },
+              "folder": { "type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$" }
+            }
+          }
+        },
+        "examples": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["title"],
+            "properties": {
+              "title": { "type": "string", "maxLength": 100 },
+              "text": { "type": "string", "maxLength": 2000 },
+              "file": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "goal": { "type": "string", "maxLength": 8000 },
+        "deliverables": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["folder"],
+          "properties": {
+            "folder": { "type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*/?$" },
+            "gates_required": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+          }
+        },
+        "workspace": { "enum": ["folder", "git"] },
+        "privacy": { "type": "string", "maxLength": 2000 }
+      }
+    }
+  }
+}

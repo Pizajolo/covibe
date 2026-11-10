@@ -1,0 +1,4 @@
+# near-sdk reaches NEAR's host functions (panic messages among them) only when
+# built with `--cfg near`; cargo-near sets it, and so does a plain cargo build here.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "near", "-C", "link-arg=-s"]
