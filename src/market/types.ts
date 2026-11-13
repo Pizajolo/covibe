@@ -95,13 +95,34 @@ export interface ListingMeta {
   intake_mode: IntakeMode;
 }
 
+/**
+ * Where a file's bytes are: in the relay, as encrypted chunks stored under their hashes.
+ * Chunk i is AES-256-GCM under `key` with i as the nonce (see sealChunk), so chunks
+ * cannot be swapped or reordered, and a file of any size is sent and read piece by piece.
+ */
+export interface BlobRef {
+  /** The file's own AES-256 key, base64. */
+  key: string;
+  /** Bytes of the file in each chunk (the last one may be shorter). */
+  chunk: number;
+  /** sha256 of each encrypted chunk, in order. */
+  chunks: string[];
+}
+
 /** A customer's order input, before encryption. */
 export interface OrderInput {
   v: 1;
   fields: Record<string, string>;
-  files: { field: string; name: string; type?: string; data: string }[];
+  /** A file is `blob` (chunks in the relay, with its `size`), or small and inline as base64 `data`. */
+  files: { field: string; name: string; type?: string; data?: string; size?: number; blob?: BlobRef }[];
   /** x25519 key (base64) the delivery bundle is encrypted to. */
   reply_pubkey?: string;
+}
+
+/** What a delivery bundle is: the list of delivered files, sealed to the customer. Its hash goes on-chain. */
+export interface Delivery {
+  v: 2;
+  files: { name: string; size: number; type?: string; blob: BlobRef }[];
 }
 
 export type IntakeMode = 'manual' | 'recommend' | 'auto';
@@ -263,6 +284,9 @@ export interface MarketTeam {
   /** What is wrong with its storefront.yaml (empty when it can be published). */
   problems: string[];
   title?: string;
+  summary?: string;
+  /** The first example that is an image or a video (a path in the team folder), for the storefront's card. */
+  cover?: string;
   priceNear?: number;
   mode?: IntakeMode;
   listingId?: number;

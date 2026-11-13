@@ -5,7 +5,8 @@ export type RunStatus = 'running' | 'succeeded' | 'failed' | 'escalated';
 
 /** A workflow run, or a read-only question session with one agent. */
 /** check: the lead looking over a backlog goal before it goes to the team (see engine/backlog.ts). */
-export type RunKind = 'workflow' | 'ask' | 'curate' | 'design' | 'git' | 'check' | 'doctor';
+/** storefront: the chat that sets up a team's market storefront (see market/assistant.ts). */
+export type RunKind = 'workflow' | 'ask' | 'curate' | 'design' | 'git' | 'check' | 'doctor' | 'storefront';
 
 export type EventType =
   | 'run.started'
@@ -47,6 +48,7 @@ export type EventType =
   | 'brain.decided'
   | 'brain.updated'
   | 'team.saved'
+  | 'storefront.saved'
   | 'question.asked'
   | 'question.escalated'
   | 'question.answered'

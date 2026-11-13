@@ -71,6 +71,7 @@ import type { BrowserProvider } from '../browser/types.js';
 import { runOnStore, type RunHost } from '../market/host.js';
 import { runIntake } from '../market/intake.js';
 import { Market } from '../market/market.js';
+import { mediaPath, saveMedia, sendMedia } from '../market/media.js';
 import { marketRoutes } from '../market/routes.js';
 import { MarketError } from '../market/types.js';
 import type { MarketChain } from '../market/near.js';
@@ -1936,7 +1937,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       return result;
     }],
   ];
-  routes.push(...marketRoutes(market, library, connections.secrets.kind));
+  routes.push(...marketRoutes(market, library, connections.secrets.kind, { store: libraryStore, runner }));
 
   const server = createServer(async (req, res) => {
     try {
@@ -1957,6 +1958,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
       // A file for a goal, a question or a chat message: raw bytes, streamed to disk (it can be footage).
       if (url.pathname === '/api/uploads' && req.method === 'POST') {
         return send(res, 200, await saveUpload(url.searchParams.get('name') ?? 'file', req));
+      }
+
+      // A storefront's example media (pictures, video): raw bytes in, and out with byte ranges for the player.
+      const media = /^\/api\/market\/storefronts\/([^/]+)\/media$/.exec(url.pathname);
+      if (media && (req.method === 'POST' || req.method === 'GET')) {
+        const dir = library.teamDir(decodeURIComponent(media[1]!));
+        if (req.method === 'POST') return send(res, 200, await saveMedia(dir, url.searchParams.get('name') ?? 'file', req));
+        return sendMedia(req, res, mediaPath(dir, url.searchParams.get('file') ?? ''));
       }
 
       // A recording from the mic button, or a piece of one (?session=…): raw WAV, not JSON (it can be minutes long).

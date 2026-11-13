@@ -1018,7 +1018,10 @@ contract. An intake agent screens the order for the owner. If it is accepted, th
    **Publish** in the app) calls `create_listing` and puts the page into the relay; the contract stores its hash.
 2. **The customer orders.** The storefront builds the form from the listing, encrypts the input in the browser
    to the listing's `intake_pubkey` (X25519, HKDF-SHA256, AES-256-GCM), uploads it to the relay and calls
-   `place_order(listing_id, input_hash)` with the price attached.
+   `place_order(listing_id, input_hash)` with the price attached. Files (footage, images) are cut into 4 MB
+   chunks, each encrypted under the file's own key and stored in the relay under its hash; the sealed input
+   lists the hashes and the key, so the hash on-chain covers every byte and a file can be of any size the
+   listing takes (`intake.max_input_mb`).
 3. **covibe notices the order** by polling the contract, fetches the input, checks it against the hash on-chain
    and decrypts it.
 4. **Pre-checks, with no model involved:** the input matches the form, size and file-type limits hold, the locked
@@ -1036,13 +1039,15 @@ contract. An intake agent screens the order for the owner. If it is accepted, th
    folder) and the team runs on it as on any goal, with its gates and fix loops. The customer's text reaches the
    members marked as data. The customer sees a status feed (steps and checks by name), never the board or prompts.
    The engine stops the run at the listing's spend cap and hands the order to the owner.
-8. **Delivery, only if the required gates passed.** covibe zips the deliverables folder, encrypts it to the
-   customer's per-order key, uploads it, and writes a receipt signed with the owner's NEAR key:
+8. **Delivery, only if the required gates passed.** covibe sends each file of the deliverables folder to the
+   relay in encrypted chunks, seals the list of them (the bundle) to the customer's per-order key, uploads it,
+   and writes a receipt signed with the owner's NEAR key:
    `{ order_id, input_hash, bundle_hash, gates: [{ name, passed }], event_log_hash, started, finished, … }`.
    The event log holds prompts, so only its hash is published. `deliver_order` puts the receipt and bundle
    hashes on-chain. If the gates did not pass, the owner fails the order (auto mode does it alone) and the customer
    is refunded.
-9. **The customer downloads**; the storefront checks the bundle against `bundle_hash`, the receipt against
+9. **The customer opens the delivery**: each file can be downloaded, a video, image or sound can be played on
+   the order page, and several files can be saved as one zip. The storefront checks the bundle against `bundle_hash`, the receipt against
    `receipt_hash`, its signature, and that the signing key belongs to the owner's account. They confirm, dispute, or
    let the window run out. Time-based steps (`expire_order`, `settle_order`) can be called by anyone, so nobody
    has to be online.
@@ -1096,8 +1101,11 @@ npm run dev -- market watch                   # leave it running: it screens, ru
 ```
 
 The key goes to covibe's secret store (the Keychain on macOS). In the app the same is under **Market**: Settings,
-Storefronts (edit and publish), Incoming orders, Earnings; turn on **Watch for orders** there instead of
-`market watch`.
+Storefronts, Incoming orders, Earnings; turn on **Watch for orders** there instead of `market watch`.
+**Storefronts** shows each storefront as a card; **New storefront** starts one from a team you have. Its editor
+is a form (the page with pictures and videos as examples, the order form with text and file questions, what is
+delivered and which gates must pass, the rules) next to an assistant: a chat with an agent that reads the team
+and fills the storefront in. Both write `storefront.yaml`; nothing is public until you publish.
 
 **5. The customer: order.** Open http://127.0.0.1:4490, sign in (a NEAR wallet, or "Use a developer key" with
 `my-customer.testnet` and its key, which lets a script or a screener drive the flow without a wallet), open the
@@ -1112,7 +1120,7 @@ npm run dev -- market accept 0
 ```
 
 The team runs; the order page shows its progress. When the review gate passes the order turns to *Delivered*:
-download the zip, see the receipt checks, and confirm (the owner receives 1.95 NEAR, the treasury 0.05) or
+download the files, see the receipt checks, and confirm (the owner receives 1.95 NEAR, the treasury 0.05) or
 dispute (refund). Set `intake.mode: auto` in `examples/landing-page/storefront.yaml` and publish again to have
 the agent answer alone. The example's windows are short (5 minutes of review) so auto-settlement can be watched
 too.
@@ -1203,9 +1211,9 @@ of being lost. The price and the fee are locked when the order is placed.
   would close that.
 - **The keys to a delivery live in the customer's browser** (`localStorage`). Another browser cannot open the
   bundle.
-- **Inputs travel as one encrypted blob**, files included, so orders are limited to tens of megabytes
-  (`RELAY_MAX_MB`, `intake.max_input_mb`).
-- **Unreferenced inputs are not cleaned up** in the relay, and uploads there are not rate-limited.
+- **Files are held in memory in the customer's browser** while they are decrypted for download, so a delivery
+  of several gigabytes needs that much memory there. Example media on a listing page is one upload each (60 MB).
+- **Unreferenced inputs and file chunks are not cleaned up** in the relay, and uploads there are not rate-limited.
 - The watcher reads every order of the owner's listings on each poll; fine for a demo, not for thousands of orders.
 
 ### Libraries
@@ -1219,7 +1227,7 @@ of being lost. The price and the fee are locked when the order is placed.
 | [`@anthropic-ai/claude-agent-sdk`](https://docs.claude.com/en/api/agent-sdk/overview) | Running the teams and the intake agent (through covibe's engine) |
 | [`ajv`](https://ajv.js.org), [`yaml`](https://eemeli.org/yaml/) | `storefront.yaml`: parsing and schema validation |
 | [`jsonata`](https://jsonata.org) | Gate expressions (covibe's engine) |
-| Node's `node:crypto`, `node:zlib`, `node:http`, `node:sqlite`; the browser's WebCrypto | X25519 and AES-GCM sealing, ed25519 signatures, the zip bundle, the relay, the event store |
+| Node's `node:crypto`, `node:zlib`, `node:http`, `node:sqlite`; the browser's WebCrypto | X25519 and AES-GCM sealing, ed25519 signatures, file chunks, the relay, the event store |
 | [`vitest`](https://vitest.dev) | Tests |
 
 ## Events
@@ -1281,7 +1289,9 @@ src/mcp-config.ts          reading an MCP server you paste (address, command or 
 src/voice.ts               voice input: whisper.cpp on this computer (a whisper-server per recording), OpenAI or ElevenLabs; settings and model downloads
 src/market/                the market (owner's side): chain and relay clients (near.ts, relay.ts), sealing and signing
                            (crypto.ts), storefront.yaml (storefront.ts), pre-checks and the intake agent (intake.ts), order
-                           processing (market.ts), receipts and bundles (delivery.ts, zip.ts), the CLI and the app's routes
+                           processing (market.ts), files in encrypted chunks (blobs.ts), receipts and deliveries
+                           (delivery.ts), example media (media.ts), the storefront assistant (assistant.ts), the CLI
+                           and the app's routes
 market/contract/           the escrow contract (Rust, near-sdk); market/relay/ the relay; market/storefront/ the web storefront
 src/main.ts                CLI
 ui/                        the app UI (React, Vite, CodeMirror)

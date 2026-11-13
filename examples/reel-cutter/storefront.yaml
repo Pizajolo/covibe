@@ -17,13 +17,13 @@ storefront:
     budget_cap_usd: 3          # the run stops when it has spent this much
     estimated_cost_usd: 1.5
     min_price_near: 4
-    max_input_mb: 48
+    max_input_mb: 500
     policy: |
       Short reels from the customer's own footage only. No footage of other
       people's copyrighted films, shows or music videos, nothing sexual or
       violent, and no requests to add material we do not have.
   inputs:
-    - { name: footage, label: Your clips, type: files, accept: [".mp4", ".mov"], max_files: 5, folder: raw, required: true, help: "Up to five clips, 48 MB in total." }
+    - { name: footage, label: Your clips, type: files, accept: [".mp4", ".mov"], max_files: 5, folder: raw, required: true, help: "Up to five clips, 500 MB in total." }
     - { name: brief, label: What is the reel for?, type: text, required: true, max_chars: 2000, help: "Audience, mood, the moments that must be in, and how long it should be." }
   examples:
     - { title: Product teaser, text: "Three phone clips of a coffee machine became a 25-second teaser: close-ups first, the pour as the last shot." }

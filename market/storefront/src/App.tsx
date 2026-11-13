@@ -3,9 +3,12 @@
 // Everything is read from the contract and the relay; there is no backend.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Chain, connectKey, connectWallet, explorer, near, restoreSession, type Session } from './chain';
-import { generateAccessKey, generateSealKey, open, seal, sha256Hex, toBase64, utf8, verify } from './crypto';
+import { generateAccessKey, generateSealKey, open, seal, sha256Hex, utf8, verify } from './crypto';
+import { Docs } from './Docs';
+import { Landing } from './Landing';
+import { fetchFile, fileSize, save, sendFile, ZIP_LIMIT, zipFiles } from './files';
 import { loadKeys, Relay, saveKeys } from './relay';
-import type { Config, InputField, Listing, ListingMeta, Order, OrderKeys, OrderStatus, Receipt } from './types';
+import type { Config, Delivery, InputField, Listing, ListingMeta, Order, OrderKeys, OrderStatus, Receipt } from './types';
 
 interface Ctx {
   config: Config;
@@ -81,8 +84,10 @@ export function App() {
 
   const ctx = useMemo<Ctx | undefined>(() => (config ? { config, chain: new Chain(config), relay: new Relay(config), session, signIn: () => setSigningIn(true) } : undefined), [config, session]);
 
+  const landing = !route[0] || route[0] === 'download';
+  const docs = route[0] === 'docs';
   let page: ReactNode = null;
-  if (ctx) {
+  if (ctx && !landing && !docs) {
     if (route[0] === 'listing' && route[1]) page = <ListingPage ctx={ctx} id={Number(route[1])} />;
     else if (route[0] === 'order' && route[1]) page = <OrderPage ctx={ctx} id={Number(route[1])} />;
     else if (route[0] === 'orders') page = <OrdersPage ctx={ctx} />;
@@ -93,11 +98,14 @@ export function App() {
     <>
       <header className="top">
         <a className="brand" href="#/">
-          <span className="mark">✓</span> covibe market
+          <span className="mark">✓</span> covibe
         </a>
         <nav>
-          <a href="#/" className={!route[0] || route[0] === 'listing' ? 'on' : ''}>
-            Teams
+          <a href="#/market" className={route[0] === 'market' || route[0] === 'listing' ? 'on' : ''}>
+            Marketplace
+          </a>
+          <a href="#/docs" className={docs ? 'on' : ''}>
+            Docs
           </a>
           <a href="#/orders" className={route[0] === 'orders' || route[0] === 'order' ? 'on' : ''}>
             My orders
@@ -124,11 +132,17 @@ export function App() {
           )
         )}
       </header>
-      <main>
-        {problem && <div className="note bad">{problem}</div>}
-        {!problem && !ctx && <p className="muted">Loading…</p>}
-        {page}
-      </main>
+      {landing ? (
+        <Landing network={config?.network} section={route[0]} />
+      ) : docs ? (
+        <Docs section={route[1]} />
+      ) : (
+        <main>
+          {problem && <div className="note bad">{problem}</div>}
+          {!problem && !ctx && <p className="muted">Loading…</p>}
+          {page}
+        </main>
+      )}
       <footer className="foot">
         The price of an order is held by the market contract{config ? <> ({accountLink(config, config.contractId)})</> : null} and released to the team owner only after the team's own checks passed and you confirmed, or your review window ended. Otherwise you are refunded.
       </footer>
@@ -231,19 +245,32 @@ function Stats({ l }: { l: Listing }) {
 }
 
 function Listings({ ctx }: { ctx: Ctx }) {
-  const { value, error } = useLoad(async () => (await ctx.chain.listings()).filter((l) => l.active).reverse(), [ctx.chain]);
+  const { value, error } = useLoad(async () => {
+    const listings = (await ctx.chain.listings()).filter((l) => l.active).reverse();
+    // Each listing's page, for its picture: the first example that is an image or a video.
+    return Promise.all(
+      listings.map(async (l) => {
+        const meta = await ctx.relay.meta(l.id, l.meta_hash).catch(() => undefined);
+        return { l, cover: meta?.examples.find((e) => e.media && /^(image|video)\//.test(e.media_type ?? '')) };
+      }),
+    );
+  }, [ctx.chain]);
   return (
     <>
       <section className="hero">
-        <h1>Hire an AI team like you'd hire a studio.</h1>
-        <p>Pick a team, send your brief, and pay into escrow. The owner is paid only if the team's own checks pass. If they don't, you get your NEAR back.</p>
+        <h1>Teams taking orders</h1>
+        <p>
+          Pick a team, send your brief, and pay into escrow. The owner is paid only if the team's own checks pass. <a href="#/">How it works</a>
+        </p>
       </section>
       {error && <div className="note bad">{error}</div>}
       {!value && !error && <p className="muted">Loading the teams…</p>}
       {value && !value.length && <p className="muted">No team takes orders right now.</p>}
       <div className="cards">
-        {value?.map((l) => (
+        {value?.map(({ l, cover }) => (
           <a key={l.id} className="card listing" href={`#/listing/${l.id}`}>
+            {cover?.media_type?.startsWith('image/') && <img className="cover" src={ctx.relay.mediaUrl(cover.media!)} alt="" loading="lazy" />}
+            {cover?.media_type?.startsWith('video/') && <video className="cover" src={`${ctx.relay.mediaUrl(cover.media!)}#t=0.1`} muted playsInline preload="metadata" />}
             <h3>{l.title}</h3>
             <p>{l.summary}</p>
             <div className="row">
@@ -276,7 +303,7 @@ function ListingPage({ ctx, id }: { ctx: Ctx; id: number }) {
   return (
     <div className="split">
       <article>
-        <a className="back" href="#/">
+        <a className="back" href="#/market">
           ← All teams
         </a>
         <h1>{meta.title}</h1>
@@ -292,7 +319,7 @@ function ListingPage({ ctx, id }: { ctx: Ctx; id: number }) {
         {meta.examples.map((e, i) => (
           <figure key={i} className="example">
             {e.media && e.media_type?.startsWith('image/') && <img src={ctx.relay.mediaUrl(e.media)} alt={e.title} />}
-            {e.media && e.media_type?.startsWith('video/') && <video src={ctx.relay.mediaUrl(e.media)} controls />}
+            {e.media && e.media_type?.startsWith('video/') && <video src={`${ctx.relay.mediaUrl(e.media)}#t=0.1`} controls playsInline preload="metadata" />}
             {e.media && !/^(image|video)\//.test(e.media_type ?? '') && (
               <a href={ctx.relay.mediaUrl(e.media)} target="_blank" rel="noreferrer">
                 Open the example
@@ -347,9 +374,9 @@ function OrderForm({ ctx, listing, meta }: { ctx: Ctx; listing: Listing; meta: L
   const [step, setStep] = useState<string | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [tried, setTried] = useState(false);
+  const [progress, setProgress] = useState<number | undefined>();
   const bytes = Object.values(state.files).flat().reduce((n, f) => n + f.size, 0);
-  // base64 inside the encrypted input makes files a third larger.
-  const tooBig = bytes * 1.37 > meta.max_input_mb * (1 << 20);
+  const tooBig = bytes > meta.max_input_mb * (1 << 20);
   const problems = Object.fromEntries(meta.inputs.map((d) => [d.name, fieldProblem(d, state)]));
   const valid = !tooBig && Object.values(problems).every((p) => !p);
 
@@ -361,8 +388,18 @@ function OrderForm({ ctx, listing, meta }: { ctx: Ctx; listing: Listing; meta: L
     try {
       setStep('Encrypting your order in this browser…');
       const keys: OrderKeys = { access: await generateAccessKey(), reply: await generateSealKey(), listingId: listing.id, createdAt: Date.now() };
+      // Each file goes up in encrypted pieces, so footage of any size the team takes can be sent.
       const files = [];
-      for (const [field, list] of Object.entries(state.files)) for (const f of list) files.push({ field, name: f.name, type: f.type, data: toBase64(new Uint8Array(await f.arrayBuffer())) });
+      let done = 0;
+      for (const [field, list] of Object.entries(state.files)) {
+        for (const f of list) {
+          setStep(`Encrypting and uploading ${f.name}…`);
+          files.push({ field, name: f.name, type: f.type, ...(await sendFile(ctx.relay, f, (sent) => setProgress((done + sent) / Math.max(1, bytes)))) });
+          done += f.size;
+        }
+      }
+      setProgress(undefined);
+      setStep('Encrypting your order in this browser…');
       const fields = Object.fromEntries(Object.entries(state.text).filter(([, v]) => v.trim()));
       const sealed = await seal(utf8(JSON.stringify({ v: 1, fields, files, reply_pubkey: keys.reply.publicKey })), listing.intake_pubkey);
       setStep('Uploading the encrypted order…');
@@ -378,6 +415,7 @@ function OrderForm({ ctx, listing, meta }: { ctx: Ctx; listing: Listing; meta: L
       setError((err as Error).message);
     } finally {
       setStep(undefined);
+      setProgress(undefined);
     }
   };
 
@@ -390,31 +428,86 @@ function OrderForm({ ctx, listing, meta }: { ctx: Ctx; listing: Listing; meta: L
       }}
     >
       <h2>Order</h2>
-      {meta.inputs.map((def) => (
-        <label key={def.name}>
-          <span>
-            {def.label ?? def.name}
-            {!def.required && <em> (optional)</em>}
-          </span>
-          {def.type === 'text' ? (
-            <textarea name={def.name} rows={(def.max_chars ?? 5000) > 300 ? 6 : 2} value={state.text[def.name] ?? ''} maxLength={def.max_chars ?? 5000} onChange={(e) => setState((s) => ({ ...s, text: { ...s.text, [def.name]: e.target.value } }))} />
-          ) : (
-            <input name={def.name} type="file" multiple={(def.max_files ?? 5) > 1} accept={def.accept?.join(',')} onChange={(e) => setState((s) => ({ ...s, files: { ...s.files, [def.name]: [...(e.target.files ?? [])] } }))} />
-          )}
-          {def.help && <small>{def.help}</small>}
-          {tried && problems[def.name] && <small className="bad">{problems[def.name]}</small>}
-        </label>
-      ))}
-      {tooBig && <div className="note bad">The files are too large: this team takes {meta.max_input_mb} MB per order.</div>}
+      {meta.inputs.map((def) => {
+        const body = (
+          <>
+            <span>
+              {def.label ?? def.name}
+              {!def.required && <em> (optional)</em>}
+            </span>
+            {def.type === 'text' ? (
+              <textarea name={def.name} rows={(def.max_chars ?? 5000) > 300 ? 6 : 2} value={state.text[def.name] ?? ''} maxLength={def.max_chars ?? 5000} onChange={(e) => setState((s) => ({ ...s, text: { ...s.text, [def.name]: e.target.value } }))} />
+            ) : (
+              <FilePicker def={def} files={state.files[def.name] ?? []} disabled={!!step} onChange={(files) => setState((s) => ({ ...s, files: { ...s.files, [def.name]: files } }))} />
+            )}
+            {def.help && <small>{def.help}</small>}
+            {tried && problems[def.name] && <small className="bad">{problems[def.name]}</small>}
+          </>
+        );
+        // A label would hand every click on the chosen files to the file dialog.
+        return def.type === 'text' ? <label key={def.name}>{body}</label> : <div key={def.name} className="field">{body}</div>;
+      })}
+      {tooBig && (
+        <div className="note bad">
+          The files are too large ({fileSize(bytes)}): this team takes {fileSize(meta.max_input_mb * (1 << 20))} per order.
+        </div>
+      )}
       <div className="note quiet">
         <strong>Who sees your order.</strong> {meta.privacy}
       </div>
       {error && <div className="note bad">{error}</div>}
+      {progress !== undefined && <progress value={progress} max={1} aria-label="Upload progress" />}
       <button className="btn primary wide" disabled={!!step}>
         {step ?? (ctx.session ? `Pay ${near(listing.price)} NEAR into escrow and order` : `Sign in to order for ${near(listing.price)} NEAR`)}
       </button>
       <small className="muted">The keys to your delivery are kept in this browser. Use the same browser to download it.</small>
     </form>
+  );
+}
+
+/** Choose the files of one field: drop them or pick them; each shows with its size and can be taken out again. */
+function FilePicker({ def, files, disabled, onChange }: { def: InputField; files: File[]; disabled: boolean; onChange: (files: File[]) => void }) {
+  const input = useRef<HTMLInputElement>(null);
+  const [over, setOver] = useState(false);
+  const max = def.max_files ?? 5;
+  const add = (list: FileList | null) => {
+    const next = max > 1 ? [...files, ...(list ?? [])].filter((f, i, all) => all.findIndex((x) => x.name === f.name && x.size === f.size) === i) : [...(list ?? [])].slice(0, 1);
+    onChange(next);
+    if (input.current) input.current.value = '';
+  };
+  return (
+    <div className="files">
+      <div
+        className={`drop ${over ? 'over' : ''}`}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setOver(true);
+        }}
+        onDragLeave={() => setOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setOver(false);
+          if (!disabled) add(e.dataTransfer.files);
+        }}
+      >
+        <input ref={input} name={def.name} type="file" hidden multiple={max > 1} accept={def.accept?.join(',')} onChange={(e) => add(e.target.files)} />
+        <button type="button" className="btn" disabled={disabled} onClick={() => input.current?.click()}>
+          {files.length && max > 1 ? 'Add more files' : files.length ? 'Choose another file' : max > 1 ? 'Choose files' : 'Choose a file'}
+        </button>
+        <span className="muted small">
+          or drop {max > 1 ? `up to ${max} files` : 'a file'} here{def.accept ? ` (${def.accept.join(', ')})` : ''}
+        </span>
+      </div>
+      {files.map((f) => (
+        <div key={`${f.name}:${f.size}`} className="file">
+          <span className="name">{f.name}</span>
+          <span className="muted small">{fileSize(f.size)}</span>
+          <button type="button" className="x" disabled={disabled} aria-label={`Remove ${f.name}`} onClick={() => onChange(files.filter((x) => x !== f))}>
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -449,7 +542,7 @@ function OrdersPage({ ctx }: { ctx: Ctx }) {
       {error && <div className="note bad">{error}</div>}
       {value && !value.length && (
         <p className="muted">
-          You have not ordered anything yet. <a href="#/">See the teams.</a>
+          You have not ordered anything yet. <a href="#/market">See the teams.</a>
         </p>
       )}
       <div className="list">
@@ -489,6 +582,7 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
   const [disputing, setDisputing] = useState(false);
   const [reason, setReason] = useState('');
   const [download, setDownload] = useState<string | undefined>();
+  const [delivery, setDelivery] = useState<Delivery | undefined>();
   const [checked, setChecked] = useState<Checked | undefined>();
   const [, tick] = useState(0);
   useEffect(() => {
@@ -545,6 +639,7 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
     }
   };
 
+  /** Fetch the bundle, check it against the hash on-chain and open it: the list of delivered files. */
   const fetchBundle = async () => {
     if (!keys) return;
     setBusy('download');
@@ -552,14 +647,16 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
     try {
       const sealed = await ctx.relay.bundle(order.id, keys);
       if ((await sha256Hex(sealed)) !== order.bundle_hash) throw new Error('The bundle in the relay does not match the hash the owner put on-chain. Do not confirm; dispute instead.');
-      const zip = sealed[0] === 0x50 && sealed[1] === 0x4b ? sealed : await open(sealed, keys.reply.privateJwk);
-      const url = URL.createObjectURL(new Blob([zip], { type: 'application/zip' }));
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `order-${order.id}.zip`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      setDownload(`Downloaded order-${order.id}.zip (${zip.length < 10240 ? `${zip.length} bytes` : `${(zip.length / 1024).toFixed(0)} KB`}). It matches the hash on-chain.`);
+      const plain = sealed[0] === 0x43 && sealed[1] === 0x56 && sealed[2] === 0x42 && sealed[3] === 0x31 ? await open(sealed, keys.reply.privateJwk) : sealed;
+      // Deliveries made before files travelled in pieces are one zip.
+      if (plain[0] === 0x50 && plain[1] === 0x4b) {
+        save(new Blob([plain], { type: 'application/zip' }), `order-${order.id}.zip`);
+        setDownload(`Downloaded order-${order.id}.zip (${fileSize(plain.length)}). It matches the hash on-chain.`);
+        return;
+      }
+      const d = JSON.parse(new TextDecoder().decode(plain)) as Delivery;
+      if (d.v !== 2 || !Array.isArray(d.files)) throw new Error('This delivery is in a format this page does not know.');
+      setDelivery(d);
     } catch (err) {
       setActionError((err as Error).message);
     } finally {
@@ -647,9 +744,11 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
           ) : (
             <p className="muted">Checking the receipt…</p>
           )}
-          {keys ? (
+          {delivery ? (
+            <DeliveryFiles relay={ctx.relay} delivery={delivery} orderId={order.id} />
+          ) : keys ? (
             <button className="btn primary" disabled={busy === 'download'} onClick={() => void fetchBundle()}>
-              {busy === 'download' ? 'Downloading and checking…' : 'Download the result'}
+              {busy === 'download' ? 'Opening and checking…' : 'Open the result'}
             </button>
           ) : (
             <div className="note warn">The keys for this order are not in this browser, so the result cannot be opened here. Open this page in the browser you ordered with.</div>
@@ -715,3 +814,90 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
   );
 }
 
+
+/**
+ * The delivered files. Each is fetched from the relay in pieces, checked and
+ * decrypted here; a video, an image or a sound can be looked at before it is saved.
+ */
+function DeliveryFiles({ relay, delivery, orderId }: { relay: Relay; delivery: Delivery; orderId: number }) {
+  const blobs = useRef(new Map<string, Blob>());
+  const [progress, setProgress] = useState<Record<string, number>>({});
+  const [shown, setShown] = useState<Record<string, string>>({});
+  const [error, setError] = useState<string | undefined>();
+  const [zipping, setZipping] = useState(false);
+  const total = delivery.files.reduce((n, f) => n + f.size, 0);
+
+  const get = async (f: Delivery['files'][number]): Promise<Blob> => {
+    const kept = blobs.current.get(f.name);
+    if (kept) return kept;
+    setProgress((p) => ({ ...p, [f.name]: 0 }));
+    try {
+      const blob = await fetchFile(relay, f.blob, f.size, f.type, (got) => setProgress((p) => ({ ...p, [f.name]: got / Math.max(1, f.size) })));
+      blobs.current.set(f.name, blob);
+      return blob;
+    } finally {
+      setProgress(({ [f.name]: _done, ...rest }) => rest);
+    }
+  };
+  const run = (work: () => Promise<void>) => {
+    setError(undefined);
+    work().catch((err) => setError((err as Error).message));
+  };
+  const show = (f: Delivery['files'][number]) => run(async () => {
+    const url = URL.createObjectURL(await get(f));
+    setShown((s) => ({ ...s, [f.name]: url }));
+  });
+  const all = () => run(async () => {
+    setZipping(true);
+    try {
+      const files = [];
+      for (const f of delivery.files) files.push({ name: f.name, blob: await get(f) });
+      save(await zipFiles(files), `order-${orderId}.zip`);
+    } finally {
+      setZipping(false);
+    }
+  });
+  useEffect(() => {
+    const urls = shown;
+    return () => Object.values(urls).forEach((u) => URL.revokeObjectURL(u));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div className="delivery">
+      <div className="note good">The delivery matches the hash on-chain. {delivery.files.length === 1 ? 'One file' : `${delivery.files.length} files`}, {fileSize(total)}.</div>
+      {delivery.files.map((f) => {
+        const kind = /^(video|image|audio)\//.exec(f.type ?? '')?.[1];
+        const url = shown[f.name];
+        const busy = progress[f.name] !== undefined;
+        return (
+          <div key={f.name} className="delivered">
+            <div className="row">
+              <strong className="name">{f.name}</strong>
+              <span className="muted small">{fileSize(f.size)}</span>
+              <span className="spacer" />
+              {kind && !url && (
+                <button className="btn" disabled={busy} onClick={() => show(f)}>
+                  {kind === 'video' ? 'Watch' : kind === 'audio' ? 'Listen' : 'View'}
+                </button>
+              )}
+              <button className="btn primary" disabled={busy} onClick={() => run(async () => save(await get(f), f.name))}>
+                Download
+              </button>
+            </div>
+            {busy && <progress value={progress[f.name]} max={1} aria-label={`Fetching ${f.name}`} />}
+            {url && kind === 'video' && <video src={url} controls playsInline />}
+            {url && kind === 'image' && <img src={url} alt={f.name} />}
+            {url && kind === 'audio' && <audio src={url} controls />}
+          </div>
+        );
+      })}
+      {delivery.files.length > 1 && total < ZIP_LIMIT && (
+        <button className="btn" disabled={zipping} onClick={all}>
+          {zipping ? 'Fetching everything…' : 'Download everything as a zip'}
+        </button>
+      )}
+      {error && <div className="note bad">{error}</div>}
+    </div>
+  );
+}

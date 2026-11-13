@@ -60,6 +60,19 @@ export interface ListingMeta {
   intake_mode: 'manual' | 'recommend' | 'auto';
 }
 
+/** Where a file's bytes are: encrypted chunks in the relay, under their hashes (see src/market/types.ts). */
+export interface BlobRef {
+  key: string;
+  chunk: number;
+  chunks: string[];
+}
+
+/** What a delivery bundle holds once opened: the delivered files. */
+export interface Delivery {
+  v: 2;
+  files: { name: string; size: number; type?: string; blob: BlobRef }[];
+}
+
 export interface Receipt {
   v: 1;
   contract: string;

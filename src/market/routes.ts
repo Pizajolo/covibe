@@ -1,9 +1,14 @@
 // The market in the app: the routes behind the Market page (storefronts,
 // incoming orders, earnings, settings). They sit in the local server's route
 // table like every other route (see server/app.ts).
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import type { TeamConfig } from '../config/types.js';
+import type { EventStore } from '../events/store.js';
+import type { AgentRunner } from '../runner/types.js';
 import type { Library } from '../server/library.js';
+import { chatThreads } from '../server/projections.js';
+import { assist, mediaFiles, SHOPKEEPER } from './assistant.js';
 import type { Market } from './market.js';
 import { listingInput, loadStorefront, STOREFRONT_FILE, storefrontProblems, storefrontTemplate } from './storefront.js';
 import { MarketError, type MarketSettings, type MarketTeam, type MarketView } from './types.js';
@@ -13,7 +18,24 @@ export type MarketRoute = [string, string, Handler];
 
 const SETTINGS: (keyof MarketSettings)[] = ['network', 'rpcUrl', 'contractId', 'accountId', 'relayUrl', 'storefrontUrl', 'watch', 'pollSeconds'];
 
-export function marketRoutes(market: Market, library: Library, secretStore: 'keychain' | 'file'): MarketRoute[] {
+/** What the storefront assistant's chat needs: where conversations are kept and what runs the agent. */
+export interface AssistantHost {
+  store: EventStore;
+  runner: AgentRunner;
+}
+
+export function marketRoutes(market: Market, library: Library, secretStore: 'keychain' | 'file', host?: AssistantHost): MarketRoute[] {
+  /** Conversations with the assistant that are being answered right now. */
+  const answering = new Set<string>();
+  const loadTeam = (id: string): TeamConfig | undefined => {
+    try {
+      return library.load(id);
+    } catch {
+      return undefined;
+    }
+  };
+  const conversation = (team: string) => host?.store.listRuns(500).find((r) => r.kind === 'storefront' && r.team === team);
+
   let wallet: { at: number; balance?: string; feeBps?: number } | undefined;
   /** The account's balance and the platform fee, read at most every half minute. */
   const readWallet = async () => {
@@ -41,7 +63,7 @@ export function marketRoutes(market: Market, library: Library, secretStore: 'key
         base.problems = storefrontProblems(readFileSync(file, 'utf8'), team);
         if (!base.problems.length) {
           const sf = loadStorefront(t.dir, team);
-          Object.assign(base, { title: sf.title, priceNear: sf.price_near, mode: sf.intake.mode });
+          Object.assign(base, { title: sf.title, summary: sf.summary, priceNear: sf.price_near, mode: sf.intake.mode, cover: sf.examples.find((e) => e.file && /\.(png|jpe?g|gif|webp|mp4|webm|mov)$/i.test(e.file))?.file });
           // Price, windows or texts changed since it was published (example media aside).
           const l = published?.listing;
           if (l) {
@@ -118,9 +140,54 @@ export function marketRoutes(market: Market, library: Library, secretStore: 'key
       const dir = library.teamDir(p.team!);
       const file = join(dir, STOREFRONT_FILE);
       const team = library.load(p.team!);
-      if (!existsSync(file)) return { exists: false, yaml: storefrontTemplate(team), problems: [] };
+      // What the form offers: the team's steps that have a gate, and the example media in its folder.
+      const more = { name: team.name, gates: team.steps.filter((s) => s.gate).map((s) => s.id), media: mediaFiles(dir) };
+      if (!existsSync(file)) return { exists: false, yaml: storefrontTemplate(team), problems: [], ...more };
       const yaml = readFileSync(file, 'utf8');
-      return { exists: true, yaml, problems: storefrontProblems(yaml, team) };
+      return { exists: true, yaml, problems: storefrontProblems(yaml, team), ...more };
+    }],
+    // A new storefront for a team that has none: the file to start from, written.
+    ['POST', '/api/market/storefronts/:team', (p) => {
+      const file = join(library.teamDir(p.team!), STOREFRONT_FILE);
+      if (!existsSync(file)) library.writeFile(p.team!, STOREFRONT_FILE, storefrontTemplate(library.load(p.team!)));
+      return { exists: true };
+    }],
+    // Drop a storefront that was never published. A published one is closed for orders instead (its orders and record stay).
+    ['DELETE', '/api/market/storefronts/:team', (p) => {
+      const dir = library.teamDir(p.team!);
+      const o = market.overview();
+      if (o.listings.some((l) => l.team === dir && l.contractId === o.settings.contractId)) throw new MarketError('this storefront is published; close it for orders instead');
+      rmSync(join(dir, STOREFRONT_FILE), { force: true });
+      return { ok: true };
+    }],
+    // ---- the assistant that sets a storefront up in a chat (see assistant.ts)
+    ['GET', '/api/market/storefronts/:team/assistant', (p) => {
+      library.teamDir(p.team!);
+      const run = conversation(p.team!);
+      if (!run || !host) return { runId: null, busy: false, thread: [], saves: [], costUsd: 0 };
+      const events = host.store.events(run.id);
+      return {
+        runId: run.id,
+        busy: answering.has(run.id),
+        thread: chatThreads(events, [run.repo])[SHOPKEEPER] ?? [],
+        saves: events.filter((e) => e.type === 'storefront.saved').map((e) => ({ ts: e.ts, ...e.data })),
+        costUsd: events.filter((e) => e.type === 'agent.finished' || e.type === 'agent.error').reduce((n, e) => n + Number(e.data.cost_usd ?? 0), 0),
+      };
+    }],
+    ['POST', '/api/market/storefronts/:team/assistant', async (p, body) => {
+      if (!host) throw new MarketError('the assistant is not available here');
+      const team = p.team!;
+      const teamDir = library.teamDir(team);
+      const b = (body ?? {}) as { message?: unknown; fresh?: unknown };
+      const message = typeof b.message === 'string' ? b.message.trim() : '';
+      if (!message) throw new MarketError('say what you need');
+      const run = b.fresh === true ? undefined : conversation(team);
+      if (run && answering.has(run.id)) throw new MarketError('the assistant is still answering');
+      const settings = library.settings();
+      const { runId, done } = await assist({ store: host.store, runner: host.runner, teamId: team, teamDir, team: () => loadTeam(team), write: (yaml) => library.writeFile(team, STOREFRONT_FILE, yaml), runId: run?.id, message, model: settings.designerModel, effort: settings.designerEffort });
+      answering.add(runId);
+      void done.finally(() => answering.delete(runId));
+      return { runId };
     }],
     ['PUT', '/api/market/storefronts/:team', (p, body) => {
       const yaml = (body as { yaml?: unknown })?.yaml;

@@ -2,7 +2,9 @@
 // The covibe market relay. The owner's covibe app is not reachable from the
 // internet, so this small public service carries what should not go on-chain:
 // encrypted order inputs, listing pages and media, delivery bundles, receipts
-// and the status feed of a run. It holds no funds and no keys; who may read or
+// and the status feed of a run. Files of any size (footage a customer sends,
+// a video the team delivers) travel as encrypted chunks ("blobs"), each stored
+// under its own hash; the order's input and the delivery name their chunks. It holds no funds and no keys; who may read or
 // write what is decided from the market contract's state, so anyone can run
 // their own relay against the same contract.
 //
@@ -12,7 +14,7 @@
 //   RELAY_PORT       port (default 4480)
 //   RELAY_HOST       address to listen on (default 127.0.0.1)
 //   RELAY_DATA       data folder (default ./data)
-//   RELAY_MAX_MB     largest upload in MB (default 64)
+//   RELAY_MAX_MB     largest single upload in MB (default 64); files are sent in chunks below it
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -124,7 +126,7 @@ export async function startRelay(opts = {}) {
   const contract = opts.contract ?? process.env.RELAY_CONTRACT;
   const chain = opts.chain ?? new Chain(opts.rpc ?? process.env.RELAY_RPC ?? 'https://test.rpc.fastnear.com', contract);
   if (!opts.chain && !contract) throw new Error('set RELAY_CONTRACT to the market contract account');
-  for (const d of ['inputs', 'media', 'listings', 'orders']) mkdirSync(join(data, d), { recursive: true });
+  for (const d of ['inputs', 'blobs', 'media', 'listings', 'orders']) mkdirSync(join(data, d), { recursive: true });
 
   const save = (file, bytes) => {
     mkdirSync(dirname(file), { recursive: true });
@@ -177,9 +179,23 @@ export async function startRelay(opts = {}) {
     return order;
   };
 
-  const sendFile = (res, file, type) => {
+  const sendFile = (res, file, type, req) => {
     if (!existsSync(file)) throw new HttpError(404, 'not found');
-    res.writeHead(200, { 'content-type': type, 'content-length': statSync(file).size, 'x-content-type-options': 'nosniff' });
+    const size = statSync(file).size;
+    const head = { 'content-type': type, 'accept-ranges': 'bytes', 'x-content-type-options': 'nosniff' };
+    // A byte range, so a video on a listing page can be played and skipped through.
+    const range = /^bytes=(\d*)-(\d*)$/.exec(String(req?.headers.range ?? ''));
+    if (range && (range[1] || range[2])) {
+      const start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
+      const end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+      if (start > end || start >= size) {
+        res.writeHead(416, { 'content-range': `bytes */${size}` });
+        return res.end();
+      }
+      res.writeHead(206, { ...head, 'content-length': end - start + 1, 'content-range': `bytes ${start}-${end}/${size}` });
+      return createReadStream(file, { start, end }).pipe(res);
+    }
+    res.writeHead(200, { ...head, 'content-length': size });
     createReadStream(file).pipe(res);
   };
 
@@ -193,7 +209,7 @@ export async function startRelay(opts = {}) {
     const parts = path.split('/').filter(Boolean);
     const m = req.method;
 
-    if (path === '/health' && m === 'GET') return json(res, 200, { ok: true, contract: chain.contract ?? null, max_mb: maxBytes >> 20 });
+    if (path === '/health' && m === 'GET') return json(res, 200, { ok: true, contract: chain.contract ?? null, max_mb: maxBytes >> 20, blobs: true });
 
     // Encrypted order inputs: stored under their own hash before the order exists, read through the order.
     if (parts[0] === 'inputs' && HASH.test(parts[1] ?? '') && parts.length === 2 && m === 'PUT') {
@@ -203,10 +219,23 @@ export async function startRelay(opts = {}) {
       return json(res, 200, { hash: parts[1], size: bytes.length });
     }
 
+    // Encrypted chunks of files (order inputs and deliveries), stored under their own hash. Each is
+    // ciphertext whose key travels inside the sealed input or the sealed delivery, so the hash is all a reader needs.
+    if (parts[0] === 'blobs' && HASH.test(parts[1] ?? '') && parts.length === 2) {
+      const file = join(data, 'blobs', parts[1]);
+      if (m === 'GET') return sendFile(res, file, 'application/octet-stream');
+      if (m === 'PUT') {
+        const bytes = await body(req);
+        if (sha(bytes) !== parts[1]) throw new HttpError(400, 'the content does not match its hash');
+        if (!existsSync(file)) save(file, bytes);
+        return json(res, 200, { hash: parts[1], size: bytes.length });
+      }
+    }
+
     // Listing media: public to read, stored under its hash by an account that signs the upload.
     if (parts[0] === 'media' && HASH.test(parts[1] ?? '') && parts.length === 2) {
       const file = join(data, 'media', parts[1]);
-      if (m === 'GET') return sendFile(res, file, existsSync(`${file}.type`) ? readFileSync(`${file}.type`, 'utf8') : 'application/octet-stream');
+      if (m === 'GET') return sendFile(res, file, existsSync(`${file}.type`) ? readFileSync(`${file}.type`, 'utf8') : 'application/octet-stream', req);
       if (m === 'PUT') {
         const who = signer(req, path);
         if (!who.account || !(await chain.hasKey(who.account, who.publicKey))) throw new HttpError(403, 'sign media uploads with a key of your NEAR account');
@@ -298,7 +327,8 @@ export async function startRelay(opts = {}) {
 
   const server = createServer((req, res) => {
     res.setHeader('access-control-allow-origin', '*');
-    res.setHeader('access-control-allow-headers', 'content-type, x-covibe-auth');
+    res.setHeader('access-control-allow-headers', 'content-type, x-covibe-auth, range');
+    res.setHeader('access-control-expose-headers', 'content-range, accept-ranges');
     res.setHeader('access-control-allow-methods', 'GET, PUT, POST, OPTIONS');
     if (req.method === 'OPTIONS') {
       res.writeHead(204);

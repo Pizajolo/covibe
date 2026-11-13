@@ -12,7 +12,9 @@ import { accountOf, buildInvocation, extractJson, finishedData, isBalanced, newR
 import type { EventStore } from '../events/store.js';
 import type { Env } from '../runner/backend.js';
 import type { AgentRunner } from '../runner/types.js';
+import { blobProblem, fetchFile } from './blobs.js';
 import { nearToYocto, yoctoToNear } from './near.js';
+import type { Relay } from './relay.js';
 import type { InputField, IntakeDecision, Order, OrderInput, Precheck, Storefront } from './types.js';
 
 const INTAKE_STEP = 'chat';
@@ -89,7 +91,7 @@ export function loadIntakeTeam(home: string, opts: LoadOptions = {}): TeamConfig
   return loadTeam(ensureIntakeTeam(home), opts);
 }
 
-const fileSize = (f: { data: string }) => Math.floor((f.data.length * 3) / 4);
+const fileSize = (f: { data?: string; size?: number }) => (f.data !== undefined ? Math.floor((f.data.length * 3) / 4) : (f.size ?? 0));
 const safeName = (name: string) => basename(name.replace(/\\/g, '/')).replace(/[^\w.\- ()]/g, '_').replace(/^\.+/, '_').slice(0, 120) || 'file';
 
 /** Read a decrypted order input; anything that is not the expected shape is a schema problem. */
@@ -97,7 +99,13 @@ export function parseInput(plain: Buffer): OrderInput {
   const v = JSON.parse(plain.toString('utf8')) as Partial<OrderInput>;
   if (!v || typeof v !== 'object' || v.v !== 1 || typeof v.fields !== 'object' || v.fields === null || !Array.isArray(v.files)) throw new Error('the input is not a covibe order (v1)');
   for (const [k, t] of Object.entries(v.fields)) if (typeof t !== 'string') throw new Error(`field "${k}" is not text`);
-  for (const f of v.files) if (!f || typeof f.field !== 'string' || typeof f.name !== 'string' || typeof f.data !== 'string') throw new Error('a file in the input is malformed');
+  for (const f of v.files) {
+    if (!f || typeof f.field !== 'string' || typeof f.name !== 'string') throw new Error('a file in the input is malformed');
+    // A file is inline (small, base64) or a list of chunks in the relay.
+    if (f.blob === undefined ? typeof f.data !== 'string' : f.data !== undefined) throw new Error(`file "${f.name}" is malformed`);
+    const problem = f.blob === undefined ? undefined : blobProblem(f.blob, f.size);
+    if (problem) throw new Error(`file "${f.name}": ${problem}`);
+  }
   if (v.reply_pubkey !== undefined && typeof v.reply_pubkey !== 'string') throw new Error('reply_pubkey is malformed');
   return v as OrderInput;
 }
@@ -134,7 +142,8 @@ export function prechecks(o: { sf: Storefront; order: Order; sealedBytes: number
       if (def.type === 'files' && n > (def.max_files ?? DEFAULT_MAX_FILES)) schema.push(`"${def.name}" takes at most ${def.max_files ?? DEFAULT_MAX_FILES} files`);
     }
   }
-  const mb = o.sealedBytes / (1 << 20);
+  // The sealed input, plus the files it names in the relay (their sizes are enforced when they are fetched).
+  const mb = (o.sealedBytes + (input?.files ?? []).reduce((n, f) => n + (f.blob ? (f.size ?? 0) : 0), 0)) / (1 << 20);
   const floor = BigInt(nearToYocto(sf.intake.min_price_near));
   const past = (o.pastCosts ?? []).slice(-5);
   const average = past.length ? past.reduce((a, b) => a + b, 0) / past.length : 0;
@@ -157,14 +166,21 @@ export function fileList(input: OrderInput): { field: string; name: string; size
  * Lay an order out as a folder for the team: ORDER.md with what the customer
  * wrote, each file field in its folder, and the (empty) deliverables folder.
  * A team that works in git worktrees gets a repository with a first commit.
+ * Files the customer sent in chunks are fetched from the relay, straight to disk.
  */
-export function writeWorkspace(dir: string, sf: Storefront, input: OrderInput, git: boolean): void {
+export async function writeWorkspace(dir: string, sf: Storefront, input: OrderInput, git: boolean, relay?: Pick<Relay, 'putBlob' | 'blob'>): Promise<void> {
   mkdirSync(dir, { recursive: true });
   for (const f of input.files) {
     const def = sf.inputs.find((i) => i.name === f.field);
     const folder = join(dir, def?.folder ?? f.field);
     mkdirSync(folder, { recursive: true });
-    writeFileSync(join(folder, safeName(f.name)), Buffer.from(f.data, 'base64'));
+    const file = join(folder, safeName(f.name));
+    if (f.blob) {
+      if (!relay) throw new Error(`file "${f.name}" is in the relay, and no relay is set`);
+      await fetchFile(relay, f.blob, f.size ?? 0, file).catch((err) => {
+        throw new Error(`file "${safeName(f.name)}" could not be fetched: ${(err as Error).message}`);
+      });
+    } else writeFileSync(file, Buffer.from(f.data ?? '', 'base64'));
   }
   writeFileSync(join(dir, 'ORDER.md'), orderText(sf, input));
   mkdirSync(join(dir, sf.deliverables.folder), { recursive: true });

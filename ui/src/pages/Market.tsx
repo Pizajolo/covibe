@@ -1,15 +1,16 @@
 // The market: sell a team's work. Storefronts (one per team, published as a
-// listing on NEAR), incoming orders with the intake's recommendation, what
-// was earned, and the connection settings. The server side is src/market.
+// listing on NEAR; see Storefronts.tsx), incoming orders with the intake's
+// recommendation, what was earned, and the connection settings. The server
+// side is src/market.
 import { useEffect, useState } from 'react';
-import { get, post, put, type LocalOrder, type MarketTeam, type MarketView } from '../api';
-import { CodeEditor } from '../components/CodeEditor';
-import { IconAlert, IconArrowLeft, IconArrowRight, IconCheck, IconCoin, IconInfo, IconLoop, IconPlay, IconShield, IconX } from '../components/icons';
+import { get, post, put, type LocalOrder, type MarketView } from '../api';
+import { IconAlert, IconCheck, IconCoin, IconLoop, IconPlay, IconShield, IconX } from '../components/icons';
 import { Toolbar } from '../components/Toolbar';
-import { Copy, Empty, Modal, useAction, useToast } from '../components/ui';
+import { Empty, Modal, useAction, useToast } from '../components/ui';
 import { go, href, useLive } from '../data';
 import { ago, money } from '../format';
 import { openUrl } from './GitView';
+import { StorefrontEditor, Storefronts } from './Storefronts';
 
 type Tab = 'orders' | 'storefronts' | 'earnings' | 'settings';
 const TABS: Tab[] = ['orders', 'storefronts', 'earnings', 'settings'];
@@ -329,170 +330,6 @@ function OrderCard({ o, m, onChanged }: { o: LocalOrder; m: MarketView; onChange
         </Modal>
       )}
     </div>
-  );
-}
-
-// ---- storefronts
-
-function Storefronts({ m, onChanged }: { m: MarketView; onChanged: () => Promise<void> }) {
-  const toast = useToast();
-  const [setActive, busy] = useAction(async (t: MarketTeam, active: boolean) => {
-    await post(`/api/market/storefronts/${t.id}/active`, { active });
-    toast(active ? `${t.title ?? t.name} takes orders again` : `${t.title ?? t.name} takes no new orders`);
-    await onChanged();
-  });
-  if (!m.teams.length)
-    return (
-      <div className="card">
-        <Empty title="No teams yet" action={<button className="btn primary" onClick={() => go('teams')}>Create a team</button>}>
-          A storefront sells the work of one of your teams. The “landing-page” and “reel-cutter” templates come with one.
-        </Empty>
-      </div>
-    );
-  return (
-    <div className="card">
-      <div className="list">
-        {m.teams.map((t) => (
-          <div key={t.id} className="list-row clickable" onClick={() => go('market', 'storefronts', t.id)}>
-            <div className="grow col" style={{ gap: 3 }}>
-              <div className="row">
-                <strong>{t.title ?? t.name}</strong>
-                {t.listingId !== undefined ? (
-                  <span className={`pill ${t.active === false ? '' : 'good'}`}>{t.active === false ? 'Closed for orders' : `Listing ${t.listingId}`}</span>
-                ) : t.hasStorefront ? (
-                  <span className="pill">Not published</span>
-                ) : (
-                  <span className="pill">No storefront</span>
-                )}
-                {t.outdated && <span className="pill warn">Changed since it was published</span>}
-                {t.problems.length > 0 && (
-                  <span className="pill bad" title={t.problems.join('\n')}>
-                    {t.problems.length} problem{t.problems.length === 1 ? '' : 's'}
-                  </span>
-                )}
-              </div>
-              <span className="small muted ellipsis">
-                Team {t.name}
-                {t.priceNear !== undefined ? ` · ${t.priceNear} NEAR per order · intake: ${t.mode}` : ''}
-                {t.stats ? ` · ${t.stats.completed} paid, ${t.stats.declined} declined, ${t.stats.failed + t.stats.expired} refunded, ${t.stats.disputed} disputed` : ''}
-              </span>
-            </div>
-            {t.url && (
-              <span onClick={(e) => e.stopPropagation()} className="row">
-                <Copy text={t.url} label="Copy link" />
-                <button className="btn sm" disabled={busy} onClick={() => void setActive(t, t.active === false)}>
-                  {t.active === false ? 'Open for orders' : 'Close for orders'}
-                </button>
-              </span>
-            )}
-            <IconArrowRight className="faint" />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function StorefrontEditor({ team, market, onChanged }: { team: string; market: MarketView | null; onChanged: () => Promise<void> }) {
-  const toast = useToast();
-  const { value, reload } = useLive(() => get<{ exists: boolean; yaml: string; problems: string[] }>(`/api/market/storefronts/${team}`), [team]);
-  const [yaml, setYaml] = useState<string | null>(null);
-  const [problems, setProblems] = useState<string[]>([]);
-  const [saved, setSaved] = useState(true);
-  useEffect(() => {
-    if (!value) return;
-    setYaml(value.yaml);
-    setProblems(value.problems);
-    setSaved(value.exists);
-  }, [value]);
-  const t = market?.teams.find((x) => x.id === team);
-  const [save, saving] = useAction(async () => {
-    const out = await put<{ problems: string[] }>(`/api/market/storefronts/${team}`, { yaml });
-    setProblems(out.problems);
-    setSaved(true);
-    toast(out.problems.length ? 'Saved, with problems to fix before publishing' : 'Storefront saved');
-    await onChanged();
-  });
-  const [publish, publishing] = useAction(async () => {
-    if (!saved) {
-      const out = await put<{ problems: string[] }>(`/api/market/storefronts/${team}`, { yaml });
-      setProblems(out.problems);
-      setSaved(true);
-      if (out.problems.length) throw new Error('Fix the problems first');
-    }
-    const out = await post<{ listingId: number; created: boolean; url: string }>(`/api/market/storefronts/${team}/publish`);
-    toast(out.created ? `Published as listing ${out.listingId}` : `Listing ${out.listingId} updated`);
-    await Promise.all([onChanged(), reload()]);
-  });
-  return (
-    <>
-      <Toolbar
-        title={
-          <span className="row">
-            <a className="btn ghost sm" href={href('market', 'storefronts')}>
-              <IconArrowLeft />
-            </a>
-            Storefront of {t?.name ?? team}
-          </span>
-        }
-        sub="storefront.yaml, next to the team file. Customers see the page it describes, never the team or its prompts."
-      >
-        <button className="btn" disabled={saving || yaml === null || saved} onClick={() => void save()}>
-          Save
-        </button>
-        <button className="btn primary" disabled={publishing || yaml === null || !market?.ready || (saved && problems.length > 0)} title={market?.ready ? 'Create or update the listing on NEAR and its page in the relay' : 'Set the market up first (Market → Settings)'} onClick={() => void publish()}>
-          {t?.listingId !== undefined ? 'Publish changes' : 'Publish'}
-        </button>
-      </Toolbar>
-      <div className="content">
-        <div className="page">
-          {value && !value.exists && saved === false && (
-            <div className="banner info">
-              <IconInfo /> This team has no storefront yet. This is one to start from; it is written when you save.
-            </div>
-          )}
-          {problems.length > 0 && (
-            <div className="banner bad">
-              <IconAlert />
-              <div className="col" style={{ gap: 2 }}>
-                {problems.map((p) => (
-                  <div key={p}>{p}</div>
-                ))}
-              </div>
-            </div>
-          )}
-          {t?.url && (
-            <div className="banner good">
-              <IconCheck />
-              <div className="grow">
-                Listing {t.listingId} is live{t.active === false ? ' (closed for new orders)' : ''}: <a onClick={() => openUrl(t.url!)}>{t.url}</a>
-              </div>
-              <Copy text={t.url} label="Copy link" />
-            </div>
-          )}
-          <div className="card" style={{ overflow: 'hidden' }}>
-            {yaml === null ? (
-              <div className="card-pad faint small">Loading…</div>
-            ) : (
-              <CodeEditor
-                value={yaml}
-                language="yaml"
-                minHeight={480}
-                onChange={(v) => {
-                  setYaml(v);
-                  setSaved(false);
-                }}
-                onSave={() => void save()}
-              />
-            )}
-          </div>
-          <div className="small muted">
-            <strong>intake.mode</strong> decides who answers an order: <em>manual</em> (you), <em>recommend</em> (the intake agent suggests, you confirm) or <em>auto</em> (the agent accepts when every pre-check passed and its scope fit is high, declines when it says so, and
-            otherwise asks you). <strong>deliverables.gates_required</strong> names the team's steps whose gates must pass before anything is delivered; if they do not, the customer is refunded.
-          </div>
-        </div>
-      </div>
-    </>
   );
 }
 

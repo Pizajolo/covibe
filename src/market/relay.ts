@@ -12,6 +12,9 @@ export interface Relay {
   /** Store an encrypted input under its hash (what a customer's browser does). */
   putInput(bytes: Buffer): Promise<string>;
   orderInput(orderId: number): Promise<Buffer>;
+  /** One encrypted chunk of a file, stored under its hash (see blobs.ts). */
+  putBlob(bytes: Buffer): Promise<string>;
+  blob(hash: string): Promise<Buffer>;
   putBundle(orderId: number, bytes: Buffer): Promise<string>;
   bundle(orderId: number): Promise<Buffer>;
   putReceipt(orderId: number, json: string): Promise<void>;
@@ -82,6 +85,14 @@ export class RelayClient implements Relay {
     await this.ok('PUT', `/inputs/${hash}`, bytes, 'application/octet-stream');
     return hash;
   }
+
+  async putBlob(bytes: Buffer): Promise<string> {
+    const hash = sha256Hex(bytes);
+    await this.ok('PUT', `/blobs/${hash}`, bytes, 'application/octet-stream');
+    return hash;
+  }
+
+  blob = async (hash: string) => Buffer.from(await (await this.ok('GET', `/blobs/${hash}`)).arrayBuffer());
 
   orderInput = async (orderId: number) => Buffer.from(await (await this.ok('GET', `/orders/${orderId}/input`)).arrayBuffer());
 

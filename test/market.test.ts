@@ -1,8 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FileSecrets } from '../src/connections/secrets.js';
-import { generateNearKey, generateSealKey, open, seal, sha256Hex, signMessage, verifyMessage } from '../src/market/crypto.js';
+import { CHUNK_BYTES, fetchFile, putFile } from '../src/market/blobs.js';
+import { generateNearKey, generateSealKey, open, openChunk, seal, sealChunk, sha256Hex, signMessage, verifyMessage } from '../src/market/crypto.js';
 import { verifyReceipt } from '../src/market/delivery.js';
 import { LocalHost } from '../src/market/host.js';
 import { prechecks } from '../src/market/intake.js';
@@ -10,8 +11,8 @@ import { Market } from '../src/market/market.js';
 import { nearToYocto, yoctoToNear } from '../src/market/near.js';
 import { RelayClient } from '../src/market/relay.js';
 import { loadStorefront, storefrontProblems } from '../src/market/storefront.js';
-import type { OrderInput } from '../src/market/types.js';
-import { zip } from '../src/market/zip.js';
+import type { Delivery, OrderInput } from '../src/market/types.js';
+import * as web from '../market/storefront/src/crypto.js';
 // @ts-expect-error the relay is plain JavaScript (its own package)
 import { startRelay } from '../market/relay/server.mjs';
 import { ScriptedRunner, tempDir, writeFiles, type Script } from './helpers.js';
@@ -112,10 +113,21 @@ describe('market crypto', () => {
     expect(verifyMessage(generateNearKey().publicKey, 'hello', sig)).toBe(false);
   });
 
-  it('zips the same files to the same bytes', () => {
-    const files = [{ name: 'a.txt', data: Buffer.from('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') }, { name: 'dir/b.bin', data: Buffer.from([1, 2, 3]) }];
-    expect(zip(files).equals(zip(files))).toBe(true);
-    expect(zip(files).subarray(0, 4).toString('latin1')).toBe('PK\x03\x04');
+
+  it('reads what the storefront\'s browser code encrypts, and the other way round', async () => {
+    // A sealed order input.
+    const key = generateSealKey();
+    const sealed = await web.seal(web.utf8('from the browser'), key.publicKey);
+    expect(open(Buffer.from(sealed), key.privateKey).toString()).toBe('from the browser');
+    // A file's chunks, in both directions: the same key, index and bytes make the same ciphertext.
+    const file = await web.generateFileKey();
+    const plain = Buffer.from('a chunk of footage');
+    const theirs = Buffer.from(await web.sealChunk(file.key, 3, plain));
+    expect(theirs.equals(sealChunk(Buffer.from(file.base64, 'base64'), 3, plain))).toBe(true);
+    expect(openChunk(Buffer.from(file.base64, 'base64'), 3, theirs).equals(plain)).toBe(true);
+    expect(() => openChunk(Buffer.from(file.base64, 'base64'), 4, theirs)).toThrow();
+    const ours = sealChunk(Buffer.from(file.base64, 'base64'), 0, plain);
+    expect(Buffer.from(await web.openChunk(await web.importFileKey(file.base64), 0, ours)).equals(plain)).toBe(true);
   });
 
   it('converts NEAR amounts exactly', () => {
@@ -192,9 +204,11 @@ describe('an order', () => {
     // The customer gets the bundle, checks it against the chain and opens it: only the deliverables folder is in it.
     const bundle = await customer.bundle(id);
     expect(sha256Hex(bundle)).toBe(onChain.bundle_hash);
-    const archive = open(bundle, reply.privateKey);
-    expect(archive.includes(Buffer.from('index.html'))).toBe(true);
-    expect(archive.includes(Buffer.from('notes.md'))).toBe(false);
+    const delivery = JSON.parse(open(bundle, reply.privateKey).toString('utf8')) as Delivery;
+    expect(delivery.files.map((f) => f.name)).toEqual(['index.html']);
+    const page = join(tempDir('covibe-got-'), 'index.html');
+    await fetchFile(customer, delivery.files[0]!.blob, delivery.files[0]!.size, page);
+    expect(readFileSync(page, 'utf8')).toBe('<h1>Acme</h1>\n');
     const receiptText = await (await fetch(`${relay.url}/orders/${id}/receipt`)).text();
     expect(sha256Hex(receiptText)).toBe(onChain.receipt_hash);
     const receipt = JSON.parse(receiptText);
@@ -214,6 +228,38 @@ describe('an order', () => {
     expect((await chain.order(id))!.status).toBe('SETTLED');
     expect(market.store.order(id)!.stage).toBe('closed');
     expect(market.earnings()).toMatchObject({ earned: nearToYocto(1.95), fees: nearToYocto(0.05), settled: 1 });
+  });
+
+  it('takes files of any size in encrypted chunks, and refuses ones that are not what the order says', async () => {
+    const { market, order, relay } = await setup('recommend', good, ', max_input_mb: 6');
+    // A "logo" larger than one chunk, sent the way the storefront sends footage.
+    const src = join(tempDir('covibe-src-'), 'logo.png');
+    const bytes = Buffer.alloc(CHUNK_BYTES + 1234, 7);
+    writeFileSync(src, bytes);
+    const anyone = new RelayClient(relay.url);
+    const sent = await putFile(anyone, src);
+    expect(sent.blob.chunks).toHaveLength(2);
+    // What is in the relay is ciphertext.
+    expect((await anyone.blob(sent.blob.chunks[1]!)).includes(Buffer.alloc(64, 7))).toBe(false);
+    const { id } = await order({ fields: { brief: 'A page' }, files: [{ field: 'logo', name: 'logo.png', ...sent }] });
+    await market.tick();
+    const local = market.store.order(id)!;
+    expect(local.prechecks!.every((c) => c.ok)).toBe(true);
+    expect(local.files).toEqual([{ field: 'logo', name: 'logo.png', size: bytes.length }]);
+    expect(readFileSync(join(local.workspace!, 'assets', 'logo.png')).equals(bytes)).toBe(true);
+
+    // Over the listing's limit: turned down before a byte is fetched.
+    const big = await order({ fields: { brief: 'A page' }, files: [{ field: 'logo', name: 'logo.png', size: 7 << 20, blob: { ...sent.blob, chunks: [sent.blob.chunks[0]!, sent.blob.chunks[0]!] } }] });
+    // A size that hides how much there is: the order cannot be read.
+    const lying = await order({ fields: { brief: 'A page' }, files: [{ field: 'logo', name: 'logo.png', size: 10, blob: sent.blob }] });
+    // Chunks in the wrong order do not decrypt.
+    const swapped = await order({ fields: { brief: 'A page' }, files: [{ field: 'logo', name: 'logo.png', size: sent.size, blob: { ...sent.blob, chunks: [...sent.blob.chunks].reverse() } }] });
+    await market.tick();
+    expect(market.store.order(big.id)!.prechecks!.find((c) => c.name === 'size')!.ok).toBe(false);
+    expect(market.store.order(lying.id)!.prechecks!.find((c) => c.name === 'schema')).toMatchObject({ ok: false });
+    expect(market.store.order(swapped.id)!.prechecks!.find((c) => c.name === 'schema')!.detail).toContain('could not be fetched');
+    for (const o of [big, lying, swapped]) expect(market.store.order(o.id)).toMatchObject({ stage: 'awaiting_owner', recommendation: { action: 'decline' } });
+    expect(market.store.order(swapped.id)!.workspace).toBeUndefined();
   });
 
   it('is refunded when the gates do not pass (auto mode), and nothing is delivered', async () => {

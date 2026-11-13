@@ -3,6 +3,7 @@
 // (market/storefront/src/crypto.ts):
 //   seal/open  ephemeral X25519 → HKDF-SHA256 → AES-256-GCM
 //   sign       ed25519 with a NEAR key ("ed25519:<base58>")
+//   chunks     AES-256-GCM under a file's own key, the chunk's index as the nonce
 import { createCipheriv, createDecipheriv, createHash, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, sign, verify, type KeyObject } from 'node:crypto';
 
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -88,6 +89,27 @@ export function open(sealed: Buffer, privateKey: string): Buffer {
   const decipher = createDecipheriv('aes-256-gcm', key, nonce);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(sealed.subarray(48, sealed.length - 16)), decipher.final()]);
+}
+
+// ---- file chunks
+
+const chunkNonce = (index: number): Buffer => {
+  const nonce = Buffer.alloc(12);
+  nonce.writeUInt32BE(index, 8);
+  return nonce;
+};
+
+/** Encrypt one chunk of a file under the file's key. Layout: ciphertext | tag (16). The key is used for this file only. */
+export function sealChunk(key: Buffer, index: number, plain: Buffer): Buffer {
+  const cipher = createCipheriv('aes-256-gcm', key, chunkNonce(index));
+  return Buffer.concat([cipher.update(plain), cipher.final(), cipher.getAuthTag()]);
+}
+
+export function openChunk(key: Buffer, index: number, sealed: Buffer): Buffer {
+  if (sealed.length < 16) throw new Error('a chunk is too short');
+  const decipher = createDecipheriv('aes-256-gcm', key, chunkNonce(index));
+  decipher.setAuthTag(sealed.subarray(sealed.length - 16));
+  return Buffer.concat([decipher.update(sealed.subarray(0, sealed.length - 16)), decipher.final()]);
 }
 
 // ---- ed25519 with NEAR keys

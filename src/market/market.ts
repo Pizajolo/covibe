@@ -10,19 +10,21 @@ import type { TeamConfig } from '../config/types.js';
 import type { SecretStore } from '../connections/secrets.js';
 import type { RunEvent } from '../events/types.js';
 import { open, seal, sha256Hex } from './crypto.js';
-import { collectDeliverables, eventLogHash, gateResults, signReceipt } from './delivery.js';
+import { putFile } from './blobs.js';
+import { collectDeliverables, eventLogHash, gateResults, mediaType, signReceipt } from './delivery.js';
 import type { RunHost, RunResult } from './host.js';
 import { fileList, intakePrompt, loadIntakeTeam, orderGoal, parseInput, prechecks, writeWorkspace } from './intake.js';
 import { explorerUrl, NearChain, yoctoToNear, type MarketChain } from './near.js';
 import { RelayClient, type Relay } from './relay.js';
 import { buildMeta, listingInput, loadStorefront, metaJson, requiredGates, STOREFRONT_FILE } from './storefront.js';
 import { MarketStore } from './store.js';
-import { MarketError, OPEN_STATUSES, type Earnings, type Listing, type LocalOrder, type MarketSettings, type Order, type OrderInput, type Overview, type Storefront } from './types.js';
-import { zip } from './zip.js';
+import { MarketError, OPEN_STATUSES, type Delivery, type Earnings, type Listing, type LocalOrder, type MarketSettings, type Order, type OrderInput, type Overview, type Storefront } from './types.js';
 
 const PAGE = 50;
 /** Local clocks and block time differ a little; wait this long past a window before acting on it. */
 const CLOCK_MARGIN_MS = 5_000;
+/** The most one delivery may hold. Files go to the relay in chunks, so this is a sanity limit, not the relay's. */
+const MAX_DELIVERY_BYTES = 8 * 2 ** 30;
 
 export interface MarketOptions {
   home: string;
@@ -292,9 +294,15 @@ export class Market {
       }
       const pastCosts = Object.values(this.store.state().orders).filter((o) => o.team === team && o.costUsd !== undefined).map((o) => o.costUsd!);
       const checks = prechecks({ sf, order: local.chain, sealedBytes, input, inputError, pastCosts });
-      const failed = checks.filter((c) => !c.ok);
       const workspace = this.workspaceOf(id);
-      if (input && !failed.length) writeWorkspace(workspace, sf, input, sf.workspace === 'git');
+      // The customer's files are fetched only for an order that passed the rules; one that cannot be fetched fails them.
+      if (input && checks.every((c) => c.ok)) {
+        if (input.files.some((f) => f.blob)) this.log(`order ${id}: fetching ${input.files.length} file${input.files.length === 1 ? '' : 's'} from the relay`);
+        await writeWorkspace(workspace, sf, input, sf.workspace === 'git', this.relay()).catch((err) => {
+          Object.assign(checks.find((c) => c.name === 'schema')!, { ok: false, detail: (err as Error).message });
+        });
+      }
+      const failed = checks.filter((c) => !c.ok);
       this.store.patchOrder(id, {
         prechecks: checks,
         ...(input ? { brief: input.fields, files: fileList(input), ...(input.reply_pubkey ? { replyKey: input.reply_pubkey } : {}) } : {}),
@@ -475,12 +483,23 @@ export class Market {
     const chain = this.chain();
     const key = this.store.nearKey();
     if (!key && !this.fixedChain) throw new MarketError('your NEAR key is missing, so the receipt cannot be signed');
-    const { max_mb } = await relay.health();
-    const entries = collectDeliverables(workspace, sf.deliverables.folder, result.branch, max_mb << 20);
-    if (!entries.length) throw new MarketError(`the checks passed, but ${sf.deliverables.folder}/ is empty: there is nothing to deliver`);
-    const archive = zip(entries);
+    // Each file goes to the relay in encrypted chunks; the bundle is the sealed list of them.
+    const { files, done } = collectDeliverables(workspace, sf.deliverables.folder, result.branch, MAX_DELIVERY_BYTES);
+    const delivery: Delivery = { v: 2, files: [] };
+    try {
+      if (!files.length) throw new MarketError(`the checks passed, but ${sf.deliverables.folder}/ is empty: there is nothing to deliver`);
+      await this.status(id, 'uploading', `The checks passed. Uploading ${files.length === 1 ? 'the result' : `${files.length} files`}…`);
+      for (const f of files) {
+        const type = mediaType(f.name);
+        delivery.files.push({ name: f.name, ...(await putFile(relay, f.path)), ...(type ? { type } : {}) });
+      }
+    } finally {
+      done();
+    }
+    const entries = delivery.files;
+    const manifest = Buffer.from(JSON.stringify(delivery));
     const replyKey = local.replyKey;
-    const bundle = replyKey ? seal(archive, replyKey) : archive;
+    const bundle = replyKey ? seal(manifest, replyKey) : manifest;
     const bundleHash = await relay.putBundle(id, bundle);
     if (bundleHash !== sha256Hex(bundle)) throw new MarketError('the relay stored a different bundle than was sent');
     const started = result.events[0]?.ts ?? new Date().toISOString();

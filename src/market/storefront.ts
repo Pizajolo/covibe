@@ -1,19 +1,19 @@
 // A team's storefront: `storefront.yaml` next to its team.yaml. It says what
 // the listing shows, what an order must contain, when the intake accepts, and
 // which of the team's gates must pass before a delivery goes out.
-import { existsSync, readFileSync } from 'node:fs';
-import { extname, join, resolve, sep } from 'node:path';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import { ConfigError, parseYaml } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
 import { sha256Hex } from './crypto.js';
+import { MAX_EXAMPLE_BYTES, MEDIA, mediaPath, mediaTypeOf } from './media.js';
 import { nearToYocto } from './near.js';
 import type { Relay } from './relay.js';
 import type { ListingInput, ListingMeta, Storefront } from './types.js';
 
 export const STOREFRONT_FILE = 'storefront.yaml';
 const SCHEMA_URL = new URL('../../schemas/storefront.schema.json', import.meta.url);
-const MEDIA: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.pdf': 'application/pdf', '.txt': 'text/plain' };
 
 export const DEFAULT_PRIVACY =
   'Your order is encrypted in your browser and only the team owner can open it. To do the work, the owner and the AI model provider the owner uses will see what you send. Do not include secrets or personal data you would not give a freelancer.';
@@ -104,10 +104,16 @@ export async function buildMeta(sf: Storefront, teamDir: string, relay: Pick<Rel
       examples.push({ title: e.title, ...(e.text ? { text: e.text } : {}) });
       continue;
     }
-    const path = resolve(teamDir, e.file);
-    if (!path.startsWith(resolve(teamDir) + sep) || !existsSync(path)) throw new ConfigError(join(teamDir, STOREFRONT_FILE), [`example file "${e.file}" is not in the team folder`]);
-    const type = MEDIA[extname(path).toLowerCase()];
+    const type = mediaTypeOf(e.file);
     if (!type) throw new ConfigError(join(teamDir, STOREFRONT_FILE), [`example file "${e.file}" is of a type the storefront cannot show (${Object.keys(MEDIA).join(' ')})`]);
+    let path: string;
+    try {
+      path = mediaPath(teamDir, e.file);
+    } catch {
+      throw new ConfigError(join(teamDir, STOREFRONT_FILE), [`example file "${e.file}" is not in the team folder`]);
+    }
+    if (!existsSync(path)) throw new ConfigError(join(teamDir, STOREFRONT_FILE), [`example file "${e.file}" is not in the team folder`]);
+    if (statSync(path).size > MAX_EXAMPLE_BYTES) throw new ConfigError(join(teamDir, STOREFRONT_FILE), [`example file "${e.file}" is larger than ${MAX_EXAMPLE_BYTES >> 20} MB; show a shorter clip`]);
     examples.push({ title: e.title, ...(e.text ? { text: e.text } : {}), media: await relay.putMedia(readFileSync(path), type), media_type: type });
   }
   return { v: 1, title: sf.title, summary: sf.summary, description: sf.description, inputs: sf.inputs, examples, privacy: sf.privacy, max_input_mb: sf.intake.max_input_mb, intake_mode: sf.intake.mode };

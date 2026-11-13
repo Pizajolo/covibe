@@ -40,6 +40,23 @@ export class Relay {
     return hash;
   }
 
+  /** Store one encrypted chunk of a file under its hash. */
+  async putBlob(sealed: Uint8Array<ArrayBuffer>): Promise<string> {
+    const hash = await sha256Hex(sealed);
+    const res = await fetch(`${this.url}/blobs/${hash}`, { method: 'PUT', body: sealed });
+    if (!res.ok) return this.fail(res);
+    return hash;
+  }
+
+  /** One encrypted chunk, checked against its hash. */
+  async blob(hash: string): Promise<Uint8Array<ArrayBuffer>> {
+    const res = await fetch(`${this.url}/blobs/${hash}`);
+    if (!res.ok) return this.fail(res);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if ((await sha256Hex(bytes)) !== hash) throw new Error('a part of the file in the relay does not match its hash');
+    return bytes;
+  }
+
   async status(orderId: number, keys: OrderKeys): Promise<{ ts: string; state: string; text: string }[]> {
     const path = `/orders/${orderId}/status`;
     const res = await fetch(this.url + path, { headers: await this.auth('GET', path, keys) });

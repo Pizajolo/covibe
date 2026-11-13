@@ -2,6 +2,7 @@
 // src/market/crypto.ts byte for byte:
 //   seal/open  ephemeral X25519 → HKDF-SHA256 → AES-256-GCM
 //   sign       ed25519, keys written NEAR's way ("ed25519:<base58>")
+//   chunks     AES-256-GCM under a file's own key, the chunk's index as the nonce
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const MAGIC = new TextEncoder().encode('CVB1');
 const SEAL_INFO = new TextEncoder().encode('covibe-market/seal/v1');
@@ -104,6 +105,31 @@ export async function open(sealed: Uint8Array, privateJwk: JsonWebKey): Promise<
   const theirs = await crypto.subtle.importKey('raw', ephPub, { name: 'X25519' }, false, []);
   const shared = await crypto.subtle.deriveBits({ name: 'X25519', public: theirs }, mine, 256);
   return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: sealed.slice(36, 48) }, await sealKey(shared, ephPub, myPub), sealed.slice(48)));
+}
+
+// ---- file chunks (see src/market/blobs.ts)
+
+const chunkNonce = (index: number): Bytes => {
+  const nonce = new Uint8Array(12);
+  new DataView(nonce.buffer).setUint32(8, index);
+  return nonce;
+};
+
+/** A new key for one file: the key to work with, and its base64 for the order's sealed input. */
+export async function generateFileKey(): Promise<{ key: CryptoKey; base64: string }> {
+  const raw = crypto.getRandomValues(new Uint8Array(32));
+  return { key: await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt']), base64: toBase64(raw) };
+}
+
+export const importFileKey = (base64: string): Promise<CryptoKey> => crypto.subtle.importKey('raw', fromBase64(base64), 'AES-GCM', false, ['decrypt']);
+
+/** Encrypt one chunk of a file. Layout: ciphertext | tag (16). */
+export async function sealChunk(key: CryptoKey, index: number, plain: Uint8Array): Promise<Bytes> {
+  return new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: chunkNonce(index) }, key, plain as Bytes));
+}
+
+export async function openChunk(key: CryptoKey, index: number, sealed: Uint8Array): Promise<Bytes> {
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: chunkNonce(index) }, key, sealed as Bytes));
 }
 
 /** An ed25519 key for one order: its public half goes on-chain, relay requests are signed with the private half. */
