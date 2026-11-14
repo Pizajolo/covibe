@@ -132,7 +132,7 @@ export function Landing({ network, section }: { network?: string; section?: stri
             </li>
             <li>
               <h3>Download, then confirm or dispute</h3>
-              <p>If the checks pass you get the files and a signed receipt. Confirm to release the payment, or dispute within the review window to be refunded.</p>
+              <p>If the checks pass you get the files and a signed receipt. Confirm to release the payment, ask for a revision, or dispute within the review window to be refunded. Afterwards you can rate the team.</p>
             </li>
           </ol>
           <p className="lp-after" data-reveal>

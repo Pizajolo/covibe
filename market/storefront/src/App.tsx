@@ -8,7 +8,7 @@ import { Docs } from './Docs';
 import { Landing } from './Landing';
 import { fetchFile, fileSize, save, sendFile, ZIP_LIMIT, zipFiles } from './files';
 import { loadKeys, Relay, saveKeys } from './relay';
-import type { Config, Delivery, InputField, Listing, ListingMeta, Order, OrderKeys, OrderStatus, Receipt } from './types';
+import type { Config, Delivery, InputField, Listing, ListingMeta, Order, OrderKeys, OrderStatus, Receipt, Review } from './types';
 
 interface Ctx {
   config: Config;
@@ -231,11 +231,28 @@ function SignIn({ config, onClose, onSession }: { config: Config; onClose: () =>
 
 // ---- listings
 
+/** One to five stars, read out as a number. */
+function Stars({ n }: { n: number }) {
+  const full = Math.round(n);
+  return (
+    <span className="stars" role="img" aria-label={`${n.toFixed(1).replace(/\.0$/, '')} of 5 stars`}>
+      {'★'.repeat(full)}
+      <span className="off">{'★'.repeat(5 - full)}</span>
+    </span>
+  );
+}
+
 function Stats({ l }: { l: Listing }) {
   const s = l.stats;
   const refunded = s.failed + s.expired;
+  const average = l.rating_count ? (l.rating_sum ?? 0) / l.rating_count : undefined;
   return (
     <span className="stats" title="Public record of this listing, kept by the contract">
+      {average !== undefined && (
+        <span className="rating">
+          <Stars n={average} /> {average.toFixed(1)} ({l.rating_count})
+        </span>
+      )}
       <span>{s.completed} delivered</span>
       {s.declined > 0 && <span>{s.declined} declined</span>}
       {refunded > 0 && <span>{refunded} refunded</span>}
@@ -295,11 +312,14 @@ function ListingPage({ ctx, id }: { ctx: Ctx; id: number }) {
   const { value, error } = useLoad(async () => {
     const listing = await ctx.chain.listing(id);
     if (!listing) throw new Error('This listing does not exist.');
-    return { listing, meta: await ctx.relay.meta(id, listing.meta_hash) };
+    // A contract from before reviews has no such method: the page then shows none.
+    const reviews = await ctx.chain.reviews(id).catch(() => [] as Review[]);
+    return { listing, meta: await ctx.relay.meta(id, listing.meta_hash), reviews: reviews.reverse() };
   }, [id, ctx.chain]);
   if (error) return <div className="note bad">{error}</div>;
   if (!value) return <p className="muted">Loading…</p>;
-  const { listing: l, meta } = value;
+  const { listing: l, meta, reviews } = value;
+  const included = l.revisions ?? 0;
   return (
     <div className="split">
       <article>
@@ -346,7 +366,32 @@ function ListingPage({ ctx, id }: { ctx: Ctx; id: number }) {
           <li>
             You have <strong>{duration(l.review_window_s)}</strong> to download the result and confirm or dispute it. A dispute refunds you and counts against this listing in public. If you do nothing, the owner is paid when the time is up.
           </li>
+          <li>
+            Not quite right? Ask for a revision in that time.{' '}
+            {included > 0 ? (
+              <>
+                <strong>{included === 1 ? 'One revision is' : `${included} revisions are`} included</strong>: the team goes back to work at once. Further ones need the owner's yes.
+              </>
+            ) : (
+              "The owner decides whether the team takes it; if not, the delivery stands and you can still confirm or dispute."
+            )}
+          </li>
         </ol>
+        <h2>Reviews</h2>
+        {reviews.length === 0 && <p className="muted">No reviews yet. Only customers whose order was delivered can write one.</p>}
+        <ul className="reviews">
+          {reviews.map((r) => (
+            <li key={r.order_id}>
+              <div className="row">
+                <Stars n={r.stars} />
+                <span className="muted small">
+                  {accountLink(ctx.config, r.customer)}, {when(r.created_at)}
+                </span>
+              </div>
+              {r.comment && <p>{r.comment}</p>}
+            </li>
+          ))}
+        </ul>
       </article>
       <aside>
         {l.active ? <OrderForm ctx={ctx} listing={l} meta={meta} /> : <div className="note warn">This team takes no new orders right now.</div>}
@@ -514,6 +559,7 @@ function FilePicker({ def, files, disabled, onChange }: { def: InputField; files
 // ---- orders
 
 const STATUS: Record<OrderStatus, { label: string; tone: string; text: string }> = {
+  REVISION_REQUESTED: { label: 'Revision asked: waiting for the owner', tone: 'info', text: 'You asked for a revision. The owner decides whether the team takes it. Until then you can still confirm or dispute the delivery you have.' },
   PLACED: { label: 'Waiting for the owner', tone: 'info', text: 'Your payment is in escrow. The owner has not answered yet.' },
   ACCEPTED: { label: 'The team is working', tone: 'info', text: 'The owner took your order. The price stays in escrow until the result is delivered and reviewed.' },
   DELIVERED: { label: 'Delivered: your review', tone: 'good', text: "The team's checks passed and the result is ready. Download it, then confirm or dispute." },
@@ -549,7 +595,8 @@ function OrdersPage({ ctx }: { ctx: Ctx }) {
         {value?.map((o) => (
           <a key={o.id} className="card rowcard" href={`#/order/${o.id}`}>
             <strong>Order #{o.id}</strong>
-            <span className={`pill ${STATUS[o.status].tone}`}>{STATUS[o.status].label}</span>
+            <span className={`pill ${STATUS[o.status].tone}`}>{o.status === 'ACCEPTED' && o.revisions_used ? 'In revision' : STATUS[o.status].label}</span>
+            {o.review && <Stars n={o.review.stars} />}
             <span className="spacer" />
             <span className="muted">{when(o.created_at)}</span>
             <strong>{near(o.price)} NEAR</strong>
@@ -581,10 +628,20 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
   const [actionError, setActionError] = useState<string | undefined>();
   const [disputing, setDisputing] = useState(false);
   const [reason, setReason] = useState('');
+  const [revising, setRevising] = useState(false);
+  const [note, setNote] = useState('');
+  const [stars, setStars] = useState(0);
+  const [comment, setComment] = useState('');
   const [download, setDownload] = useState<string | undefined>();
   const [delivery, setDelivery] = useState<Delivery | undefined>();
   const [checked, setChecked] = useState<Checked | undefined>();
   const [, tick] = useState(0);
+  // A revision replaces the delivery: forget the one that was opened.
+  const bundleHash = value?.order.bundle_hash;
+  useEffect(() => {
+    setDelivery(undefined);
+    setDownload(undefined);
+  }, [bundleHash]);
   useEffect(() => {
     const timer = setInterval(() => tick((n) => n + 1), 1000);
     return () => clearInterval(timer);
@@ -617,7 +674,12 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
   if (!value || !order) return <p className="muted">Loading…</p>;
   const { listing, keys, feed } = value;
   const mine = ctx.session?.accountId === order.customer;
-  const status = STATUS[order.status];
+  const inRevision = order.status === 'ACCEPTED' && (order.revisions_used ?? 0) > 0;
+  const status = inRevision ? { label: 'In revision', tone: 'info', text: `The team is working on your revision (${order.revisions_used}). The delivery you have stays yours to confirm or dispute if the revision cannot be completed.` } : STATUS[order.status];
+  const revisionsLeft = Math.max(0, (order.revisions_included ?? 0) - (order.revisions_used ?? 0));
+  const requestWaiting = order.status === 'REVISION_REQUESTED';
+  const answerBy = (order.revision_requested_at ?? 0) + listing.accept_window_s * 1000;
+  const canReview = mine && !!order.closed_at && !!order.delivered_at && !order.review;
   const acceptBy = order.created_at + listing.accept_window_s * 1000;
   const deliverBy = (order.accepted_at ?? 0) + listing.delivery_window_s * 1000;
   const reviewBy = (order.delivered_at ?? 0) + listing.review_window_s * 1000;
@@ -631,6 +693,7 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
     try {
       await ctx.session.call(method, args);
       setDisputing(false);
+      setRevising(false);
       await reload();
     } catch (err) {
       setActionError((err as Error).message);
@@ -664,6 +727,27 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
     }
   };
 
+  /** Ask for a revision: the note is encrypted to the team like the order was, and only its hash goes on-chain. */
+  const requestRevision = async () => {
+    if (!ctx.session) return ctx.signIn();
+    setBusy('revision');
+    setActionError(undefined);
+    try {
+      const hash = await ctx.relay.putBlob(await seal(utf8(JSON.stringify({ v: 1, note: note.trim() })), listing.intake_pubkey));
+      await ctx.session.call('request_revision', { order_id: order.id, note_hash: hash });
+      setRevising(false);
+      setNote('');
+      // The delivery shown is about to be replaced.
+      setDelivery(undefined);
+      setDownload(undefined);
+      await reload();
+    } catch (err) {
+      setActionError((err as Error).message);
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
   return (
     <div className="order">
       <a className="back" href="#/orders">
@@ -686,7 +770,7 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
         </dd>
         <dt>In escrow</dt>
         <dd>
-          {near(order.price)} NEAR {['PLACED', 'ACCEPTED', 'DELIVERED'].includes(order.status) ? 'held by the contract' : order.status === 'SETTLED' ? 'paid to the owner' : 'refunded to you'}
+          {near(order.price)} NEAR {['PLACED', 'ACCEPTED', 'DELIVERED', 'REVISION_REQUESTED'].includes(order.status) ? 'held by the contract' : order.status === 'SETTLED' ? 'paid to the owner' : 'refunded to you'}
         </dd>
         <dt>Ordered</dt>
         <dd>{when(order.created_at)}</dd>
@@ -706,6 +790,20 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
           <>
             <dt>Your review</dt>
             <dd>{reviewOpen ? `${left(reviewBy)} left (until ${when(reviewBy)}); after that the owner is paid` : 'The review window is over; the order can be settled.'}</dd>
+          </>
+        )}
+        {requestWaiting && (
+          <>
+            <dt>Owner's answer</dt>
+            <dd>{Date.now() > answerBy ? 'The owner did not answer in time. You can stop waiting; the delivery stands and your review time starts again.' : `due in ${left(answerBy)} (by ${when(answerBy)})`}</dd>
+          </>
+        )}
+        {(order.revisions_included ?? 0) > 0 && (
+          <>
+            <dt>Revisions</dt>
+            <dd>
+              {order.revisions_used ?? 0} used, {revisionsLeft} of {order.revisions_included} included left
+            </dd>
           </>
         )}
       </dl>
@@ -759,17 +857,27 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
 
       {actionError && <div className="note bad">{actionError}</div>}
       <div className="actions">
-        {order.status === 'DELIVERED' && mine && (
+        {(order.status === 'DELIVERED' || requestWaiting) && mine && (
           <>
             <button className="btn primary" disabled={!!busy} onClick={() => void act('confirm', 'confirm_order', { order_id: order.id })}>
               {busy === 'confirm' ? 'Confirming…' : 'Confirm and pay the owner'}
             </button>
             {reviewOpen && (
+              <button className="btn" disabled={!!busy} onClick={() => setRevising(true)}>
+                Ask for a revision
+              </button>
+            )}
+            {(reviewOpen || requestWaiting) && (
               <button className="btn" disabled={!!busy} onClick={() => setDisputing(true)}>
                 Dispute
               </button>
             )}
           </>
+        )}
+        {requestWaiting && Date.now() > answerBy && (
+          <button className="btn" disabled={!!busy} onClick={() => void act('expire', 'expire_order', { order_id: order.id })}>
+            {busy === 'expire' ? 'One moment…' : 'Stop waiting for the owner'}
+          </button>
         )}
         {order.status === 'DELIVERED' && !reviewOpen && !mine && (
           <button className="btn" disabled={!!busy} onClick={() => void act('settle', 'settle_order', { order_id: order.id })}>
@@ -782,12 +890,71 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
           </button>
         )}
         {order.status === 'DELIVERED' && !mine && ctx.session && <span className="muted small">Sign in as {order.customer} to confirm or dispute.</span>}
-        {!ctx.session && ['PLACED', 'ACCEPTED', 'DELIVERED'].includes(order.status) && (
+        {!ctx.session && ['PLACED', 'ACCEPTED', 'DELIVERED', 'REVISION_REQUESTED'].includes(order.status) && (
           <button className="btn" onClick={ctx.signIn}>
             Sign in to act on this order
           </button>
         )}
       </div>
+
+      {order.review && (
+        <section className="card review">
+          <h2>{mine ? 'Your review' : 'Review'}</h2>
+          <Stars n={order.review.stars} />
+          {order.review.comment && <p>{order.review.comment}</p>}
+        </section>
+      )}
+      {canReview && (
+        <section className="card review">
+          <h2>Rate this order</h2>
+          <p className="muted">Your stars and comment appear on the team's page under your account name. A review is stored on-chain and cannot be changed.</p>
+          <div className="star-pick" role="radiogroup" aria-label="Stars">
+            {[1, 2, 3, 4, 5].map((n) => (
+              <button key={n} type="button" role="radio" aria-checked={stars === n} aria-label={`${n} of 5 stars`} className={n <= stars ? 'on' : ''} onClick={() => setStars(n)}>
+                ★
+              </button>
+            ))}
+          </div>
+          <label>
+            Comment <em>(optional)</em>
+            <textarea rows={3} maxLength={500} value={comment} onChange={(e) => setComment(e.target.value)} name="comment" />
+          </label>
+          <div className="row">
+            <button className="btn primary" disabled={!!busy || !stars} onClick={() => void act('review', 'review_order', { order_id: order.id, stars, comment: comment.trim() || null })}>
+              {busy === 'review' ? 'Publishing…' : 'Publish the review'}
+            </button>
+            {!stars && <span className="muted small">Choose one to five stars.</span>}
+          </div>
+        </section>
+      )}
+
+      {revising && (
+        <div className="veil" onClick={() => setRevising(false)}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Ask for a revision">
+            <h2>Ask for a revision</h2>
+            <p className="muted">
+              {revisionsLeft > 0
+                ? `This order includes ${revisionsLeft === 1 ? 'one more revision' : `${revisionsLeft} more revisions`}: the team goes back to work at once and has ${duration(listing.delivery_window_s)} to deliver again.`
+                : `The owner decides within ${duration(listing.accept_window_s)} whether the team takes it. If not, the delivery you have stands and your review time starts again.`}{' '}
+              Your payment stays in escrow.
+            </p>
+            <label>
+              What should change?
+              <textarea rows={5} maxLength={4000} value={note} onChange={(e) => setNote(e.target.value)} name="revision" />
+              <small>Encrypted in your browser; only the team's owner can read it. Keep it within what you ordered.</small>
+            </label>
+            <div className="row">
+              <span className="spacer" />
+              <button className="btn" onClick={() => setRevising(false)}>
+                Cancel
+              </button>
+              <button className="btn primary" disabled={!!busy || !note.trim()} onClick={() => void requestRevision()}>
+                {busy === 'revision' ? 'Sending…' : 'Ask for the revision'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {disputing && (
         <div className="veil" onClick={() => setDisputing(false)}>

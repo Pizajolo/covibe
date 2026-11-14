@@ -1,5 +1,5 @@
 import { nearToYocto, type MarketChain, type TxResult } from '../src/market/near.js';
-import type { ChainConfig, Listing, ListingInput, Order } from '../src/market/types.js';
+import type { ChainConfig, Listing, ListingInput, Order, Review } from '../src/market/types.js';
 
 export const OWNER = 'owner.test';
 export const CUSTOMER = 'alice.test';
@@ -10,6 +10,7 @@ export class FakeChain implements MarketChain {
   accountId = OWNER;
   listingsById: Listing[] = [];
   ordersById: Order[] = [];
+  reviewsById: Review[] = [];
   private n = 0;
   private now = () => Date.now();
   private tx = <T>(value: T): TxResult<T> => ({ tx: `tx${++this.n}`, value });
@@ -55,7 +56,7 @@ export class FakeChain implements MarketChain {
     const l = this.listingsById[listingId]!;
     if (!l.active) throw new Error('this listing takes no orders right now');
     if (price !== l.price) throw new Error('attach exactly the price');
-    this.ordersById.push({ id: this.ordersById.length, listing_id: listingId, customer: CUSTOMER, owner: l.owner, price, fee_bps: 250, input_hash: inputHash, access_key: accessKey ?? null, status: 'PLACED', created_at: this.now(), accepted_at: null, delivered_at: null, closed_at: null, receipt_hash: null, bundle_hash: null, reason: null });
+    this.ordersById.push({ id: this.ordersById.length, listing_id: listingId, customer: CUSTOMER, owner: l.owner, price, fee_bps: 250, input_hash: inputHash, access_key: accessKey ?? null, status: 'PLACED', created_at: this.now(), accepted_at: null, delivered_at: null, closed_at: null, receipt_hash: null, bundle_hash: null, reason: null, revisions_included: l.revisions ?? 0, revisions_used: 0, revision_hash: null, revision_requested_at: null, review: null });
     return this.tx(this.ordersById.length - 1);
   };
   acceptOrder = async (id: number) => {
@@ -77,7 +78,33 @@ export class FakeChain implements MarketChain {
     return this.close(o, 'SETTLED');
   };
   expireOrder = async (id: number) => this.close(this.get(id, 'PLACED', 'ACCEPTED'), 'EXPIRED');
-  confirmOrder = async (id: number) => this.close(this.get(id, 'DELIVERED'), 'SETTLED');
-  disputeOrder = async (id: number, reason?: string) => this.close(this.get(id, 'DELIVERED'), 'DISPUTED', reason);
+  confirmOrder = async (id: number) => this.close(this.get(id, 'DELIVERED', 'REVISION_REQUESTED'), 'SETTLED');
+  disputeOrder = async (id: number, reason?: string) => this.close(this.get(id, 'DELIVERED', 'REVISION_REQUESTED'), 'DISPUTED', reason);
+  requestRevision = async (id: number, noteHash: string) => {
+    const o = this.get(id, 'DELIVERED');
+    o.revision_hash = noteHash;
+    const included = (o.revisions_used ?? 0) < (o.revisions_included ?? 0);
+    if (included) Object.assign(o, { status: 'ACCEPTED', accepted_at: this.now(), revisions_used: (o.revisions_used ?? 0) + 1 });
+    else Object.assign(o, { status: 'REVISION_REQUESTED', revision_requested_at: this.now() });
+    return this.tx(included);
+  };
+  answerRevision = async (id: number, accept: boolean, reason?: string) => {
+    const o = this.get(id, 'REVISION_REQUESTED');
+    o.revision_requested_at = null;
+    if (accept) Object.assign(o, { status: 'ACCEPTED', accepted_at: this.now(), revisions_used: (o.revisions_used ?? 0) + 1 });
+    else Object.assign(o, { status: 'DELIVERED', delivered_at: this.now(), reason: reason ?? null });
+    return this.tx(undefined);
+  };
+  reviewOrder = async (id: number, stars: number, comment?: string) => {
+    const o = this.get(id, 'SETTLED', 'DISPUTED');
+    if (o.review) throw new Error('this order has a review already');
+    o.review = { order_id: id, listing_id: o.listing_id, customer: o.customer, stars, comment: comment ?? '', created_at: this.now() };
+    this.reviewsById.push(o.review);
+    const l = this.listingsById[o.listing_id]!;
+    l.rating_count = (l.rating_count ?? 0) + 1;
+    l.rating_sum = (l.rating_sum ?? 0) + stars;
+    return this.tx(undefined);
+  };
+  reviews = async (listingId: number) => this.reviewsById.filter((r) => r.listing_id === listingId);
 }
 

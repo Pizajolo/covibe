@@ -35,3 +35,5 @@ storefront:
   deliverables:
     folder: out
     gates_required: [review]
+  revisions:
+    included: 1                # one revision per order is done without asking the owner

@@ -61,7 +61,10 @@ function orderLine(o: LocalOrder): string {
   const head = `${bold(`#${o.id}`)}  ${o.chain.status.padEnd(9)} ${yoctoToNear(o.chain.price).padStart(6)} NEAR  ${o.chain.customer}`;
   const state = o.stage === 'awaiting_owner' || o.stage === 'needs_owner' ? yellow(STAGE[o.stage]) : dim(STAGE[o.stage]);
   const lines = [`${head}  ${state}`];
-  if (o.stage === 'awaiting_owner') {
+  if (o.stage === 'awaiting_owner' && o.chain.status === 'REVISION_REQUESTED') {
+    lines.push(`      the customer asks for a revision (${o.revision?.n ?? '?'}): ${o.revision?.note?.replace(/\s+/g, ' ').slice(0, 400) ?? o.revision?.problem ?? ''}`);
+    lines.push(dim(`      covibe market accept ${o.id}   |   covibe market decline ${o.id} --reason "…"   (declining keeps the delivery as it is)`));
+  } else if (o.stage === 'awaiting_owner') {
     for (const c of o.prechecks ?? []) lines.push(`      ${c.ok ? green('✓') : red('✗')} ${c.name}: ${c.detail}`);
     if (o.brief) for (const [k, v] of Object.entries(o.brief)) lines.push(dim(`      ${k}: ${v.replace(/\s+/g, ' ').slice(0, 200)}`));
     if (o.intake) lines.push(`      intake: ${o.intake.decision}, scope fit ${o.intake.scope_fit.toFixed(2)}, ${o.intake.estimated_cost}${o.intake.risks.length ? `; risks: ${o.intake.risks.join('; ')}` : ''}`);
@@ -197,14 +200,24 @@ export async function marketCommand(args: string[], flags: MarketFlags): Promise
           // Only the transaction: the process that watches sees it and starts the team.
           const local = market.store.order(id);
           if (!local) throw new MarketError(`order ${id} is not one of yours`);
+          if (local.chain.status === 'REVISION_REQUESTED') {
+            if (!local.revision?.note) throw new MarketError(`the revision cannot be taken: ${local.revision?.problem ?? 'its note has not been read yet'}`);
+            // Only the transaction, as for an order: the process that watches starts the team.
+            const { tx } = await market.chain().answerRevision(id, true);
+            market.store.patchOrder(id, { txs: { revision: tx } });
+            console.log(green(`✓ revision of order ${id} taken`));
+            console.log(dim(`  ${market.explorer('tx', tx)}\n  the team starts where covibe watches (the app, or covibe market watch)`));
+            return 0;
+          }
           if (!local.workspace) throw new MarketError(`order ${id} cannot be taken: ${local.recommendation?.reason ?? 'its input could not be read'}`);
           const { tx } = await market.chain().acceptOrder(id);
           market.store.patchOrder(id, { decidedBy: 'owner', txs: { accept: tx } });
           console.log(green(`✓ order ${id} accepted`));
           console.log(dim(`  ${market.explorer('tx', tx)}\n  the team starts where covibe watches (the app, or covibe market watch)`));
         } else {
+          const revision = sub === 'decline' && market.store.order(id)?.chain.status === 'REVISION_REQUESTED';
           const tx = sub === 'decline' ? await market.decline(id, flags.reason) : await market.fail(id, flags.reason);
-          console.log(green(`✓ order ${id} ${sub === 'decline' ? 'declined' : 'failed'}; the customer is refunded`));
+          console.log(green(revision ? `✓ revision of order ${id} turned down; the delivery stands` : `✓ order ${id} ${sub === 'decline' ? 'declined' : 'failed'}; the customer is refunded`));
           console.log(dim(`  ${market.explorer('tx', tx)}`));
         }
         return 0;

@@ -55,7 +55,7 @@ export function marketRoutes(market: Market, library: Library, secretStore: 'key
       const file = join(t.dir, STOREFRONT_FILE);
       const base: MarketTeam = { id: t.id, name: t.name, description: t.description, hasStorefront: existsSync(file), problems: [] };
       const published = view.listings.find((l) => l.team === t.dir && l.contractId === view.settings.contractId);
-      if (published) Object.assign(base, { listingId: published.listingId, url: published.url, active: published.listing?.active, stats: published.listing?.stats });
+      if (published) Object.assign(base, { listingId: published.listingId, url: published.url, active: published.listing?.active, stats: published.listing?.stats, ...(published.listing?.rating_count ? { rating: { count: published.listing.rating_count, sum: published.listing.rating_sum ?? 0 } } : {}) });
       if (!base.hasStorefront) return base;
       try {
         if (!t.valid) throw new Error(`the team file has problems: ${t.problems.join('; ')}`);

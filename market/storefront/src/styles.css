@@ -341,3 +341,18 @@ summary { cursor: pointer; color: var(--text-2); font-size: 14px; }
 .doc-risk { margin: 16px 0; padding: 14px 16px; border-radius: 12px; background: var(--warn-soft); border-left: 5px solid var(--warn); }
 .doc-risk strong { display: block; color: var(--warn); margin-bottom: 4px; }
 .doc-risk p { margin: 0; }
+
+/* Ratings and reviews. */
+.stars { color: #e8a400; letter-spacing: 1px; white-space: nowrap; }
+.stars .off { color: var(--border); }
+.stats .rating { color: var(--text); font-weight: 600; }
+.reviews { list-style: none; margin: 0; padding: 0; }
+.reviews li { padding: 14px 0; border-top: 1px solid var(--border); }
+.reviews li p { margin: 6px 0 0; overflow-wrap: anywhere; }
+.review { margin-top: 24px; display: flex; flex-direction: column; gap: 10px; }
+.review h2, .review p { margin: 0; }
+.star-pick { display: flex; gap: 4px; }
+.star-pick button { font-size: 30px; line-height: 1; padding: 2px 4px; border: 0; background: none; color: var(--border); cursor: pointer; border-radius: 6px; }
+.star-pick button.on { color: #e8a400; }
+.star-pick button:hover { color: #f0b93a; }
+.star-pick button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

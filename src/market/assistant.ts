@@ -50,6 +50,9 @@ storefront:
   deliverables:
     folder: out                           # only this folder of the working folder is delivered to the customer
     gates_required: [render_ok, review]   # ids of the team's steps whose gates must pass before anything is delivered
+  revisions:
+    included: 1                           # revisions per order the team does automatically when the customer asks (0 to 5).
+                                          # A request beyond them waits for the owner's yes or no. Each revision is another run the owner pays for.
 
 # How an order runs, so the page and the goal fit
 The order becomes a working folder: ORDER.md holds what the customer wrote, each files field is in its folder, and the deliverables folder is empty. The team runs its workflow there with the goal above. If every required gate passed, each file in the deliverables folder is delivered to the customer (they can watch a video or look at an image on the order page and download everything); if not, the customer is refunded. So:

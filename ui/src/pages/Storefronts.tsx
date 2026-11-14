@@ -56,6 +56,7 @@ export function Storefronts({ m, onChanged }: { m: MarketView; onChanged: () => 
               </div>
               <span className="tiny faint">
                 {t.priceNear !== undefined ? `${t.priceNear} NEAR per order` : `Team ${t.name}`}
+                {t.rating?.count ? ` · ★ ${(t.rating.sum / t.rating.count).toFixed(1)} (${t.rating.count})` : ''}
                 {t.stats ? ` · ${t.stats.completed} paid · ${t.stats.failed + t.stats.expired + t.stats.declined} refunded · ${t.stats.disputed} disputed` : ''}
               </span>
               {t.url && (
@@ -157,6 +158,8 @@ interface Doc {
   goal?: string;
   deliverables?: { folder?: string; gates_required?: string[] };
   workspace?: 'folder' | 'git';
+  /** Revisions per order the team does without asking the owner. */
+  revisions?: { included?: number };
   /** Domains the team may reach while it works on an order (none unless named). */
   network?: string[];
   privacy?: string;
@@ -753,6 +756,17 @@ function RulesSection({ doc, set }: { doc: Doc; set: SetDoc }) {
             </label>
           ))}
         </div>
+      </Card>
+      <Card title="Revisions" hint="A customer can ask for changes while they review a delivery">
+        <label className="field" style={{ maxWidth: 320 }}>
+          Revisions done automatically, per order
+          <input className="input" type="number" min={0} max={5} step={1} value={doc.revisions?.included ?? ''} placeholder="0" onChange={(e) => set('revisions', e.target.value === '' ? undefined : { included: Math.min(5, Math.max(0, Math.round(Number(e.target.value) || 0))) })} />
+          <span className="help">
+            {doc.revisions?.included
+              ? `The first ${doc.revisions.included === 1 ? 'request' : `${doc.revisions.included} requests`} on an order ${doc.revisions.included === 1 ? 'sends' : 'send'} the team back to work without asking you. Each is another run you pay for, up to the spend cap. Later requests wait for your yes or no.`
+              : 'Every revision request waits for your yes or no. Saying no leaves the delivery as it is.'}
+          </span>
+        </label>
       </Card>
       <Card title="Privacy note" hint="What customers are told about who sees their order">
         <textarea

@@ -7,7 +7,8 @@
 //
 // The key comes from --key-file (a near-cli credentials file, or a file with
 // just the key), from NEAR_PRIVATE_KEY, or from ~/.near-credentials/<network>/<account>.json.
-// Run it again to upgrade the code; an initialised contract keeps its state.
+// Run it again to upgrade the code; an initialised contract keeps its state. A contract from
+// before revisions and reviews is migrated (its listings and orders stay as they are).
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -59,7 +60,16 @@ try {
   config = await provider.callFunction({ contractId: v.account, method: 'get_config', args: {} });
   console.log('the contract was initialised before; its code is upgraded and its state kept');
 } catch {
-  await account.callFunction({
+  // The state does not read with the new code: it is either from an earlier version, or not there yet.
+  let migrated = false;
+  try {
+    await account.callFunction({ contractId: v.account, methodName: 'migrate', args: {} });
+    migrated = true;
+    console.log('the contract held state from an earlier version; it was migrated, its listings and orders kept');
+  } catch {
+    // no earlier state: a first deployment
+  }
+  if (!migrated) await account.callFunction({
     contractId: v.account,
     methodName: 'new',
     args: { treasury: v.treasury ?? v.account, fee_bps: Number(v['fee-bps']), min_price: nearToYocto(v['min-price']).toString(), max_price: nearToYocto(v['max-price']).toString(), max_open_orders: Number(v['max-open-orders']) },

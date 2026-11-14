@@ -3,7 +3,7 @@
 // pasted developer key so the flow can be driven without a wallet.
 import { NearConnector } from '@hot-labs/near-connect';
 import { Account, JsonRpcProvider, type KeyPairString } from 'near-api-js';
-import type { Config, Listing, Order } from './types';
+import type { Config, Listing, Order, Review } from './types';
 
 const GAS = '60000000000000';
 const YOCTO = 10n ** 24n;
@@ -44,6 +44,7 @@ export class Chain {
   listings = () => this.view<Listing[]>('get_listings', { from_index: 0, limit: 100 });
   listing = (id: number) => this.view<Listing | null>('get_listing', { listing_id: id });
   order = (id: number) => this.view<Order | null>('get_order', { order_id: id });
+  reviews = (listingId: number) => this.view<Review[]>('get_reviews', { listing_id: listingId, from_index: 0, limit: 100 });
   ordersOf = (customer: string) => this.view<Order[]>('get_orders_by_customer', { customer, from_index: 0, limit: 100 });
 
   /** Does this key belong to the account (is the receipt signed by the owner)? */

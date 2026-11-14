@@ -1010,7 +1010,11 @@ contract. An intake agent screens the order for the owner. If it is accepted, th
               deliver(owner, receipt_hash, bundle_hash)
                     ▼
                 DELIVERED ──dispute(customer, in window)───► DISPUTED → refund
-                    │ ──confirm(customer) or window ends───► SETTLED  → pay owner (minus fee)
+                  ▲ │ ──confirm(customer) or window ends───► SETTLED  → pay owner (minus fee)
+                  │ └─request_revision(customer, in window)
+                  │       ├─ a revision the listing includes ──► ACCEPTED again (the team reworks, then delivers)
+                  │       └─ otherwise ► REVISION_REQUESTED ─answer_revision(owner, yes)─► ACCEPTED again
+                  └──────── answer_revision(owner, no), or no answer in the accept window
 ```
 
 1. **The owner publishes.** A `storefront.yaml` next to the team file describes the page, the order form, the
@@ -1054,6 +1058,17 @@ contract. An intake agent screens the order for the owner. If it is accepted, th
    `receipt_hash`, its signature, and that the signing key belongs to the owner's account. They confirm, dispute, or
    let the window run out. Time-based steps (`expire_order`, `settle_order`) can be called by anyone, so nobody
    has to be online.
+10. **A revision, if the customer asks.** Inside the review window the customer can say what should change. The
+    note is encrypted to the listing like the order was, and its hash goes on-chain with `request_revision`. A
+    storefront names how many revisions per order it takes **automatically** (`revisions.included`, locked when the
+    order is placed): for those the contract puts the order back to accepted by itself, the delivery window starts
+    again, and covibe runs the team on the earlier result with the note (data, like the order). A request beyond
+    them waits for the owner's yes or no; a no, or no answer within the accept window, leaves the delivery standing
+    and gives the customer a fresh review window. A revision whose checks do not pass does not undo the delivery
+    before it: covibe puts the earlier receipt and bundle on-chain again.
+11. **A review.** Once an order that was delivered is closed (settled or disputed), its customer can give it one to
+    five stars and a comment with `review_order`. Reviews live in the contract, so only real customers can write
+    one, once per order; the listing page shows them and the average.
 
 ### Run the demo on testnet
 
@@ -1166,6 +1181,7 @@ storefront:
   goal: |
     Cut the customer's footage in raw/ into one vertical reel at out/reel.mp4.
   deliverables: { folder: out, gates_required: [render_ok, review] }
+  revisions: { included: 1 }   # per order, done without asking you (0 to 5; default 0: every request waits for you)
 ```
 
 `gates_required` names steps of the team that have a gate. The schema is
@@ -1182,10 +1198,14 @@ gate on measured facts: the render plays, is vertical and is 5 to 90 seconds lon
 | `accept_order`, `decline_order`, `fail_order` | owner | Within the accept window; `fail_order` is for a run that cannot succeed. |
 | `deliver_order(id, receipt_hash, bundle_hash)` | owner | Within the delivery window. Starts the review window. |
 | `confirm_order`, `dispute_order` | customer | A dispute only inside the review window. |
-| `expire_order`, `settle_order` | anyone | Time-based, checked against the block time. |
+| `request_revision(id, note_hash)` | customer | Inside the review window. Included revisions are taken at once; others wait for the owner. Ten per order at most. |
+| `answer_revision(id, accept, reason?)` | owner | Yes: the delivery window starts again. No: back to delivered, with a fresh review window. |
+| `review_order(id, stars, comment?)` | customer | Once per order that was delivered and is closed. One to five stars, a comment of up to 500 characters. |
+| `expire_order`, `settle_order` | anyone | Time-based, checked against the block time. An unanswered revision request goes back to delivered. |
 | `claim` | anyone | Takes out NEAR that a transfer failed to deliver. |
 | `set_config` | admin | Fee (10% at most), treasury, price caps, open orders per customer. |
-| `get_listing(s)`, `get_listings_by_owner`, `get_order`, `get_orders`, `get_orders_by_customer`, `get_config`, `get_claimable` | view | |
+| `get_listing(s)`, `get_listings_by_owner`, `get_order`, `get_orders`, `get_orders_by_customer`, `get_reviews`, `get_config`, `get_claimable` | view | Listings carry `revisions`, `rating_count` and `rating_sum`; orders their revisions and their review. |
+| `migrate` | the contract itself | After upgrading a contract deployed before revisions and reviews (`market:deploy` calls it). |
 
 State changes before any transfer. A transfer that fails is credited to the receiver's claimable balance instead
 of being lost. The price and the fee are locked when the order is placed.
@@ -1225,6 +1245,11 @@ orders from anyone, a machine or container that holds nothing else is the strong
 - **Disputes refund the customer, always.** A dispute is recorded on the listing's public stats and that counter is
   the only deterrent against a customer who disputes unfairly after downloading. There is no arbiter. **This needs
   to improve** before real money is involved: an arbiter or jury, a stake on disputes, or a partial-release rule.
+- **Reviews cost the platform storage and cannot be answered.** A review (up to 500 characters) is stored at the
+  contract's expense, like an order, and the owner has no way to reply to one. A customer who disputed can still
+  review.
+- **Every revision is a run the owner pays for.** Included revisions start without the owner; the spend cap per
+  run and the cap of ten revisions per order bound it, nothing else does.
 - **The receipt is the owner's word.** The contract cannot see the gates; it sees a hash of a receipt the owner
   signed. Stage B is to run the engine where its result can be attested.
 - **Order storage is paid by the platform.** `place_order` takes exactly the price, as designed, so the few

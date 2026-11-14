@@ -158,7 +158,7 @@ function Orders({ m, onChanged }: { m: MarketView; onChanged: () => Promise<void
                   <td>
                     <span className={`pill ${CLOSED[o.chain.status]?.tone ?? ''}`}>{CLOSED[o.chain.status]?.label ?? o.chain.status}</span>
                   </td>
-                  <td className="muted">{o.chain.reason ?? (o.gates?.length ? o.gates.map((g) => `${g.name} ${g.passed ? '✓' : '✗'}`).join(' ') : '')}</td>
+                  <td className="muted">{o.chain.review ? `${'★'.repeat(o.chain.review.stars)}${'☆'.repeat(5 - o.chain.review.stars)} ${o.chain.review.comment}` : o.chain.reason ?? (o.gates?.length ? o.gates.map((g) => `${g.name} ${g.passed ? '✓' : '✗'}`).join(' ') : '')}</td>
                   <td className="r mono">{near(o.chain.price)} NEAR</td>
                   <td className="r faint">{ago(o.updatedAt)}</td>
                   <td className="r">{o.runId && o.projectId && <a href={href('runs', o.projectId, o.runId)}>Run</a>}</td>
@@ -178,9 +178,10 @@ function OrderCard({ o, m, onChanged }: { o: LocalOrder; m: MarketView; onChange
   const toast = useToast();
   const [ask, setAsk] = useState<null | 'decline' | 'fail'>(null);
   const [reason, setReason] = useState('');
+  const revision = o.chain.status === 'REVISION_REQUESTED';
   const [act, busy] = useAction(async (what: 'accept' | 'decline' | 'fail' | 'retry', why?: string) => {
     await post(`/api/market/orders/${o.id}/${what}`, why ? { reason: why } : {});
-    toast(what === 'accept' ? `Order #${o.id} accepted: the team starts` : what === 'retry' ? 'The team runs again' : `Order #${o.id} ${what === 'decline' ? 'declined' : 'failed'}; the customer is refunded`);
+    toast(revision && what === 'accept' ? `Revision of order #${o.id} taken: the team starts` : revision && what === 'decline' ? `Revision of order #${o.id} turned down; the delivery stands` : what === 'accept' ? `Order #${o.id} accepted: the team starts` : what === 'retry' ? 'The team runs again' : `Order #${o.id} ${what === 'decline' ? 'declined' : 'failed'}; the customer is refunded`);
     setAsk(null);
     await onChanged();
   });
@@ -193,7 +194,7 @@ function OrderCard({ o, m, onChanged }: { o: LocalOrder; m: MarketView; onChange
         <h2>
           Order #{o.id} · {teamName(m, o)}
         </h2>
-        <span className={`pill ${stage.tone}`}>{stage.label}</span>
+        <span className={`pill ${stage.tone}`}>{revision ? 'Revision asked: waits for you' : o.stage === 'running' && o.revisionRun ? `Team working on revision ${o.revisionRun}` : stage.label}</span>
         <span className="hint">
           {near(o.chain.price)} NEAR in escrow · from {o.chain.customer} · {ago(new Date(o.chain.created_at).toISOString())}
         </span>
@@ -278,7 +279,24 @@ function OrderCard({ o, m, onChanged }: { o: LocalOrder; m: MarketView; onChange
             )}
           </div>
         )}
-        {o.stage === 'awaiting_owner' && (
+        {o.revision && (revision || (o.revisionRun ?? 0) > 0) && o.stage !== 'closed' && (
+          <div className="small">
+            <strong>Revision {o.revision.n}</strong>
+            {(o.chain.revisions_included ?? 0) >= o.revision.n ? ' (included in the order, taken automatically)' : ''}: <span className="muted">{o.revision.note ?? o.revision.problem}</span>
+          </div>
+        )}
+        {o.stage === 'awaiting_owner' && revision && (
+          <div className="row">
+            <span className="small grow muted">The customer asks for changes beyond the revisions this storefront includes. Saying no leaves the delivery as it is.</span>
+            <button className="btn" disabled={busy} onClick={() => (setReason(''), setAsk('decline'))}>
+              Turn it down
+            </button>
+            <button className="btn primary" disabled={busy || !o.revision?.note} title={o.revision?.note ? 'answer_revision on-chain, then the team runs again' : 'The note cannot be read'} onClick={() => void act('accept')}>
+              <IconCheck /> Take the revision
+            </button>
+          </div>
+        )}
+        {o.stage === 'awaiting_owner' && !revision && (
           <div className="row">
             {rec && (
               <span className="small grow">
@@ -309,7 +327,7 @@ function OrderCard({ o, m, onChanged }: { o: LocalOrder; m: MarketView; onChange
       </div>
       {ask && (
         <Modal
-          title={ask === 'decline' ? `Decline order #${o.id}` : `Fail order #${o.id}`}
+          title={revision ? `Turn down the revision of order #${o.id}` : ask === 'decline' ? `Decline order #${o.id}` : `Fail order #${o.id}`}
           onClose={() => setAsk(null)}
           footer={
             <>
@@ -317,7 +335,7 @@ function OrderCard({ o, m, onChanged }: { o: LocalOrder; m: MarketView; onChange
                 Cancel
               </button>
               <button className="btn primary" disabled={busy} onClick={() => void act(ask, reason.trim())}>
-                {ask === 'decline' ? 'Decline and refund' : 'Fail and refund'}
+                {revision ? 'Turn it down' : ask === 'decline' ? 'Decline and refund' : 'Fail and refund'}
               </button>
             </>
           }
@@ -326,7 +344,7 @@ function OrderCard({ o, m, onChanged }: { o: LocalOrder; m: MarketView; onChange
             Reason the customer reads (stored on-chain, 280 characters at most)
             <textarea className="input" rows={3} maxLength={280} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
           </label>
-          <p className="small muted">The {near(o.chain.price)} NEAR in escrow go back to {o.chain.customer} at once.</p>
+          <p className="small muted">{revision ? `The delivery stands. ${o.chain.customer} gets a fresh review window to confirm or dispute it.` : `The ${near(o.chain.price)} NEAR in escrow go back to ${o.chain.customer} at once.`}</p>
         </Modal>
       )}
     </div>

@@ -1,6 +1,6 @@
 // The contract's and the relay's shapes, as the storefront reads them
 // (the same as src/market/types.ts in covibe).
-export type OrderStatus = 'PLACED' | 'ACCEPTED' | 'DELIVERED' | 'DECLINED' | 'EXPIRED' | 'FAILED' | 'DISPUTED' | 'SETTLED';
+export type OrderStatus = 'PLACED' | 'ACCEPTED' | 'DELIVERED' | 'DECLINED' | 'EXPIRED' | 'FAILED' | 'DISPUTED' | 'SETTLED' | 'REVISION_REQUESTED';
 
 export interface Listing {
   id: number;
@@ -15,6 +15,21 @@ export interface Listing {
   intake_pubkey: string;
   active: boolean;
   stats: { completed: number; declined: number; expired: number; failed: number; disputed: number };
+  created_at: number;
+  /** Revisions per order the team does without asking the owner. */
+  revisions?: number;
+  /** Reviews, and their stars added up. */
+  rating_count?: number;
+  rating_sum?: number;
+}
+
+/** A customer's review of an order that was delivered and is closed. */
+export interface Review {
+  order_id: number;
+  listing_id: number;
+  customer: string;
+  stars: number;
+  comment: string;
   created_at: number;
 }
 
@@ -35,6 +50,11 @@ export interface Order {
   receipt_hash: string | null;
   bundle_hash: string | null;
   reason: string | null;
+  revisions_included?: number;
+  revisions_used?: number;
+  revision_hash?: string | null;
+  revision_requested_at?: number | null;
+  review?: Review | null;
 }
 
 export interface InputField {

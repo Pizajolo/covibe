@@ -195,6 +195,7 @@ body:not(.desktop) .sidebar-drag { height: 20px; }
 .toolbar .title { -webkit-app-region: drag; display: flex; flex-direction: column; min-width: 0; }
 .toolbar .title h1 { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .toolbar .title .sub { font-size: 11px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.toolbar .title a, .toolbar .title button { -webkit-app-region: no-drag; }
 .toolbar .spacer { flex: 1; -webkit-app-region: drag; align-self: stretch; }
 .content { flex: 1; overflow: auto; padding: 20px; }
 .content.flush { padding: 0; display: flex; flex-direction: column; overflow: hidden; }

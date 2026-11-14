@@ -4,6 +4,7 @@
 // The chain is the source of truth for an order's status. What is kept here
 // (MarketStore) is the owner's working state: what the customer sent, what the
 // checks and the intake agent said, which run works on it.
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { TeamConfig } from '../config/types.js';
@@ -14,7 +15,7 @@ import { open, seal, sha256Hex } from './crypto.js';
 import { putFile } from './blobs.js';
 import { collectDeliverables, eventLogHash, gateResults, mediaType, secretsIn, signReceipt } from './delivery.js';
 import type { RunHost, RunResult } from './host.js';
-import { fileList, intakePrompt, loadIntakeTeam, orderGoal, parseInput, prechecks, writeWorkspace } from './intake.js';
+import { fileList, intakePrompt, loadIntakeTeam, MAX_REVISION_NOTE, orderGoal, parseInput, prechecks, revisionGoal, writeWorkspace } from './intake.js';
 import { explorerUrl, NearChain, yoctoToNear, type MarketChain } from './near.js';
 import { RelayClient, type Relay } from './relay.js';
 import { buildMeta, listingInput, loadStorefront, metaJson, requiredGates, STOREFRONT_FILE } from './storefront.js';
@@ -234,8 +235,8 @@ export class Market {
       });
       local = this.store.order(order.id)!;
       if (open) this.log(`order ${order.id}: new, ${yoctoToNear(order.price)} NEAR from ${order.customer}`);
-    } else if (local.chain.status !== order.status) {
-      this.log(`order ${order.id}: ${order.status.toLowerCase()}`);
+    } else if (local.chain.status !== order.status || (local.chain.revisions_used ?? 0) !== (order.revisions_used ?? 0) || (local.chain.revision_hash ?? null) !== (order.revision_hash ?? null)) {
+      if (local.chain.status !== order.status) this.log(`order ${order.id}: ${order.status.toLowerCase().replace('_', ' ')}`);
       local = this.store.patchOrder(order.id, { chain: order });
     }
 
@@ -244,13 +245,34 @@ export class Market {
         // "checking" left behind by a stop mid-screening is screened again.
         if (local.stage === 'new' || (local.stage === 'checking' && !this.screening.has(order.id))) await this.screen(team, local);
         return;
-      case 'ACCEPTED':
+      case 'ACCEPTED': {
         if (this.running.has(order.id)) return;
+        // Sent back for a revision: an included one the contract took by itself, or one the owner took elsewhere.
+        const used = order.revisions_used ?? 0;
+        if (used > (local.revisionRun ?? 0)) {
+          const kept = local.revision;
+          const revision = kept && kept.hash === order.revision_hash && kept.note ? { ...kept, n: used } : await this.readRevision(order);
+          this.store.patchOrder(order.id, { revision, revisionRun: used });
+          this.log(`order ${order.id}: revision ${used} asked for${used <= (order.revisions_included ?? 0) ? ' (included)' : ''}`);
+          if (revision.note) this.launch(order.id);
+          else await this.keepDelivery(order.id, revision.problem ?? "the customer's revision note cannot be read");
+          return;
+        }
         // Accepted from elsewhere (the CLI while the app watches, say): the team starts here.
         if (local.stage === 'new' || local.stage === 'checking' || local.stage === 'awaiting_owner') {
           if (!local.workspace) await this.screen(team, local, true);
           this.launch(order.id);
         } else if (local.stage === 'running') this.store.patchOrder(order.id, { stage: 'needs_owner', note: 'covibe stopped while the team was working on this order. Run it again, or fail it to refund the customer.' });
+        return;
+      }
+      case 'REVISION_REQUESTED':
+        // Beyond the included revisions: the owner answers. Unanswered, the contract lets anyone put the order back to delivered.
+        if (local.stage !== 'awaiting_owner' || local.revision?.hash !== order.revision_hash) {
+          const revision = await this.readRevision(order);
+          this.store.patchOrder(order.id, { stage: 'awaiting_owner', revision, recommendation: undefined, note: revision.problem });
+          this.log(`order ${order.id}: the customer asks for a revision; waiting for you`);
+          void this.status(order.id, 'waiting', 'Your revision request is with the owner.');
+        }
         return;
       case 'DELIVERED':
         if (local.stage !== 'delivered') this.store.patchOrder(order.id, { stage: 'delivered' });
@@ -262,11 +284,41 @@ export class Market {
         return;
       default:
         this.running.get(order.id)?.abort();
-        if (local.stage !== 'closed') this.store.patchOrder(order.id, { stage: 'closed', chain: order });
+        // A review comes after the order closed: keep it with the order.
+        if (local.stage !== 'closed' || (order.review && !local.chain.review)) this.store.patchOrder(order.id, { stage: 'closed', chain: order });
     }
   }
 
   private readonly screening = new Set<number>();
+
+  /** The customer's revision note: fetched by the hash on-chain, checked against it and opened with the intake key. */
+  private async readRevision(order: Order): Promise<NonNullable<LocalOrder['revision']>> {
+    const n = (order.revisions_used ?? 0) + (order.status === 'REVISION_REQUESTED' ? 1 : 0);
+    const hash = order.revision_hash ?? '';
+    try {
+      const sealed = await this.relay().blob(hash);
+      if (sha256Hex(sealed) !== hash) throw new Error('the note in the relay does not match the hash on-chain');
+      const v = JSON.parse(open(sealed, this.store.intakeKey().privateKey).toString('utf8')) as { note?: unknown };
+      if (typeof v.note !== 'string' || !v.note.trim()) throw new Error('it is empty');
+      return { n, hash, note: v.note.trim().slice(0, MAX_REVISION_NOTE) };
+    } catch (err) {
+      return { n, hash, problem: `The customer's revision note cannot be read: ${(err as Error).message}` };
+    }
+  }
+
+  /**
+   * A revision that cannot be delivered does not undo the delivery before it: the earlier
+   * receipt and bundle go on-chain again, and the customer confirms or disputes those.
+   */
+  private async keepDelivery(id: number, why: string): Promise<void> {
+    const local = this.mine(id);
+    const { receipt_hash, bundle_hash } = local.chain;
+    if (!receipt_hash || !bundle_hash) throw new MarketError(`order ${id} has no earlier delivery to fall back to`);
+    const { tx } = await this.chain().deliverOrder(id, receipt_hash, bundle_hash);
+    this.log(`order ${id}: the revision was not delivered, the earlier delivery stands (${tx}). ${why}`);
+    this.store.patchOrder(id, { stage: 'delivered', note: `The revision was not delivered: ${why} The earlier delivery stands.`, txs: { deliver: tx }, chain: { ...local.chain, status: 'DELIVERED', delivered_at: Date.now() } });
+    await this.status(id, 'delivered', 'The revision could not be completed, so your earlier delivery stands. Confirm it, or dispute it within the review window.');
+  }
 
   private workspaceOf(id: number): string {
     return join(this.store.dir, 'orders', `order-${id}`);
@@ -354,6 +406,7 @@ export class Market {
   async accept(id: number, by: 'owner' | 'auto' = 'owner'): Promise<string> {
     this.requireReady();
     const local = this.mine(id);
+    if (local.chain.status === 'REVISION_REQUESTED') return this.answerRevision(id, true);
     if (local.chain.status !== 'PLACED') throw new MarketError(`order ${id} is ${local.chain.status.toLowerCase()}, not waiting for an answer`);
     if (!local.workspace) throw new MarketError(`order ${id} cannot be taken: ${local.recommendation?.reason ?? local.note ?? 'its input could not be read'}`);
     const { tx } = await this.chain().acceptOrder(id);
@@ -367,11 +420,36 @@ export class Market {
   async decline(id: number, reason?: string, by: 'owner' | 'auto' = 'owner'): Promise<string> {
     this.requireReady();
     const local = this.mine(id);
+    if (local.chain.status === 'REVISION_REQUESTED') return this.answerRevision(id, false, reason);
     if (local.chain.status !== 'PLACED') throw new MarketError(`order ${id} is ${local.chain.status.toLowerCase()}, not waiting for an answer`);
     const why = (reason ?? local.recommendation?.reason ?? '').slice(0, 280) || undefined;
     const { tx } = await this.chain().declineOrder(id, why);
     this.log(`order ${id}: declined${by === 'auto' ? ' by the intake agent' : ''} (${tx})`);
     this.store.patchOrder(id, { stage: 'closed', decidedBy: by, txs: { decline: tx }, chain: { ...local.chain, status: 'DECLINED', reason: why ?? null, closed_at: Date.now() } });
+    return tx;
+  }
+
+  /**
+   * Answer a revision request beyond the included ones. Yes: the team goes back to work and the
+   * delivery window starts again. No: the delivery stands and the customer gets a fresh review window.
+   */
+  async answerRevision(id: number, accept: boolean, reason?: string): Promise<string> {
+    this.requireReady();
+    const local = this.mine(id);
+    if (local.chain.status !== 'REVISION_REQUESTED') throw new MarketError(`order ${id} has no revision request waiting`);
+    if (accept && !local.revision?.note) throw new MarketError(`the revision cannot be taken: ${local.revision?.problem ?? 'its note has not been read yet'}`);
+    const why = reason?.slice(0, 280) || undefined;
+    const { tx } = await this.chain().answerRevision(id, accept, accept ? undefined : why);
+    if (accept) {
+      const used = (local.chain.revisions_used ?? 0) + 1;
+      this.log(`order ${id}: revision ${used} taken (${tx})`);
+      this.store.patchOrder(id, { txs: { revision: tx }, revisionRun: used, revision: { ...local.revision!, n: used }, chain: { ...local.chain, status: 'ACCEPTED', accepted_at: Date.now(), revisions_used: used, revision_requested_at: null } });
+      this.launch(id);
+    } else {
+      this.log(`order ${id}: revision request turned down (${tx})`);
+      this.store.patchOrder(id, { stage: 'delivered', note: undefined, txs: { revision: tx }, chain: { ...local.chain, status: 'DELIVERED', delivered_at: Date.now(), reason: why ?? null, revision_requested_at: null } });
+      void this.status(id, 'delivered', `The owner did not take your revision request${why ? `: ${why}` : '.'} Your delivery stands. Confirm it, or dispute it within the review window.`);
+    }
     return tx;
   }
 
@@ -435,11 +513,22 @@ export class Market {
     const team = confineTeam(asWritten, { network: sf.network });
     const workspace = local.workspace;
     if (!workspace || !existsSync(join(workspace, 'ORDER.md'))) throw new MarketError('the order has no workspace; its input could not be read');
-    await this.status(id, 'accepted', 'The team took your order and started working.');
+    // A revision run works on the earlier result with the customer's note; the order's first run on the order alone.
+    const revising = (local.revisionRun ?? 0) > 0 && local.revision?.note ? { n: local.revisionRun!, note: local.revision.note } : undefined;
+    if (revising && local.resultBranch) {
+      // In a git workspace the earlier result is on its run's branch: start from it.
+      try {
+        execFileSync('git', ['merge', '--ff-only', local.resultBranch], { cwd: workspace, stdio: 'ignore' });
+      } catch {
+        // not a fast-forward (or no such branch): the team works from the checkout as it is
+      }
+    }
+    await this.status(id, 'accepted', revising ? `The team started on your revision (${revising.n}).` : 'The team took your order and started working.');
+    const orderText = readFileSync(join(workspace, 'ORDER.md'), 'utf8');
     const result = await this.host.run({
       team,
       repo: workspace,
-      goal: orderGoal(sf, readFileSync(join(workspace, 'ORDER.md'), 'utf8')),
+      goal: revising ? revisionGoal(sf, orderText, revising.note, revising.n) : orderGoal(sf, orderText),
       budgetUsd: sf.intake.budget_cap_usd,
       env: confinedEnv(process.env, team),
       signal,
@@ -471,6 +560,8 @@ export class Market {
         ? `The team's checks did not pass (${failedGates.join(', ')}).`
         : `The run ${result.status === 'succeeded' ? 'ended without passing its checks' : result.status}${result.reason ? `: ${result.reason}` : ''}.`;
     this.log(`order ${id}: not delivered. ${why}`);
+    // A revision that did not pass leaves the customer with what they already have.
+    if (revising) return this.keepDelivery(id, why);
     // auto: checks that did not pass refund the customer without waiting. The spend cap always comes to the owner.
     if (sf.intake.mode === 'auto' && !result.budgetExceeded) {
       this.store.patchOrder(id, { note: why });
@@ -519,8 +610,8 @@ export class Market {
     await relay.putReceipt(id, receipt);
     const { tx } = await chain.deliverOrder(id, sha256Hex(receipt), bundleHash);
     this.log(`order ${id}: delivered, ${entries.length} file${entries.length === 1 ? '' : 's'} (${tx})`);
-    this.store.patchOrder(id, { stage: 'delivered', txs: { deliver: tx }, chain: { ...local.chain, status: 'DELIVERED', delivered_at: Date.now(), bundle_hash: bundleHash, receipt_hash: sha256Hex(receipt) } });
-    await this.status(id, 'delivered', 'Your order is ready to download. Review it and confirm, or dispute it within the review window.');
+    this.store.patchOrder(id, { stage: 'delivered', txs: { deliver: tx }, resultBranch: result.branch, chain: { ...local.chain, status: 'DELIVERED', delivered_at: Date.now(), bundle_hash: bundleHash, receipt_hash: sha256Hex(receipt) } });
+    await this.status(id, 'delivered', (local.revisionRun ?? 0) > 0 ? 'Your revised order is ready to download. Review it and confirm, or dispute it within the review window.' : 'Your order is ready to download. Review it and confirm, or dispute it within the review window.');
   }
 
   /** The owner's keys as they could turn up in a file: the NEAR key (with and without its prefix) and the key orders are encrypted to. */
@@ -545,7 +636,7 @@ export class Market {
         earned += price - fee;
         fees += fee;
         settled += 1;
-      } else if (o.chain.status === 'DELIVERED') inReview += price;
+      } else if (o.chain.status === 'DELIVERED' || o.chain.status === 'REVISION_REQUESTED') inReview += price;
       else if (o.chain.status === 'PLACED' || o.chain.status === 'ACCEPTED') inEscrow += price;
       else refunded += 1;
     }

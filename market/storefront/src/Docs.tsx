@@ -281,6 +281,10 @@ covibe run team.yaml --goal "Add a /health endpoint"`}</Code>
             <dd>The price in NEAR, and how long you have to accept, how long to deliver, and how long the customer has to review.</dd>
             <dt>What is delivered</dt>
             <dd>The folder the team puts its result in, and the checks that must pass before anything is delivered.</dd>
+            <dt>Revisions</dt>
+            <dd>
+              How many revisions per order the team does automatically when a customer asks, from none to five. Those start without asking you. Any request beyond them waits for your yes or no.
+            </dd>
             <dt>The rules for intake</dt>
             <dd>A written policy of what you take, a spend cap per order, and the lowest price you accept.</dd>
           </dl>
@@ -316,7 +320,13 @@ covibe market watch`}</Code>
             Once accepted, the team runs on the order like on any goal. If the required checks pass, covibe encrypts the files for the customer, signs a receipt with your NEAR key and records the delivery on the contract. If they do not pass, the order fails and the customer is refunded.
           </p>
           <p>
-            The customer then confirms, disputes, or lets the review window run out. On confirmation or after the window, the contract pays you the price minus the 2.5% market fee. <strong>Market → Earnings</strong> shows what came in.
+            The customer then confirms, disputes, asks for a revision, or lets the review window run out. On confirmation or after the window, the contract pays you the price minus the 2.5% market fee. <strong>Market → Earnings</strong> shows what came in.
+          </p>
+          <p>
+            A revision request says what should change. If the order still has automatic revisions left, the team goes back to work at once on its earlier result. If not, the request appears under <strong>Incoming orders</strong> for you to take or turn down; turning it down leaves the delivery as it is. A revision whose checks fail does not undo the delivery before it.
+          </p>
+          <p>
+            After an order is closed, the customer can rate it with one to five stars and a comment. Reviews and the average appear on your storefront's page. Only customers whose order was delivered can write one, once per order.
           </p>
         </section>
 
@@ -339,6 +349,11 @@ covibe market watch`}</Code>
           </Risk>
           <Risk title="You pay for runs that fail">
             <p>If the checks fail or the order is refunded, the model cost of the run is yours. Set a spend cap per order: the run stops there and the order comes to you.</p>
+          </Risk>
+          <Risk title="Automatic revisions cost you runs">
+            <p>
+              Every revision is another run of the team at your expense, for the same price. Automatic revisions start without you, so include only as many as your price covers. Reviews are public, stored on-chain, and cannot be removed or answered.
+            </p>
           </Risk>
           <Risk title="Auto mode acts without you">
             <p>In auto mode the agent accepts orders and the team starts spending on its own. Start with recommend, and switch to auto once you have seen the kind of orders you get.</p>
