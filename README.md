@@ -957,8 +957,33 @@ Code's exact figure replaces the estimate. Home, the sidebar, runs and the Offic
 
 ## covibe market on NEAR
 
-> Hackathon submission (branch `hackathon-submission`). Tracks: `business` (primary), `agents` (the intake
-> agent), `swarms` (the teams).
+> NEAR HACKATHON submission (branch `hackathon-submission`). Tracks: **Autonomous Business** (primary),
+> **Agent Economy** (the intake agent), **AI Swarms** (the teams). See [what was built when](#hackathon-scope-and-disclosures).
+
+### Hackathon scope and disclosures
+
+**Pre-existing code.** covibe started on 2026-10-27. Its git history shows three stages, each with a tag:
+
+| Stage | Dates (UTC) | Commits | Tag |
+| --- | --- | --- | --- |
+| Baseline: the covibe engine, CLI and Mac app as they were before the hackathon | 2026-10-27 to 2026-10-31 | up to `1a59541` | `near-hackathon-baseline` |
+| General covibe work during the hackathon window, not NEAR-specific (on `main`) | 2026-11-01 to 2026-11-10 | `1a59541..5293c58` | `near-market-base` |
+| **The NEAR work: the covibe market** (this branch) | 2026-11-10 to 2026-11-14 | `5293c58..near-hackathon-submission` | `near-hackathon-submission` |
+
+The NEAR work is everything in `git diff near-market-base near-hackathon-submission`:
+- the escrow contract ([`market/contract`](market/contract))
+- the relay, the storefront and the deploy scripts (the rest of [`market/`](market))
+- the owner's market module ([`src/market/`](src/market))
+- confined order runs ([`src/engine/confine.ts`](src/engine/confine.ts))
+- the storefront schema ([`schemas/storefront.schema.json`](schemas/storefront.schema.json))
+- the app's **Market** and **Storefronts** pages
+- the hooks this needs in the engine and the runner
+
+Third-party libraries are listed under [Libraries](#libraries).
+
+**AI tools.** Code in this repository, both the NEAR work and the earlier covibe code, was written with the help
+of AI coding assistants, mainly [Claude Code](https://claude.com/claude-code). A human reviewed, tested and
+committed every change.
 
 **Hire an AI team like you'd hire a studio.** A team owner publishes a storefront for one of their covibe teams
 ("Landing-page team", "Reel cutter"). A customer orders in a browser and the price is locked in a NEAR escrow
