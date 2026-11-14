@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import { loadTeam, type LoadOptions } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
+import type { Attestation } from '../connections/attest.js';
 import type { Connections } from '../connections/store.js';
 import { accountOf, buildInvocation, extractJson, finishedData, isBalanced, newRunId, resolverOf } from '../engine/engine.js';
 import type { EventStore } from '../events/store.js';
@@ -114,7 +115,7 @@ export function parseInput(plain: Buffer): OrderInput {
  * The rules covibe enforces before any model sees an order. `input` is unset
  * when it could not be read at all (`inputError` says why).
  */
-export function prechecks(o: { sf: Storefront; order: Order; sealedBytes: number; input?: OrderInput; inputError?: string; pastCosts?: number[] }): Precheck[] {
+export function prechecks(o: { sf: Storefront; order?: Pick<Order, 'price'>; sealedBytes: number; input?: OrderInput; inputError?: string; pastCosts?: number[]; price?: { ok: boolean; detail: string } }): Precheck[] {
   const { sf, order, input } = o;
   const byName = new Map<string, InputField>(sf.inputs.map((i) => [i.name, i]));
   const schema: string[] = [];
@@ -152,7 +153,8 @@ export function prechecks(o: { sf: Storefront; order: Order; sealedBytes: number
     { name: 'schema', ok: !schema.length, detail: schema.join('; ') || 'the input matches the order form' },
     { name: 'size', ok: mb <= sf.intake.max_input_mb, detail: `${mb.toFixed(1)} MB of ${sf.intake.max_input_mb} MB allowed` },
     { name: 'file_types', ok: !types.length, detail: types.join('; ') || 'all files are of an accepted type' },
-    { name: 'price_floor', ok: BigInt(order.price) >= floor, detail: `the order locks ${yoctoToNear(order.price)} NEAR; the floor is ${sf.intake.min_price_near} NEAR` },
+    // An order of the covibe market locks NEAR; one from elsewhere brings its own answer (`price`).
+    { name: 'price_floor', ...(o.price ?? { ok: BigInt(order?.price ?? '0') >= floor, detail: `the order locks ${yoctoToNear(order?.price ?? '0')} NEAR; the floor is ${sf.intake.min_price_near} NEAR` }) },
     { name: 'budget', ok: projected <= sf.intake.budget_cap_usd, detail: `projected cost $${projected.toFixed(2)} (${past.length ? `average of the last ${past.length} orders and ` : ''}the owner's estimate); the cap is $${sf.intake.budget_cap_usd.toFixed(2)}` },
   ];
 }
@@ -230,11 +232,11 @@ export function revisionGoal(sf: Storefront, order: string, note: string, n: num
   ].join('\n\n');
 }
 
-export function intakePrompt(sf: Storefront, order: Order, input: OrderInput): string {
+export function intakePrompt(sf: Storefront, order: { id: number | string; price: string }, input: OrderInput): string {
   return [
     `# Listing\n**${sf.title}**: ${sf.summary}\n\n${sf.description.trim()}`,
     `# The owner's policy\n${sf.intake.policy.trim() || 'No special policy: take orders that are what the listing offers.'}`,
-    `# Order ${order.id}\nPrice locked in escrow: ${yoctoToNear(order.price)} NEAR.\n\n${DATA_NOTE}\n\n<order>\n${orderText(sf, input)}</order>`,
+    `# Order ${order.id}\nPrice locked in escrow: ${order.price}.\n\n${DATA_NOTE}\n\n<order>\n${orderText(sf, input)}</order>`,
     'Assess this order and answer in the required format.',
   ].join('\n\n');
 }
@@ -265,11 +267,11 @@ export async function runIntake(opts: {
   /** Folder the run is recorded under (the order's workspace). */
   repo: string;
   prompt: string;
-  orderId: number;
+  orderId: number | string;
   connections?: Connections;
   env?: Env;
   signal?: AbortSignal;
-}): Promise<{ runId: string; decision?: IntakeDecision; error?: string; costUsd: number }> {
+}): Promise<{ runId: string; decision?: IntakeDecision; error?: string; costUsd: number; attestation?: Attestation }> {
   const { store, team } = opts;
   const agent = Object.values(team.agents)[0];
   if (!agent) throw new Error('the intake team has no member');
@@ -280,6 +282,7 @@ export async function runIntake(opts: {
   let decision: IntakeDecision | undefined;
   let error: string | undefined;
   let costUsd = 0;
+  let attestation: Attestation | undefined;
   try {
     const account = isBalanced(agent, opts.connections) ? await opts.connections!.pick() : undefined;
     const built = await resolverOf(opts.connections).resolve(account ? { ...agent.backend, account } : agent.backend, opts.env ?? process.env);
@@ -301,6 +304,8 @@ export async function runIntake(opts: {
     const result = await opts.runner.run(inv).finally(() => inv.onControl?.(null));
     costUsd = result.costUsd;
     store.append(run.id, { ...base, type: result.ok ? 'agent.finished' : 'agent.error', data: finishedData(agent, result, built.via) });
+    attestation = await built.attested?.().catch(() => undefined);
+    if (attestation) store.append(run.id, { ...base, type: 'agent.attested', data: { ...attestation } });
     if (!result.ok) throw new Error(result.error || 'the intake agent did not finish');
     decision = readDecision(result.structured ?? extractJson(result.text));
     if (!decision) throw new Error('the intake agent did not answer in the required format');
@@ -311,5 +316,5 @@ export async function runIntake(opts: {
   const status = error ? 'failed' : 'succeeded';
   store.finishRun(run.id, status);
   store.append(run.id, { type: 'run.finished', data: { status, loops: 0, cost_usd: costUsd, ...(error ? { reason: error } : {}) } });
-  return { runId: run.id, ...(decision ? { decision } : {}), ...(error ? { error } : {}), costUsd };
+  return { runId: run.id, ...(decision ? { decision } : {}), ...(error ? { error } : {}), costUsd, ...(attestation ? { attestation } : {}) };
 }

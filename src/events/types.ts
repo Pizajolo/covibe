@@ -29,6 +29,8 @@ export type EventType =
   | 'agent.error'
   | 'agent.view'
   | 'agent.limited'
+  // A provider that signs its answers (NEAR AI Cloud): what it signed about the member's model calls.
+  | 'agent.attested'
   // Claude Code's process stopped mid-turn and the member's session was picked up again.
   | 'agent.restarted'
   | 'scope.denied'

@@ -1,4 +1,5 @@
 import type { BackendConfig } from '../config/types.js';
+import type { Attestation } from '../connections/attest.js';
 import type { Pricing } from '../connections/types.js';
 
 export type Env = Record<string, string | undefined>;
@@ -10,6 +11,11 @@ export interface BackendEnv {
   pricing?: Pricing;
   /** Which account or connection the agent uses: "claude" (your login), "claude:<account>", a connection id, or the backend type. */
   via: string;
+  /**
+   * On a provider that signs its answers: what it signed about this member's model calls since the
+   * last time this was asked (see connections/attest.ts). Unset on every other backend.
+   */
+  attested?(): Promise<Attestation | undefined>;
 }
 
 /**
@@ -28,6 +34,7 @@ export interface Link {
   model?: string;
   maxOutput?: number;
   pricing?: Pricing;
+  attested?(): Promise<Attestation | undefined>;
 }
 
 /** Turns a team file's backend into an agent environment, including connections that need keys or a running translator. */
@@ -143,5 +150,5 @@ export function backendEnv(backend: BackendConfig, parent: Env = process.env, li
       delete env.CLAUDE_CODE_OAUTH_TOKEN;
       break;
   }
-  return { env, warnings, via, ...(link?.pricing ? { pricing: link.pricing } : {}) };
+  return { env, warnings, via, ...(link?.pricing ? { pricing: link.pricing } : {}), ...(link?.attested ? { attested: link.attested } : {}) };
 }

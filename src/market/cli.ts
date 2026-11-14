@@ -10,7 +10,7 @@ import { LocalHost } from './host.js';
 import { Market, teamDirOf } from './market.js';
 import { yoctoToNear } from './near.js';
 import { STOREFRONT_FILE, storefrontTemplate } from './storefront.js';
-import { MarketError, type LocalOrder, type MarketSettings } from './types.js';
+import { MarketError, type Hire, type LocalOrder, type MarketSettings } from './types.js';
 
 export const MARKET_USAGE = `covibe market — sell a team's work on the covibe market (NEAR escrow)
 
@@ -29,6 +29,13 @@ export const MARKET_USAGE = `covibe market — sell a team's work on the covibe 
   covibe market fail <order> [--reason <text>]      Give up on an accepted order; the customer is refunded
   covibe market run <order>               Run the team again on an order whose run stopped
 
+  covibe market agent-market connect <team> --token-file <file> [--url <address>]
+                                          Take jobs for this team on NEAR AI Agent Market (market.near.ai): the
+                                          file holds the token of your agent there (aat_…); COVIBE_AGENT_MARKET_TOKEN
+                                          works too. Its jobs show under orders as h1, h2, … and take the same
+                                          accept, decline, fail and run. They need no NEAR account.
+  covibe market agent-market disconnect <team>
+
 <team> is a team folder, a team.yaml, or the id of a team in your library.`;
 
 export interface MarketFlags {
@@ -39,6 +46,8 @@ export interface MarketFlags {
   rpc?: string;
   'storefront-url'?: string;
   'key-file'?: string;
+  'token-file'?: string;
+  url?: string;
   reason?: string;
   once?: boolean;
 }
@@ -77,6 +86,28 @@ function orderLine(o: LocalOrder): string {
   if (o.gates?.length) lines.push(dim(`      gates: ${o.gates.map((g) => `${g.name} ${g.passed ? 'passed' : 'failed'}`).join(', ')}${o.costUsd !== undefined ? `; run cost $${o.costUsd.toFixed(2)}` : ''}`));
   return lines.join('\n');
 }
+
+function hireLine(h: Hire): string {
+  const head = `${bold(h.key.padEnd(3))} ${h.status.replace('_', ' ').padEnd(11)} ${`${h.price} ${h.token}`.padStart(10)}  ${h.title.slice(0, 60)}`;
+  const state = h.stage === 'awaiting_owner' || h.stage === 'needs_owner' ? yellow(STAGE[h.stage]) : dim(STAGE[h.stage]);
+  const lines = [`${head}  ${state}`];
+  if (h.stage === 'awaiting_owner' && h.delivery && h.revision) {
+    lines.push(`      the buyer asks for changes (${h.revision.n}): ${h.revision.note?.replace(/\s+/g, ' ').slice(0, 400) ?? h.revision.problem ?? ''}`);
+    lines.push(dim(`      covibe market accept ${h.key}   |   covibe market decline ${h.key} --reason "…"   (declining submits the earlier delivery again)`));
+  } else if (h.stage === 'awaiting_owner') {
+    for (const c of h.prechecks ?? []) lines.push(`      ${c.ok ? green('✓') : red('✗')} ${c.name}: ${c.detail}`);
+    if (h.brief) for (const [k, v] of Object.entries(h.brief)) lines.push(dim(`      ${k}: ${v.replace(/\s+/g, ' ').slice(0, 200)}`));
+    if (h.intake) lines.push(`      intake: ${h.intake.decision}, scope fit ${h.intake.scope_fit.toFixed(2)}, ${h.intake.estimated_cost}${h.intake.risks.length ? `; risks: ${h.intake.risks.join('; ')}` : ''}`);
+    if (h.recommendation) lines.push(`      recommended: ${bold(h.recommendation.action)} — ${h.recommendation.reason}`);
+    lines.push(dim(`      covibe market accept ${h.key}   |   covibe market decline ${h.key} --reason "…"`));
+  }
+  if (h.stage === 'needs_owner') lines.push(dim(`      covibe market run ${h.key}   |   covibe market fail ${h.key} --reason "…"`));
+  if (h.note) lines.push(`      ${h.note}`);
+  if (h.gates?.length) lines.push(dim(`      gates: ${h.gates.map((g) => `${g.name} ${g.passed ? 'passed' : 'failed'}`).join(', ')}${h.costUsd !== undefined ? `; run cost $${h.costUsd.toFixed(2)}` : ''}`));
+  return lines.join('\n');
+}
+
+const isHire = (text: string | undefined): text is string => !!text && /^h\d+$/.test(text);
 
 export async function marketCommand(args: string[], flags: MarketFlags): Promise<number> {
   const [sub, ...rest] = args;
@@ -127,6 +158,25 @@ export async function marketCommand(args: string[], flags: MarketFlags): Promise
         } else console.log(yellow(`missing: ${o.missing.join(', ')}`));
         return 0;
       }
+      case 'agent-market': {
+        const [action, ref] = rest;
+        if (action === 'connect') {
+          const token = flags['token-file'] ? readFileSync(resolve(flags['token-file']), 'utf8').trim() : process.env.COVIBE_AGENT_MARKET_TOKEN;
+          if (!token) throw new MarketError('give the token of your agent on NEAR AI Agent Market: --token-file <file>, or COVIBE_AGENT_MARKET_TOKEN');
+          await market.hires.connect(team(ref), token, flags.url);
+          console.log(green('✓ connected: this team takes the jobs of that agent'));
+          console.log(dim('  jobs are picked up where covibe watches (the app, or covibe market watch)'));
+          return 0;
+        }
+        if (action === 'disconnect') {
+          market.hires.disconnect(team(ref));
+          console.log(green('✓ disconnected; the token was forgotten'));
+          return 0;
+        }
+        for (const c of market.hires.connections()) console.log(`${c.team}  ${dim(c.baseUrl)}`);
+        if (!market.hires.connected) console.log(dim('no team is connected (covibe market agent-market connect <team> --token-file <file>)'));
+        return 0;
+      }
       case 'init': {
         const dir = team(rest[0]);
         const file = join(dir, STOREFRONT_FILE);
@@ -158,19 +208,21 @@ export async function marketCommand(args: string[], flags: MarketFlags): Promise
         for (const l of o.listings) console.log(`listing ${bold(String(l.listingId))}  ${l.listing?.title ?? ''}  ${l.listing && !l.listing.active ? yellow('closed') : ''}\n  ${dim(l.url)}`);
         if (o.orders.length) console.log('');
         for (const order of o.orders) console.log(orderLine(order));
+        if (o.hires.length) console.log(`\n${bold('NEAR AI Agent Market')} ${dim('(paid there, when the buyer accepts)')}`);
+        for (const h of o.hires) console.log(hireLine(h));
         const e = o.earnings;
         console.log(`\nearned ${bold(`${yoctoToNear(e.earned)} NEAR`)} from ${e.settled} order${e.settled === 1 ? '' : 's'} (fees ${yoctoToNear(e.fees)}); in review ${yoctoToNear(e.inReview)}, in escrow ${yoctoToNear(e.inEscrow)}; ${e.refunded} refunded`);
         if (o.settings.accountId) console.log(dim(market.explorer('account', o.settings.accountId)));
         return 0;
       }
       case 'watch': {
-        if (!market.overview().ready) throw new MarketError(`the market is not set up yet: ${market.overview().missing.join(', ')} missing (covibe market config)`);
+        if (!market.watchable) throw new MarketError(`the market is not set up yet: ${market.overview().missing.join(', ')} missing (covibe market config), and no team is connected to NEAR AI Agent Market`);
         if (flags.once) {
           await market.tick();
           await market.settle();
           return market.lastError ? 1 : 0;
         }
-        console.log(`watching ${bold(market.settings().contractId)} for orders ${dim('(Ctrl-C to stop)')}`);
+        console.log(`watching ${bold([...(market.overview().ready ? [market.settings().contractId] : []), ...(market.hires.connected ? ['NEAR AI Agent Market'] : [])].join(' and '))} for orders ${dim('(Ctrl-C to stop)')}`);
         let stop = false;
         let wake = () => {};
         const onSigint = () => {
@@ -194,6 +246,15 @@ export async function marketCommand(args: string[], flags: MarketFlags): Promise
       case 'accept':
       case 'decline':
       case 'fail': {
+        if (isHire(rest[0])) {
+          await market.tick();
+          if (sub === 'accept') await market.hires.accept(rest[0]);
+          else if (sub === 'decline') await market.hires.decline(rest[0], flags.reason);
+          else await market.hires.fail(rest[0], flags.reason);
+          await market.settle();
+          console.log(hireLine(market.store.hire(rest[0])!));
+          return 0;
+        }
         const id = orderId(rest[0]);
         await market.tick();
         if (sub === 'accept') {
@@ -223,6 +284,13 @@ export async function marketCommand(args: string[], flags: MarketFlags): Promise
         return 0;
       }
       case 'run': {
+        if (isHire(rest[0])) {
+          await market.tick();
+          market.hires.retry(rest[0]);
+          await market.settle();
+          console.log(hireLine(market.store.hire(rest[0])!));
+          return market.store.hire(rest[0])!.stage === 'delivered' ? 0 : 2;
+        }
         const id = orderId(rest[0]);
         await market.tick();
         market.retry(id);

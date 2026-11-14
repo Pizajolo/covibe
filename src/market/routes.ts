@@ -53,7 +53,7 @@ export function marketRoutes(market: Market, library: Library, secretStore: 'key
   const teams = (view: ReturnType<Market['overview']>): MarketTeam[] =>
     library.teams().map((t) => {
       const file = join(t.dir, STOREFRONT_FILE);
-      const base: MarketTeam = { id: t.id, name: t.name, description: t.description, hasStorefront: existsSync(file), problems: [] };
+      const base: MarketTeam = { id: t.id, name: t.name, description: t.description, hasStorefront: existsSync(file), problems: [], ...(view.agentMarket.some((c) => c.team === t.dir) ? { agentMarket: true } : {}) };
       const published = view.listings.find((l) => l.team === t.dir && l.contractId === view.settings.contractId);
       if (published) Object.assign(base, { listingId: published.listingId, url: published.url, active: published.listing?.active, stats: published.listing?.stats, ...(published.listing?.rating_count ? { rating: { count: published.listing.rating_count, sum: published.listing.rating_sum ?? 0 } } : {}) });
       if (!base.hasStorefront) return base;
@@ -114,7 +114,7 @@ export function marketRoutes(market: Market, library: Library, secretStore: 'key
       else if (typeof b.privateKey === 'string' && b.privateKey.trim()) patch.privateKey = b.privateKey.trim();
       const s = market.configure(patch);
       wallet = undefined;
-      if (s.watch && market.overview().ready) market.start();
+      if (s.watch && market.watchable) market.start();
       else market.stop();
       return view();
     }],
@@ -210,6 +210,34 @@ export function marketRoutes(market: Market, library: Library, secretStore: 'key
       const tx = await market.setActive(library.teamDir(p.team!), (body as { active?: unknown })?.active === true);
       await market.tick();
       return { tx, explorer: market.explorer('tx', tx) };
+    }],
+    // ---- NEAR AI Agent Market: a team takes the jobs of an agent there (see agentmarket.ts)
+    ['POST', '/api/market/agent-market/:team', async (p, body) => {
+      const b = (body ?? {}) as { token?: unknown; baseUrl?: unknown };
+      if (typeof b.token !== 'string' || !b.token.trim()) throw new MarketError("the agent's token is missing");
+      await market.hires.connect(library.teamDir(p.team!), b.token, typeof b.baseUrl === 'string' && b.baseUrl.trim() ? b.baseUrl : undefined);
+      if (market.settings().watch) market.start();
+      return { ok: true };
+    }],
+    ['DELETE', '/api/market/agent-market/:team', (p) => {
+      market.hires.disconnect(library.teamDir(p.team!));
+      return { ok: true };
+    }],
+    ['POST', '/api/market/hires/:key/accept', async (p) => {
+      await market.hires.accept(p.key!);
+      return { ok: true };
+    }],
+    ['POST', '/api/market/hires/:key/decline', async (p, body) => {
+      await market.hires.decline(p.key!, reason(body));
+      return { ok: true };
+    }],
+    ['POST', '/api/market/hires/:key/fail', async (p, body) => {
+      await market.hires.fail(p.key!, reason(body));
+      return { ok: true };
+    }],
+    ['POST', '/api/market/hires/:key/retry', (p) => {
+      market.hires.retry(p.key!);
+      return { ok: true };
     }],
     ['POST', '/api/market/orders/:id/accept', async (p) => ({ tx: await market.accept(orderId(p)) })],
     ['POST', '/api/market/orders/:id/decline', async (p, body) => ({ tx: await market.decline(orderId(p), reason(body)) })],

@@ -6,9 +6,10 @@
 // It listens on 127.0.0.1 only and wants a per-start token, so the provider's
 // key or the account's sign-in stays in this process and never reaches the
 // agent's environment.
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { Attestor } from './attest.js';
 import { answerCodex, type CodexUpstream } from './codex-proxy.js';
 
 export interface Upstream {
@@ -18,6 +19,8 @@ export interface Upstream {
   maxOutput(model: string): number | undefined;
   /** A ChatGPT account: Responses requests with the account's sign-in instead of Chat Completions with a key. */
   codex?: CodexUpstream;
+  /** A provider that signs its answers (NEAR AI Cloud): each call's signature is fetched and checked (attest.ts). */
+  attestor?: Attestor;
 }
 
 // ---- Anthropic request and response shapes (the parts that matter here)
@@ -70,6 +73,7 @@ interface ChatResponse {
 }
 
 interface ChatChunk {
+  id?: string;
   choices?: { delta?: { content?: string | null; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] }; finish_reason?: string | null }[];
   usage?: ChatUsage | null;
 }
@@ -312,10 +316,13 @@ export class OpenAiTranslator {
     this.port = (server.address() as AddressInfo).port;
   }
 
-  /** What an agent's ANTHROPIC_BASE_URL is set to for this connection. */
-  url(connectionId: string): string {
+  /**
+   * What an agent's ANTHROPIC_BASE_URL is set to for this connection. A `tag` names one member's
+   * calls, so what a signing provider says about them can be collected afterwards.
+   */
+  url(connectionId: string, tag?: string): string {
     if (!this.server) throw new Error('the OpenAI translator is not running');
-    return `http://127.0.0.1:${this.port}/${encodeURIComponent(connectionId)}`;
+    return `http://127.0.0.1:${this.port}/${encodeURIComponent(connectionId)}${tag ? `~${tag}` : ''}`;
   }
 
   async close(): Promise<void> {
@@ -336,7 +343,9 @@ export class OpenAiTranslator {
 
   private async handle(req: IncomingMessage, res: ServerResponse) {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    const [, id, ...rest] = url.pathname.split('/');
+    const [, segment = '', ...rest] = url.pathname.split('/');
+    // A connection id never holds "~" (see store.ts): what follows it is the member's tag.
+    const [id, tag] = segment.split('~');
     const path = `/${rest.join('/')}`;
     const auth = req.headers['x-api-key'] ?? req.headers.authorization?.replace(/^Bearer\s+/i, '');
     if (auth !== this.token) return this.fail(res, 401, 'invalid token for the covibe translator');
@@ -362,12 +371,19 @@ export class OpenAiTranslator {
       openaiHost: /(^|\.)openai\.com$/.test(new URL(base).hostname),
       cacheKey: typeof session === 'string' && session ? session : undefined,
     });
+    // A signing provider signs the exact bytes both ways: the request goes out as this string, with the
+    // model id taken as written and the answer uncompressed, and the answer is hashed as it arrives.
+    const attestor = tag ? upstream.attestor : undefined;
+    const payload = JSON.stringify(chat);
+    if (attestor) await attestor.report(body.model);
     const answer = await fetch(`${base}/chat/completions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(upstream.key ? { authorization: `Bearer ${upstream.key}` } : {}) },
-      body: JSON.stringify(chat),
+      headers: { 'content-type': 'application/json', ...(upstream.key ? { authorization: `Bearer ${upstream.key}` } : {}), ...(attestor ? { 'x-no-aliasing': 'true', 'accept-encoding': 'identity' } : {}) },
+      body: payload,
       signal: controller.signal,
     });
+    const received = createHash('sha256');
+    const signed = (chatId: string | undefined) => attestor?.record(tag!, { model: body.model, chatId, requestHash: createHash('sha256').update(payload).digest('hex'), responseHash: received.digest('hex') });
     if (!answer.ok) {
       const text = await answer.text().catch(() => '');
       let message = text;
@@ -382,7 +398,11 @@ export class OpenAiTranslator {
 
     if (!body.stream) {
       res.writeHead(200, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify(fromChatResponse((await answer.json()) as ChatResponse, body.model)));
+      const raw = Buffer.from(await answer.arrayBuffer());
+      const parsed = JSON.parse(raw.toString('utf8')) as ChatResponse;
+      received.update(raw);
+      signed(parsed.id);
+      return res.end(JSON.stringify(fromChatResponse(parsed, body.model)));
     }
 
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
@@ -394,22 +414,27 @@ export class OpenAiTranslator {
       buffer = final ? '' : (parts.pop() ?? '');
       yield* parts;
     };
+    let chatId: string | undefined;
     const take = (line: string) => {
       const data = line.trim().startsWith('data:') ? line.trim().slice(5).trim() : '';
       if (!data || data === '[DONE]') return;
       try {
-        const out = t.chunk(JSON.parse(data) as ChatChunk);
+        const chunk = JSON.parse(data) as ChatChunk;
+        chatId ??= chunk.id;
+        const out = t.chunk(chunk);
         if (out) res.write(out);
       } catch {
         // a malformed chunk: skip it
       }
     };
     for await (const piece of answer.body as unknown as AsyncIterable<Uint8Array>) {
+      received.update(piece);
       buffer += decoder.decode(piece, { stream: true });
       for (const line of lines(false)) take(line);
     }
     buffer += decoder.decode();
     for (const line of lines(true)) take(line);
+    signed(chatId);
     res.end(t.end());
   }
 }

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +8,7 @@ import type { BackendConfig } from '../config/types.js';
 import { covibeHome, replaceFile } from '../home.js';
 import { backendEnv, BackendError, type BackendEnv, type BackendResolver, type Env, type Link } from '../runner/backend.js';
 import type { PlanUsage } from '../runner/types.js';
+import { Attestor, attestsByDefault } from './attest.js';
 import { CODEX_ENDPOINTS, CODEX_MODELS, CodexAuth, planUsageFromHeaders, startCodexLogin, type CodexEndpoints, type CodexIdentity, type CodexLogin } from './codex-auth.js';
 import { OpenAiTranslator } from './openai-proxy.js';
 import { defaultSecrets, type SecretStore } from './secrets.js';
@@ -24,9 +26,10 @@ export interface NewConnection {
   baseUrl?: string;
   apiKey?: string;
   models?: ProviderModel[];
+  attest?: boolean;
 }
 
-export type ConnectionPatch = Partial<Pick<Connection, 'label' | 'baseUrl' | 'models'>> & { apiKey?: string | null };
+export type ConnectionPatch = Partial<Pick<Connection, 'label' | 'baseUrl' | 'models' | 'attest'>> & { apiKey?: string | null };
 
 /** Your own Claude Code config folder, where your `claude login` and its sessions live. */
 export function mainConfigDir(parent: Env = process.env): string {
@@ -69,6 +72,7 @@ const frac = (u: PlanUsage | undefined, w: string) => {
 export class Connections implements BackendResolver {
   private readonly file: string;
   private translator?: OpenAiTranslator;
+  private readonly attestors = new Map<string, { id: string; attestor: Attestor }>();
   /** Account → when its limit resets (ms); members avoid it until then. */
   private readonly exhaustedUntil = new Map<string, number>();
   /** Account → members working on it now. */
@@ -164,6 +168,7 @@ export class Connections implements BackendResolver {
     } else {
       c.baseUrl = checkUrl(input.baseUrl);
       c.models = cleanModels(input.models ?? []);
+      if (input.kind === 'openai' && typeof input.attest === 'boolean') c.attest = input.attest;
     }
     if (input.apiKey && input.kind !== 'claude' && input.kind !== 'codex') this.secrets.set(id, input.apiKey.trim());
     this.write({ ...all, connections: [...all.connections, c] });
@@ -183,6 +188,7 @@ export class Connections implements BackendResolver {
     } else if (c.kind !== 'claude') {
       if (patch.baseUrl !== undefined) c.baseUrl = checkUrl(patch.baseUrl);
       if (patch.models !== undefined) c.models = cleanModels(patch.models);
+      if (c.kind === 'openai' && typeof patch.attest === 'boolean') c.attest = patch.attest;
       if (patch.apiKey === null) this.secrets.delete(id);
       else if (patch.apiKey) this.secrets.set(id, patch.apiKey.trim());
     }
@@ -233,6 +239,12 @@ export class Connections implements BackendResolver {
       return { ...common, baseUrl: c.baseUrl, token: this.key(c.id), apiKey: anthropicHost };
     }
     const t = await this.openai();
+    // A provider that signs its answers: this member's calls go under a tag of their own, and what
+    // the provider signed about them is collected when the member is done.
+    if (c.kind === 'openai' && this.attests(c)) {
+      const tag = randomBytes(8).toString('hex');
+      return { ...common, baseUrl: t.url(c.id, tag), token: t.token, attested: () => this.attestor(c).drain(tag) };
+    }
     return { ...common, baseUrl: t.url(c.id), token: t.token };
   }
 
@@ -258,12 +270,27 @@ export class Connections implements BackendResolver {
     }
   }
 
+  /** Whether a provider's answers are signed and checked: as set on the connection, else by its address. */
+  attests(c: Connection): boolean {
+    return c.kind === 'openai' && (c.attest ?? attestsByDefault(c.baseUrl));
+  }
+
+  private attestor(c: Connection): Attestor {
+    const key = this.key(c.id);
+    const id = `${c.baseUrl}|${key ?? ''}`;
+    const kept = this.attestors.get(c.id);
+    if (kept?.id === id) return kept.attestor;
+    const attestor = new Attestor(c.baseUrl!.replace(/\/+$/, ''), key);
+    this.attestors.set(c.id, { id, attestor });
+    return attestor;
+  }
+
   private async openai(): Promise<OpenAiTranslator> {
     this.translator ??= new OpenAiTranslator((id) => {
       const c = this.get(id);
       if (!c || (c.kind !== 'openai' && c.kind !== 'codex') || !c.baseUrl) return undefined;
       const maxOutput = (m: string) => c.models?.find((x) => x.id === m)?.maxOutput;
-      if (c.kind === 'openai') return { baseUrl: c.baseUrl, key: this.key(id), maxOutput };
+      if (c.kind === 'openai') return { baseUrl: c.baseUrl, key: this.key(id), maxOutput, ...(this.attests(c) ? { attestor: this.attestor(c) } : {}) };
       const auth = this.codex(c);
       return {
         baseUrl: c.baseUrl,

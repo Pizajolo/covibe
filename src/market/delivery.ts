@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
 import type { RunEvent } from '../events/types.js';
 import { publicKeyOf, sha256Hex, signMessage, verifyMessage } from './crypto.js';
-import type { Receipt } from './types.js';
+import type { Attestation, AttestationReport } from '../connections/attest.js';
+import type { Receipt, ReceiptAttestation } from './types.js';
 
 /**
  * How each required gate ended: its last result in the run. A gate that never
@@ -22,6 +23,25 @@ export function gateResults(events: RunEvent[], required: string[]): { name: str
 /** The hash that stands for the full event log, which holds prompts and stays with the owner. */
 export function eventLogHash(events: RunEvent[]): string {
   return sha256Hex(events.map((e) => JSON.stringify(e)).join('\n'));
+}
+
+/**
+ * What goes into a receipt about signed model calls: the intake agent's, and those of the team's
+ * run (its agent.attested events, which name the step and the member). Unset when no member ran
+ * on a provider that signs.
+ */
+export function receiptAttestation(events: RunEvent[], intake?: Attestation): ReceiptAttestation | undefined {
+  const calls: ReceiptAttestation['calls'] = (intake?.calls ?? []).map((c) => ({ ...c, run: 'intake' as const }));
+  const reports = new Map<string, AttestationReport>((intake?.reports ?? []).map((r) => [r.report_hash, r]));
+  const providers = new Set<string>(intake ? [intake.provider] : []);
+  for (const e of events) {
+    if (e.type !== 'agent.attested') continue;
+    const a = e.data as unknown as Attestation;
+    for (const c of a.calls ?? []) calls.push({ ...c, run: 'team', ...(e.step ? { step: e.step } : {}), ...(e.agent ? { agent: e.agent } : {}) });
+    for (const r of a.reports ?? []) reports.set(r.report_hash, r);
+    if (a.provider) providers.add(a.provider);
+  }
+  return calls.length ? { v: 1, provider: [...providers].join(', '), calls, reports: [...reports.values()] } : undefined;
 }
 
 export interface DeliverableFile {
@@ -130,12 +150,12 @@ const TYPES: Record<string, string> = { '.mp4': 'video/mp4', '.mov': 'video/quic
 export const mediaType = (name: string): string | undefined => TYPES[extname(name).toLowerCase()];
 
 /** Sign a receipt with the owner's NEAR key. The signature covers the JSON of every other field, in this order. */
-export function signReceipt(receipt: Omit<Receipt, 'public_key' | 'signature'>, privateKey: string): Receipt {
-  const body: Receipt = { ...receipt, public_key: publicKeyOf(privateKey) };
+export function signReceipt<T extends object>(receipt: T, privateKey: string): T & { public_key: string; signature: string } {
+  const body = { ...receipt, public_key: publicKeyOf(privateKey) };
   return { ...body, signature: signMessage(privateKey, JSON.stringify(body)) };
 }
 
-export function verifyReceipt(receipt: Receipt): boolean {
+export function verifyReceipt(receipt: { public_key: string; signature?: string }): boolean {
   const { signature, ...body } = receipt;
   return !!signature && verifyMessage(receipt.public_key, JSON.stringify(body), signature);
 }

@@ -835,6 +835,12 @@ function OrderPage({ ctx, id }: { ctx: Ctx; id: number }) {
                 <li className={checked.hashOk && checked.matchesOrder ? 'ok' : 'no'}>{checked.hashOk && checked.matchesOrder ? 'The receipt is the one recorded on-chain for this order' : 'The receipt does not match what is recorded on-chain'}</li>
                 <li className={checked.signatureOk && checked.ownerKey ? 'ok' : 'no'}>{checked.signatureOk && checked.ownerKey ? `Signed by ${order.owner}` : checked.signatureOk ? 'Signed, but not with a key of the owner’s account' : 'The signature is missing or wrong'}</li>
               </ul>
+              {checked.receipt.attestation && (
+                <p className="small muted">
+                  {checked.receipt.attestation.calls.filter((c) => c.verified).length} of {checked.receipt.attestation.calls.length} model calls behind this order ran in a hardware enclave at {checked.receipt.attestation.provider} and carry
+                  its signature, which the owner's covibe checked. The receipt holds the signatures and the hardware quotes; this page does not re-check them, and the quotes can be verified with Intel's tools.
+                </p>
+              )}
               <p className="small muted">
                 Run finished {when(Date.parse(checked.receipt.finished))}. The receipt is the owner's signed statement; the full log stays with the owner (hash <span className="mono">{checked.receipt.event_log_hash.slice(0, 12)}…</span>).
               </p>

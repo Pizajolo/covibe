@@ -44,6 +44,13 @@ const PRESETS: { key: string; label: string; kind: 'anthropic' | 'openai'; baseU
   { key: 'moonshot', label: 'Moonshot (Kimi)', kind: 'anthropic', baseUrl: 'https://api.moonshot.ai/anthropic' },
   { key: 'zai', label: 'Z.ai (GLM)', kind: 'anthropic', baseUrl: 'https://api.z.ai/api/anthropic' },
   {
+    key: 'near-ai',
+    label: 'NEAR AI Cloud',
+    kind: 'openai',
+    baseUrl: 'https://cloud-api.near.ai/v1',
+    help: 'Models run inside hardware enclaves (TEEs), and each answer is signed there. covibe fetches and checks every signature; for a market order they go into the receipt the customer gets. Create the key at cloud.near.ai, then load the model list.',
+  },
+  {
     key: 'alibaba-coding',
     label: 'Alibaba Cloud: Coding Plan',
     kind: 'anthropic',

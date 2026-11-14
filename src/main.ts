@@ -101,6 +101,8 @@ export async function main(argv: string[]): Promise<number> {
       rpc: { type: 'string' },
       'storefront-url': { type: 'string' },
       'key-file': { type: 'string' },
+      'token-file': { type: 'string' },
+      url: { type: 'string' },
       reason: { type: 'string' },
       once: { type: 'boolean' },
     },

@@ -38,6 +38,11 @@ export interface Connection {
   baseUrl?: string;
   /** anthropic / openai / codex: the models members can pick. */
   models?: ProviderModel[];
+  /**
+   * openai: the provider signs its answers inside an enclave, and covibe fetches and checks each
+   * signature (connections/attest.ts). Unset: on for NEAR AI Cloud's address, off elsewhere.
+   */
+  attest?: boolean;
   createdAt: string;
 }
 

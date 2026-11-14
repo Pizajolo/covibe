@@ -1086,7 +1086,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<CovibeServe
     },
   };
   const market = new Market({ home: library.home, secrets: connections.secrets, host: marketHost, ...opts.market });
-  if (market.settings().watch && market.overview().ready) market.start();
+  if (market.settings().watch && market.watchable) market.start();
 
   const routes: Route[] = [
     ['GET', '/api/overview', () => ({ projects: library.projects(), teams: library.teams(), runs: allRuns(30), stats: stats(), home: library.home, defaultParent: library.defaultParent() })],

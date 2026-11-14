@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadTeam } from '../config/load.js';
 import type { TeamConfig } from '../config/types.js';
+import type { Attestation } from '../connections/attest.js';
 import type { Connections } from '../connections/store.js';
 import { startRun } from '../engine/engine.js';
 import { EventStore } from '../events/store.js';
@@ -46,12 +47,14 @@ export interface IntakeResult {
   decision?: IntakeDecision;
   error?: string;
   costUsd: number;
+  /** What an enclave provider signed about the agent's model calls. */
+  attestation?: Attestation;
 }
 
 export interface RunHost {
   loadTeam(file: string): TeamConfig;
   run(opts: HostRun): Promise<RunResult>;
-  intake(opts: { team: TeamConfig; repo: string; prompt: string; orderId: number; signal?: AbortSignal }): Promise<IntakeResult>;
+  intake(opts: { team: TeamConfig; repo: string; prompt: string; orderId: number | string; signal?: AbortSignal }): Promise<IntakeResult>;
 }
 
 /** Run a team on a folder with a given store, and gather what the market needs from it. */
@@ -97,7 +100,7 @@ export class LocalHost implements RunHost {
     }
   }
 
-  async intake(o: { team: TeamConfig; repo: string; prompt: string; orderId: number; signal?: AbortSignal }): Promise<IntakeResult> {
+  async intake(o: { team: TeamConfig; repo: string; prompt: string; orderId: number | string; signal?: AbortSignal }): Promise<IntakeResult> {
     const store = this.open(o.repo);
     try {
       return await runIntake({ store, runner: this.runner, connections: this.connections, ...o });

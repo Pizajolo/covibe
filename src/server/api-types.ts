@@ -8,7 +8,7 @@ export type { Connection, ConnectionKind, ConnectionView, Pricing, ProviderModel
 import type { ConnectionView } from '../connections/types.js';
 
 export type { CheckMode, Goal, GoalCheck, GoalQuestion, GoalState, RunEvent, RunKind, RunStatus };
-export type { Earnings, IntakeDecision, Listing, ListingStats, LocalOrder, MarketSettings, MarketTeam, MarketView, Order, OrderStatus, Precheck, Stage } from '../market/types.js';
+export type { Earnings, Hire, IntakeDecision, Listing, ListingStats, LocalOrder, MarketSettings, MarketTeam, MarketView, Order, OrderStatus, Precheck, Stage } from '../market/types.js';
 
 export interface Project {
   id: string;

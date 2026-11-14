@@ -12,15 +12,16 @@ import { confinedEnv, confineTeam } from '../engine/confine.js';
 import type { SecretStore } from '../connections/secrets.js';
 import type { RunEvent } from '../events/types.js';
 import { open, seal, sha256Hex } from './crypto.js';
+import { Hires, type AgentMarketApi } from './agentmarket.js';
 import { putFile } from './blobs.js';
-import { collectDeliverables, eventLogHash, gateResults, mediaType, secretsIn, signReceipt } from './delivery.js';
+import { collectDeliverables, eventLogHash, gateResults, mediaType, receiptAttestation, secretsIn, signReceipt } from './delivery.js';
 import type { RunHost, RunResult } from './host.js';
 import { fileList, intakePrompt, loadIntakeTeam, MAX_REVISION_NOTE, orderGoal, parseInput, prechecks, revisionGoal, writeWorkspace } from './intake.js';
 import { explorerUrl, NearChain, yoctoToNear, type MarketChain } from './near.js';
 import { RelayClient, type Relay } from './relay.js';
 import { buildMeta, listingInput, loadStorefront, metaJson, requiredGates, STOREFRONT_FILE } from './storefront.js';
 import { MarketStore } from './store.js';
-import { MarketError, OPEN_STATUSES, type Delivery, type Earnings, type Listing, type LocalOrder, type MarketSettings, type Order, type OrderInput, type Overview, type Storefront } from './types.js';
+import { MarketError, OPEN_STATUSES, type Delivery, type Earnings, type Listing, type LocalOrder, type MarketSettings, type Order, type OrderInput, type Overview, type Receipt, type Storefront } from './types.js';
 
 const PAGE = 50;
 /** Local clocks and block time differ a little; wait this long past a window before acting on it. */
@@ -35,11 +36,15 @@ export interface MarketOptions {
   /** Stand-ins for the chain and the relay (tests). */
   chain?: MarketChain;
   relay?: Relay;
+  /** A stand-in for NEAR AI Agent Market (tests). */
+  agentMarket?(team: string): AgentMarketApi | undefined;
   log?(line: string): void;
 }
 
 export class Market {
   readonly store: MarketStore;
+  /** Jobs from NEAR AI Agent Market, for the teams connected to an agent there (agentmarket.ts). */
+  readonly hires: Hires;
   private readonly host: RunHost;
   private readonly log: (line: string) => void;
   private chainCache?: { key: string; chain: MarketChain };
@@ -61,6 +66,7 @@ export class Market {
     this.fixedChain = opts.chain;
     this.fixedRelay = opts.relay;
     this.log = opts.log ?? (() => undefined);
+    this.hires = new Hires({ store: this.store, host: this.host, log: this.log, storefront: (team) => this.storefrontOf(team), ownSecrets: () => this.ownSecrets(), api: opts.agentMarket });
   }
 
   // ---- connections
@@ -184,18 +190,37 @@ export class Market {
   async close(): Promise<void> {
     this.stop();
     for (const c of this.running.values()) c.abort();
+    await this.hires.close();
     await this.settle();
   }
 
   /** Wait for runs and deliveries in flight. */
   async settle(): Promise<void> {
     while (this.jobs.size) await Promise.allSettled([...this.jobs]);
+    await this.hires.settle();
   }
 
-  /** Read every published listing's orders from the chain and move each one along. */
+  /** Whether there is anything to watch: the covibe market is set up, or a team is connected to NEAR AI Agent Market. */
+  get watchable(): boolean {
+    return !this.missing().length || this.hires.connected;
+  }
+
+  /** Read every published listing's orders from the chain and move each one along; then the hires from NEAR AI Agent Market. */
   async tick(): Promise<void> {
-    if (this.ticking || this.missing().length) return;
+    if (this.ticking) return;
     this.ticking = true;
+    try {
+      if (!this.missing().length) await this.tickChain();
+      else this.lastError = undefined;
+      await this.hires.tick();
+      this.lastError ??= this.hires.lastError;
+    } finally {
+      this.lastTick = new Date().toISOString();
+      this.ticking = false;
+    }
+  }
+
+  private async tickChain(): Promise<void> {
     try {
       const chain = this.chain();
       for (const [team, l] of Object.entries(this.store.state().listings)) {
@@ -213,9 +238,6 @@ export class Market {
     } catch (err) {
       this.lastError = (err as Error).message;
       this.log(`market: ${this.lastError}`);
-    } finally {
-      this.lastTick = new Date().toISOString();
-      this.ticking = false;
     }
   }
 
@@ -374,14 +396,14 @@ export class Market {
         this.log(`order ${id}: pre-checks passed; waiting for you`);
         return;
       }
-      const result = await this.host.intake({ team: loadIntakeTeam(this.store.home), repo: workspace, prompt: intakePrompt(sf, local.chain, input!), orderId: id });
+      const result = await this.host.intake({ team: loadIntakeTeam(this.store.home), repo: workspace, prompt: intakePrompt(sf, { id, price: `${yoctoToNear(local.chain.price)} NEAR` }, input!), orderId: id });
       const d = result.decision;
       if (!d) {
         this.store.patchOrder(id, { stage: 'awaiting_owner', intakeRunId: result.runId, projectId: result.projectId, note: `The intake agent gave no recommendation: ${result.error ?? 'unknown error'}` });
         return;
       }
       const recommendation = d.decision === 'accept' ? { action: 'accept' as const, reason: d.reason } : { action: 'decline' as const, reason: d.decision === 'need_info' ? `More information is needed: ${d.reason}` : d.reason };
-      this.store.patchOrder(id, { stage: 'awaiting_owner', intake: d, intakeRunId: result.runId, projectId: result.projectId, recommendation });
+      this.store.patchOrder(id, { stage: 'awaiting_owner', intake: d, intakeRunId: result.runId, projectId: result.projectId, recommendation, ...(result.attestation ? { intakeAttestation: result.attestation } : {}) });
       this.log(`order ${id}: intake recommends ${recommendation.action} (scope fit ${d.scope_fit.toFixed(2)}): ${d.reason}`);
       // auto: taking an order is what costs the owner, so that needs a good fit; a decline only refunds.
       if (sf.intake.mode === 'auto') {
@@ -605,8 +627,10 @@ export class Market {
     if (bundleHash !== sha256Hex(bundle)) throw new MarketError('the relay stored a different bundle than was sent');
     const started = result.events[0]?.ts ?? new Date().toISOString();
     const finished = result.events[result.events.length - 1]?.ts ?? new Date().toISOString();
-    const body = { v: 1 as const, contract: chain.contractId, order_id: id, listing_id: local.listingId, input_hash: local.chain.input_hash, bundle_hash: bundleHash, run_status: result.status, gates, event_log_hash: eventLogHash(result.events), started, finished, owner: local.chain.owner };
+    const attestation = receiptAttestation(result.events, local.intakeAttestation);
+    const body: Omit<Receipt, 'public_key' | 'signature'> = { v: 1, contract: chain.contractId, order_id: id, listing_id: local.listingId, input_hash: local.chain.input_hash, bundle_hash: bundleHash, run_status: result.status, gates, event_log_hash: eventLogHash(result.events), started, finished, owner: local.chain.owner, ...(attestation ? { attestation } : {}) };
     const receipt = JSON.stringify(key ? signReceipt(body, key) : { ...body, public_key: '' });
+    if (attestation) this.log(`order ${id}: ${attestation.calls.filter((c) => c.verified).length} of ${attestation.calls.length} model calls carry a checked enclave signature (${attestation.provider})`);
     await relay.putReceipt(id, receipt);
     const { tx } = await chain.deliverOrder(id, sha256Hex(receipt), bundleHash);
     this.log(`order ${id}: delivered, ${entries.length} file${entries.length === 1 ? '' : 's'} (${tx})`);
@@ -653,6 +677,8 @@ export class Market {
       missing,
       listings: Object.entries(state.listings).map(([team, l]) => ({ team, ...l, listing: this.chainListings.get(l.listingId), url: this.listingUrl(l.listingId) })),
       orders: Object.values(state.orders).sort((a, b) => b.id - a.id),
+      agentMarket: this.hires.connections(),
+      hires: this.hires.list(),
       earnings: this.earnings(),
       watching: this.watching,
       lastTick: this.lastTick,

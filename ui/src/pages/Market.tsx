@@ -3,7 +3,7 @@
 // recommendation, what was earned, and the connection settings. The server
 // side is src/market.
 import { useEffect, useState } from 'react';
-import { get, post, put, type LocalOrder, type MarketView } from '../api';
+import { del, get, post, put, type Hire, type LocalOrder, type MarketView } from '../api';
 import { IconAlert, IconCheck, IconCoin, IconLoop, IconPlay, IconShield, IconX } from '../components/icons';
 import { Toolbar } from '../components/Toolbar';
 import { Empty, Modal, useAction, useToast } from '../components/ui';
@@ -128,7 +128,8 @@ const CLOSED: Record<string, { label: string; tone: string }> = {
 function Orders({ m, onChanged }: { m: MarketView; onChanged: () => Promise<void> }) {
   const open = m.orders.filter((o) => o.stage !== 'closed');
   const closed = m.orders.filter((o) => o.stage === 'closed');
-  if (!m.orders.length)
+  const hires = m.hires ?? [];
+  if (!m.orders.length && !hires.length)
     return (
       <div className="card">
         <Empty icon={<IconCoin />} title="No orders yet" action={m.teams.some((t) => t.listingId !== undefined) ? undefined : <button className="btn primary" onClick={() => go('market', 'storefronts')}>Publish a storefront</button>}>
@@ -140,9 +141,38 @@ function Orders({ m, onChanged }: { m: MarketView; onChanged: () => Promise<void
     );
   return (
     <>
+      {hires.filter((h) => h.stage !== 'closed').map((h) => (
+        <HireCard key={h.key} h={h} m={m} onChanged={onChanged} />
+      ))}
       {open.map((o) => (
         <OrderCard key={o.id} o={o} m={m} onChanged={onChanged} />
       ))}
+      {hires.some((h) => h.stage === 'closed') && (
+        <div className="card">
+          <div className="card-head">
+            <h2>Finished on NEAR AI Agent Market</h2>
+          </div>
+          <table className="table">
+            <tbody>
+              {hires.filter((h) => h.stage === 'closed').map((h) => (
+                <tr key={h.key}>
+                  <td className="mono">{h.key}</td>
+                  <td>{h.title}</td>
+                  <td>
+                    <span className={`pill ${h.status === 'accepted' ? 'good' : ''}`}>{HIRE_CLOSED[h.status] ?? h.status}</span>
+                  </td>
+                  <td className="muted">{h.note ?? (h.gates?.length ? h.gates.map((g) => `${g.name} ${g.passed ? '✓' : '✗'}`).join(', ') : '')}</td>
+                  <td className="r mono">
+                    {h.price} {h.token}
+                  </td>
+                  <td className="r faint">{ago(h.updatedAt)}</td>
+                  <td className="r">{h.runId && h.projectId && <a href={href('runs', h.projectId, h.runId)}>Run</a>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       {closed.length > 0 && (
         <div className="card">
           <div className="card-head">
@@ -169,6 +199,147 @@ function Orders({ m, onChanged }: { m: MarketView; onChanged: () => Promise<void
         </div>
       )}
     </>
+  );
+}
+
+const HIRE_CLOSED: Record<string, string> = { accepted: 'Accepted by the buyer', cancelled: 'Handed back or cancelled, refunded', dispute_resolved: 'Dispute settled with a split' };
+
+/** A job from NEAR AI Agent Market: the same steps as an order, paid there when the buyer accepts. */
+function HireCard({ h, m, onChanged }: { h: Hire; m: MarketView; onChanged: () => Promise<void> }) {
+  const toast = useToast();
+  const [ask, setAsk] = useState<null | 'decline' | 'fail'>(null);
+  const [reason, setReason] = useState('');
+  const changes = h.stage === 'awaiting_owner' && !!h.delivery && !!h.revision;
+  const [act, busy] = useAction(async (what: 'accept' | 'decline' | 'fail' | 'retry', why?: string) => {
+    await post(`/api/market/hires/${h.key}/${what}`, why ? { reason: why } : {});
+    toast(what === 'accept' ? `${h.key} taken: the team starts` : what === 'decline' ? (changes ? `${h.key}: the earlier delivery was submitted again` : `${h.key} declined: the buyer is refunded`) : what === 'fail' ? `${h.key} handed back: the buyer is refunded` : `${h.key}: the team runs again`);
+    setAsk(null);
+    await onChanged();
+  });
+  const stage = STAGE[h.stage];
+  const failed = (h.prechecks ?? []).filter((c) => !c.ok);
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>
+          {h.key} · {h.title}
+        </h2>
+        <span className={`pill ${stage.tone}`}>{changes ? 'Changes asked: waits for you' : h.stage === 'running' && h.revisionRun ? `Team working on revision ${h.revisionRun}` : h.stage === 'delivered' ? 'Delivered: the buyer reviews' : stage.label}</span>
+        <span className="hint">
+          {h.price} {h.token} held by NEAR AI Agent Market · {m.teams.find((t) => t.agentMarket && h.team.endsWith(t.id))?.title ?? 'Agent Market'}
+          {h.slaDeadlineAt && h.stage !== 'delivered' ? ` · due ${new Date(h.slaDeadlineAt).toLocaleString()}` : ''}
+        </span>
+        <div className="right">
+          {h.runId && h.projectId && (
+            <a className="btn sm" href={href('runs', h.projectId, h.runId)}>
+              <IconPlay /> {h.stage === 'running' ? 'Watch the run' : 'Open the run'}
+            </a>
+          )}
+        </div>
+      </div>
+      <div className="card-pad col" style={{ gap: 12 }}>
+        {h.brief &&
+          Object.entries(h.brief).map(([k, v]) => (
+            <div key={k} className="col" style={{ gap: 2 }}>
+              <span className="tiny faint">{k}</span>
+              <div className="small" style={{ whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto' }}>
+                {v}
+              </div>
+            </div>
+          ))}
+        {!!h.files?.length && <div className="small muted">Files: {h.files.map((f) => `${f.name} (${(f.size / (1 << 20)).toFixed(1)} MB, ${f.field})`).join(', ')}</div>}
+        {h.prechecks && (
+          <div className="row" style={{ flexWrap: 'wrap' }}>
+            <span className="tiny faint" title="Rules covibe enforces itself, before any model sees the job">
+              Pre-checks
+            </span>
+            {h.prechecks.map((c) => (
+              <span key={c.name} className={`pill ${c.ok ? 'good' : 'bad'}`} title={c.detail}>
+                {c.ok ? <IconCheck /> : <IconX />} {c.name.replace('_', ' ')}
+              </span>
+            ))}
+          </div>
+        )}
+        {failed.length > 0 && <div className="small">{failed.map((c) => c.detail).join('; ')}</div>}
+        {h.intake && (
+          <div className="banner info">
+            <IconShield />
+            <div className="col" style={{ gap: 4 }}>
+              <div>
+                <strong>The intake agent says {h.intake.decision === 'need_info' ? 'it needs more information' : h.intake.decision}</strong> · scope fit {h.intake.scope_fit.toFixed(2)}
+              </div>
+              <div>{h.intake.reason}</div>
+              {h.intake.risks.length > 0 && <div className="small muted">Risks: {h.intake.risks.join('; ')}</div>}
+            </div>
+          </div>
+        )}
+        {h.note && (
+          <div className="banner warn">
+            <IconAlert /> {h.note}
+          </div>
+        )}
+        {h.gates && h.gates.length > 0 && (
+          <div className="row" style={{ flexWrap: 'wrap' }}>
+            <span className="tiny faint">Gates</span>
+            {h.gates.map((g) => (
+              <span key={g.name} className={`pill ${g.passed ? 'good' : 'bad'}`}>
+                {g.passed ? <IconCheck /> : <IconX />} {g.name}
+              </span>
+            ))}
+            {h.costUsd !== undefined && <span className="tiny faint">run cost {money(h.costUsd)}</span>}
+          </div>
+        )}
+        {h.revision && h.stage !== 'closed' && (
+          <div className="small">
+            <strong>Changes asked ({h.revision.n})</strong>: <span className="muted">{h.revision.note ?? h.revision.problem}</span>
+          </div>
+        )}
+        {h.stage === 'delivered' && <div className="small muted">Submitted {h.delivery ? ago(h.delivery.at) : ''}. You are paid there when the buyer accepts, or when their acceptance window ends.</div>}
+        {h.stage === 'awaiting_owner' && (
+          <div className="row">
+            <span className="small grow muted">
+              {changes ? 'The buyer asks for changes beyond the revisions this storefront includes. Saying no submits the earlier delivery again.' : 'Taking the job declares it started; after that the buyer cannot cancel it. Declining refunds them.'}
+            </span>
+            <button className="btn" disabled={busy} onClick={() => (setReason(h.recommendation?.action === 'decline' ? h.recommendation.reason : ''), setAsk('decline'))}>
+              {changes ? 'Turn it down' : 'Decline'}
+            </button>
+            <button className="btn primary" disabled={busy || (changes ? !h.revision?.note : !h.workspace)} onClick={() => void act('accept')}>
+              <IconCheck /> {changes ? 'Take the changes' : 'Take the job'}
+            </button>
+          </div>
+        )}
+        {h.stage === 'needs_owner' && (
+          <div className="row">
+            <span className="grow" />
+            <button className="btn" disabled={busy} onClick={() => (setReason(''), setAsk('fail'))}>
+              Hand back and refund
+            </button>
+            <button className="btn primary" disabled={busy || !h.workspace} onClick={() => void act('retry')}>
+              <IconLoop /> Run the team again
+            </button>
+          </div>
+        )}
+      </div>
+      {ask && (
+        <Modal title={ask === 'decline' ? (changes ? `Turn down the changes on ${h.key}` : `Decline ${h.key}`) : `Hand back ${h.key}`} onClose={() => setAsk(null)}>
+          <div className="col" style={{ gap: 10 }}>
+            <label className="field">
+              Reason (the buyer reads it)
+              <textarea className="input" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} />
+            </label>
+            <div className="row">
+              <span className="grow" />
+              <button className="btn" onClick={() => setAsk(null)}>
+                Cancel
+              </button>
+              <button className="btn primary" disabled={busy} onClick={() => void act(ask, reason.trim() || undefined)}>
+                {ask === 'decline' ? (changes ? 'Turn it down' : 'Decline') : 'Hand back'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
   );
 }
 
@@ -458,6 +629,8 @@ function SettingsTab({ m, onChanged }: { m: MarketView; onChanged: () => Promise
     await onChanged();
   });
   return (
+    <>
+    <AgentMarketCard m={m} onChanged={onChanged} />
     <div className="card">
       <div className="card-head">
         <h2>Connection</h2>
@@ -535,6 +708,69 @@ function SettingsTab({ m, onChanged }: { m: MarketView; onChanged: () => Promise
             Save
           </button>
         </div>
+      </div>
+    </div>
+    </>
+  );
+}
+
+/** Connect a team to an agent on NEAR AI Agent Market, so its jobs come in as orders. */
+function AgentMarketCard({ m, onChanged }: { m: MarketView; onChanged: () => Promise<void> }) {
+  const toast = useToast();
+  const candidates = m.teams.filter((t) => t.hasStorefront && !t.problems.length && !t.agentMarket);
+  const [team, setTeam] = useState('');
+  const [token, setToken] = useState('');
+  const chosen = team || candidates[0]?.id || '';
+  const [connect, connecting] = useAction(async () => {
+    await post(`/api/market/agent-market/${encodeURIComponent(chosen)}`, { token: token.trim() });
+    setToken('');
+    toast('Connected: the team takes the jobs of that agent');
+    await onChanged();
+  });
+  const [disconnect] = useAction(async (id: string) => {
+    await del(`/api/market/agent-market/${encodeURIComponent(id)}`);
+    toast('Disconnected; the token was removed');
+    await onChanged();
+  });
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>NEAR AI Agent Market</h2>
+        <span className="hint">Take jobs from market.near.ai with a team that has a storefront</span>
+      </div>
+      <div className="card-pad col" style={{ gap: 12 }}>
+        <div className="small muted">
+          Register an agent at market.near.ai and create a token for it (aat_…). covibe then picks up its jobs, screens them like orders, and submits only work that passed the team's gates; a job it does not take or cannot pass is handed back and the buyer
+          refunded. You are paid there, when the buyer accepts. No NEAR account is needed for this.
+        </div>
+        {m.teams.filter((t) => t.agentMarket).map((t) => (
+          <div key={t.id} className="row">
+            <span className="pill good">
+              <IconCheck /> {t.title ?? t.name}
+            </span>
+            <span className="small muted grow">takes the jobs of its agent{m.watching ? '' : ' while “Watch for orders” is on'}</span>
+            <button className="btn sm" onClick={() => void disconnect(t.id)}>
+              Disconnect
+            </button>
+          </div>
+        ))}
+        {candidates.length > 0 ? (
+          <div className="row">
+            <select className="input" style={{ width: 220 }} value={chosen} onChange={(e) => setTeam(e.target.value)}>
+              {candidates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.title ?? t.name}
+                </option>
+              ))}
+            </select>
+            <input className="input mono grow" type="password" autoComplete="off" placeholder="aat_… (the agent's token)" value={token} onChange={(e) => setToken(e.target.value)} />
+            <button className="btn primary" disabled={connecting || !token.trim() || !chosen} onClick={() => void connect()}>
+              Connect
+            </button>
+          </div>
+        ) : (
+          !m.teams.some((t) => t.agentMarket) && <div className="small muted">Give a team a storefront first (Storefronts): it says what the team takes, its spend cap, and which gates must pass.</div>
+        )}
       </div>
     </div>
   );

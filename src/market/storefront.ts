@@ -69,6 +69,7 @@ function resolveStorefront(doc: Raw): Storefront {
       budget_cap_usd: s.intake?.budget_cap_usd ?? 5,
       ...(s.intake?.estimated_cost_usd !== undefined ? { estimated_cost_usd: s.intake.estimated_cost_usd } : {}),
       min_price_near: s.intake?.min_price_near ?? 0,
+      min_price_usd: s.intake?.min_price_usd ?? 0,
       auto_min_fit: s.intake?.auto_min_fit ?? 0.8,
       max_input_mb: s.intake?.max_input_mb ?? 32,
       policy: s.intake?.policy ?? '',

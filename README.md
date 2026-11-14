@@ -982,6 +982,8 @@ The NEAR work is everything in `git diff near-market-base near-hackathon-submiss
 - the storefront schema ([`schemas/storefront.schema.json`](schemas/storefront.schema.json))
 - the app's **Market** and **Storefronts** pages
 - the hooks this needs in the engine and the runner
+- jobs from NEAR AI Agent Market ([`src/market/agentmarket.ts`](src/market/agentmarket.ts)) and signed answers from
+  NEAR AI Cloud ([`src/connections/attest.ts`](src/connections/attest.ts))
 
 Third-party libraries are listed under [Libraries](#libraries).
 
@@ -1180,7 +1182,7 @@ is over and pressing **Get the refund now** on the order page.
 ### Tests
 
 ```sh
-npm test                 # includes test/market.test.ts and test/market-server.test.ts
+npm test                 # includes test/market.test.ts, market-server.test.ts, agentmarket.test.ts and attest.test.ts
 npm run test:contract    # the contract's unit tests (needs Rust)
 npm run market:contract  # rebuild market/contract/res/covibe_market.wasm
 ```
@@ -1202,6 +1204,7 @@ storefront:
     budget_cap_usd: 3          # the engine stops the run here
     estimated_cost_usd: 1.5
     min_price_near: 4
+    min_price_usd: 10          # the floor for jobs from NEAR AI Agent Market (default 0)
     policy: |
       Short reels from the customer's own footage only.
   inputs:
@@ -1257,13 +1260,93 @@ the team on an order with these rules, which nothing in the team file can loosen
 This keeps an order away from the rest of the computer; it is still the owner's computer and login session. For
 orders from anyone, a machine or container that holds nothing else is the stronger answer.
 
+### Selling on NEAR AI Agent Market
+
+[NEAR AI Agent Market](https://market.near.ai) is a marketplace where buyers hire AI agents per job. A team with a
+storefront can take the jobs of an agent there, next to (or instead of) its listing on the covibe market. You
+register the agent on their site and create a token for it (`aat_…`); covibe polls for its jobs, so nothing has
+to be reachable from outside.
+
+```sh
+covibe market agent-market connect examples/landing-page --token-file ~/agent-market-token.txt
+covibe market watch        # or "Watch for orders" in the app
+```
+
+Each job goes through the same steps as an order, and shows in `covibe market orders` and on the Market page as
+`h1`, `h2`, …:
+
+1. **Mapping.** The job's title and text go to the listing's first required text field, each attached file to the
+   first file field that takes its type.
+2. **Pre-checks, then the intake agent**, with the same rules and modes as for an order. The price floor is
+   `intake.min_price_usd` (jobs there are paid in USD or USDC).
+3. **Taking it.** Only when the job is taken does covibe declare it started; from then on the buyer cannot cancel
+   it. A job that is declined is handed back, and the buyer is refunded.
+4. **The run**, confined like any order's run, with steps and checks reported to the buyer as progress.
+5. **Delivery only when the required gates passed.** The files are uploaded to the marketplace (as one
+   `delivery.zip` when there are more than four, or folders), with a Markdown summary and `covibe-receipt.json`:
+   the hash of every file, the gates and how they ended, and the hash of the run's log, signed with your NEAR key
+   when one is set up. If the gates do not pass, `auto` mode hands the job back (refund); otherwise it waits for
+   you.
+6. **Changes.** When the buyer sends a delivery back, their feedback is a revision: the ones the storefront
+   includes run at once, more wait for you. Turning one down submits the earlier delivery again with your reason.
+   A dispute ruling of "redo" is handled the same way.
+
+What is different from the covibe market, and what does not work:
+
+- **The buyer's acceptance releases the money, not the gates.** The marketplace holds the escrow and pays when the
+  buyer accepts or their acceptance window ends; disputes are decided there. The gates decide what covibe sends.
+- **At most 100 MB per delivery** (their limit). A larger one is held back for you; the reel cutter's videos can
+  exceed it.
+- **Direct hires only.** covibe does not bid on the job board, enter competitions, or answer quote requests.
+- **Messages the buyer writes while the team works are not read.** The brief is the job and the thread's newest
+  buyer message when the job is screened; later ones reach the team only as a change request.
+- **A revision whose gates fail waits for you**, since handing the job back would refund the earlier delivery too.
+- **Not tried against the live marketplace yet.** It is written against their published worker API and tested with
+  a stand-in for it ([`test/agentmarket.test.ts`](test/agentmarket.test.ts)).
+
+### Private inference on NEAR AI Cloud
+
+[NEAR AI Cloud](https://cloud.near.ai) runs models inside hardware enclaves (TEEs) and signs each answer there.
+Add it under Settings → Advanced → Providers (the "NEAR AI Cloud" preset, with your key), then point a member at
+it like any provider; for the intake agent, edit `~/.covibe/market/intake/team.yaml`:
+
+```yaml
+agents:
+  intake:
+    model: <a model id from the provider's list>
+    backend: { type: connection, connection: near-ai-cloud, model: <the same model id> }
+```
+
+For every model call of such a member, covibe's translator keeps the hash of the exact request and response,
+fetches the provider's signature over them, and checks three things: the signature is valid (ed25519), it covers
+those hashes, and its key is one the provider's attestation report names for a nonce covibe chose. The result is an
+`agent.attested` event in the run. For a market order (and an Agent Market job), the signed calls of the intake
+agent and of the team go into the receipt under `attestation`, with the report's hardware quote, and the
+storefront's order page says how many calls carry a checked signature.
+
+What this does and does not show:
+
+- It shows that a named model in an enclave answered these calls, and the customer's input was processed there
+  rather than by a provider who can read it. You can say so in the storefront's `privacy` text when every member
+  and the intake agent run there; covibe does not write that claim for you.
+- **covibe does not verify the hardware quote** (Intel TDX). It is in the receipt as it came, to be checked with
+  Intel's tooling (`dcap-qvl`). Until someone does, the link from the signing key to real enclave hardware rests on
+  the provider's report.
+- **The gates are still evaluated on the owner's machine.** A reviewer's verdict that decides a gate can be a signed
+  call, but the receipt names only hashes of the request and the answer, because the texts hold the team's
+  prompts. A customer cannot read from it what was asked or answered. The receipt remains the owner's statement,
+  with part of it now tied to enclave signatures.
+- Only ed25519 signatures are checked (the provider also offers ECDSA), and only on OpenAI-style connections.
+- **Not tried against the live service yet.** It follows their published verification docs and is tested with a
+  stand-in provider that signs the same way ([`test/attest.test.ts`](test/attest.test.ts)).
+
 ### Risks and how they are handled
 
 | Risk | Handling |
 | --- | --- |
 | Customer input is untrusted and may carry prompt injection | It is treated as data everywhere. The intake agent has no tools. The team runs confined (below): as if one of its members could be turned against the owner. File names from the customer cannot leave their folder. |
 | Runaway cost | A hard budget cap per order, enforced by the engine. When it is reached the run stops and the owner decides. |
-| The owner reports false gate results | In this stage that rests on trust. The review window and the dispute path are the mitigation; TEE attestation of the run is the real fix (Stage B). |
+| The owner reports false gate results | In this stage that rests on trust. The review window and the dispute path are the mitigation. Members on [NEAR AI Cloud](#private-inference-on-near-ai-cloud) add enclave signatures for their model calls to the receipt; attesting the whole run is the real fix (Stage B). |
 | The owner is offline | Time-based expiry refunds the customer; anyone can call `expire_order`. |
 | Customer input privacy | Encrypted in the browser and at rest in the relay, but the owner and the owner's model provider see it. The listing says so. |
 | The relay goes down | No funds are at risk: orders expire or are refunded. A hackathon-level dependency. |
@@ -1280,7 +1363,9 @@ orders from anyone, a machine or container that holds nothing else is the strong
 - **Every revision is a run the owner pays for.** Included revisions start without the owner; the spend cap per
   run and the cap of ten revisions per order bound it, nothing else does.
 - **The receipt is the owner's word.** The contract cannot see the gates; it sees a hash of a receipt the owner
-  signed. Stage B is to run the engine where its result can be attested.
+  signed. With members on NEAR AI Cloud the receipt also carries enclave signatures for their model calls (see
+  [above](#private-inference-on-near-ai-cloud) for what that does and does not show). Stage B is to run the engine
+  itself where its result can be attested.
 - **Order storage is paid by the platform.** `place_order` takes exactly the price, as designed, so the few
   hundred bytes of an order come out of the contract's balance (funded by fees). A storage deposit on orders
   would close that.
@@ -1366,8 +1451,8 @@ src/voice.ts               voice input: whisper.cpp on this computer (a whisper-
 src/market/                the market (owner's side): chain and relay clients (near.ts, relay.ts), sealing and signing
                            (crypto.ts), storefront.yaml (storefront.ts), pre-checks and the intake agent (intake.ts), order
                            processing (market.ts), files in encrypted chunks (blobs.ts), receipts and deliveries
-                           (delivery.ts), example media (media.ts), the storefront assistant (assistant.ts), the CLI
-                           and the app's routes
+                           (delivery.ts), example media (media.ts), the storefront assistant (assistant.ts), jobs from
+                           NEAR AI Agent Market (agentmarket.ts, zip.ts), the CLI and the app's routes
 market/contract/           the escrow contract (Rust, near-sdk); market/relay/ the relay; market/storefront/ the web storefront
 src/main.ts                CLI
 ui/                        the app UI (React, Vite, CodeMirror)

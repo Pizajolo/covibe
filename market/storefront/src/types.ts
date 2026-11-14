@@ -106,6 +106,8 @@ export interface Receipt {
   started: string;
   finished: string;
   owner: string;
+  /** Model calls an enclave provider signed (NEAR AI Cloud), as the owner's covibe recorded and checked them. */
+  attestation?: { v: 1; provider: string; calls: { run: 'intake' | 'team'; model: string; verified: boolean }[]; reports: { model: string; signers: { intel_quote?: string }[] }[] };
   public_key: string;
   signature?: string;
 }

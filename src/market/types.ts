@@ -1,3 +1,5 @@
+import type { Attestation, AttestedCall, AttestationReport } from '../connections/attest.js';
+
 // Shapes shared by the market module: what the contract returns, what travels
 // through the relay, and what the owner's covibe keeps about each order.
 
@@ -165,6 +167,8 @@ export interface Storefront {
     estimated_cost_usd?: number;
     /** Orders locked below this price are not taken. */
     min_price_near: number;
+    /** NEAR AI Agent Market: hires that pay less than this (USD or USDC) are not taken. */
+    min_price_usd: number;
     /** auto: act alone only when the agent's scope_fit is at least this. */
     auto_min_fit: number;
     max_input_mb: number;
@@ -214,9 +218,25 @@ export interface Receipt {
   started: string;
   finished: string;
   owner: string;
+  /** Model calls a provider signed inside an enclave, when members ran on one (NEAR AI Cloud). */
+  attestation?: ReceiptAttestation;
   public_key: string;
   /** ed25519 over the receipt's JSON without this field (base64). */
   signature?: string;
+}
+
+/**
+ * What an enclave provider signed about the model calls behind an order. Each call names the
+ * hashes of a request and a response (the texts stay with the owner), the provider's signature
+ * over them, and whether covibe found it valid and its key named in a report. The reports carry
+ * the hardware quotes for those keys as they came: covibe does not verify the quotes.
+ */
+export interface ReceiptAttestation {
+  v: 1;
+  provider: string;
+  /** `run`: "intake" for the screening of the order, "team" for the team's work. */
+  calls: (AttestedCall & { run: 'intake' | 'team'; step?: string; agent?: string })[];
+  reports: AttestationReport[];
 }
 
 export interface MarketSettings {
@@ -253,6 +273,8 @@ export interface LocalOrder {
   prechecks?: Precheck[];
   intake?: IntakeDecision;
   intakeRunId?: string;
+  /** What an enclave provider signed about the intake agent's model calls. */
+  intakeAttestation?: Attestation;
   /** What covibe suggests, and why. */
   recommendation?: { action: 'accept' | 'decline'; reason: string };
   decidedBy?: 'owner' | 'auto';
@@ -276,10 +298,81 @@ export interface LocalOrder {
   updatedAt: string;
 }
 
+/** How an assignment stands on NEAR AI Agent Market. */
+export type HireStatus = 'in_progress' | 'submitted' | 'accepted' | 'disputed' | 'dispute_resolved' | 'cancelled';
+
+/**
+ * A job a buyer hired the team for on NEAR AI Agent Market (see agentmarket.ts). It goes through
+ * the same stages as an order of the covibe market; the money is held by that marketplace and is
+ * released when the buyer accepts, so covibe submits only what passed the team's gates.
+ */
+export interface Hire {
+  /** covibe's own short name for it: "h1", "h2", … */
+  key: string;
+  assignmentId: string;
+  jobId: string;
+  team: string;
+  stage: Stage;
+  status: HireStatus;
+  title: string;
+  /** What the buyer put in escrow, as the marketplace states it ("5.00", "USD"). */
+  price: string;
+  token: string;
+  slaDeadlineAt?: string;
+  brief?: Record<string, string>;
+  files?: { field: string; name: string; size: number }[];
+  prechecks?: Precheck[];
+  intake?: IntakeDecision;
+  intakeRunId?: string;
+  intakeAttestation?: Attestation;
+  recommendation?: { action: 'accept' | 'decline'; reason: string };
+  decidedBy?: 'owner' | 'auto';
+  workspace?: string;
+  projectId?: string;
+  runId?: string;
+  runStatus?: string;
+  costUsd?: number;
+  gates?: { name: string; passed: boolean }[];
+  note?: string;
+  /** The buyer's latest change request (or a dispute ruling to redo the work), and the one the team was last started on. */
+  revision?: { n: number; note?: string; problem?: string };
+  revisionRun?: number;
+  resultBranch?: string;
+  /** What was last submitted: the Markdown and the links of its files, so an unchanged resubmission can repeat them. */
+  delivery?: { markdown: string; files: string[]; receiptHash: string; at: string };
+  updatedAt: string;
+}
+
+/** The record that goes with a delivery on NEAR AI Agent Market: what was delivered, which gates passed, signed by the owner. */
+export interface HireReceipt {
+  v: 1;
+  market: 'near-ai-agent-market';
+  assignment_id: string;
+  job_id: string;
+  /** sha256 of the order as the team received it (ORDER.md). */
+  input_hash: string;
+  /** Every delivered file by its path in the deliverables folder. */
+  files: { name: string; size: number; sha256: string }[];
+  run_status: string;
+  gates: { name: string; passed: boolean }[];
+  event_log_hash: string;
+  started: string;
+  finished: string;
+  /** The owner's NEAR account, when one is set up. */
+  owner: string;
+  attestation?: ReceiptAttestation;
+  public_key: string;
+  signature?: string;
+}
+
 export interface MarketState {
   /** Published storefronts: team key → its listing. */
   listings: Record<string, { listingId: number; contractId: string; metaHash: string; publishedAt: string }>;
   orders: Record<string, LocalOrder>;
+  /** Teams connected to an agent on NEAR AI Agent Market (the agent's token is in the secret store). */
+  agentMarket: Record<string, { baseUrl: string; connectedAt: string }>;
+  /** Hires from there, by assignment id. */
+  hires: Record<string, Hire>;
 }
 
 export interface Earnings {
@@ -303,6 +396,9 @@ export interface Overview {
   missing: string[];
   listings: { team: string; listingId: number; contractId: string; publishedAt: string; listing?: Listing; url: string }[];
   orders: LocalOrder[];
+  /** NEAR AI Agent Market: the teams connected to an agent there, and their hires. */
+  agentMarket: { team: string; baseUrl: string; connectedAt: string }[];
+  hires: Hire[];
   earnings: Earnings;
   watching: boolean;
   lastTick?: string;
@@ -330,6 +426,8 @@ export interface MarketTeam {
   rating?: { count: number; sum: number };
   /** The page on-chain differs from the file: publish again to update it. */
   outdated?: boolean;
+  /** Takes the jobs of an agent on NEAR AI Agent Market. */
+  agentMarket?: boolean;
 }
 
 /** What the app's Market page shows. */

@@ -821,6 +821,9 @@ class Engine {
       if (result.sessionId) this.store.saveSession(this.runId, agent.name, result.sessionId, cwd);
 
       const finished = finishedData(agent, result, built.via);
+      // What a signing provider said about this member's model calls goes on the record before the step ends either way.
+      const attested = await built.attested?.().catch(() => undefined);
+      if (attested) this.emit({ ...base, type: 'agent.attested', data: { ...attested } });
       if (!result.ok) {
         this.emit({ ...base, type: 'agent.error', data: finished });
         throw new StepError(`${agent.name} failed on step ${stepId}: ${result.error ?? 'unknown error'}`);
