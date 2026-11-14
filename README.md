@@ -959,6 +959,10 @@ Code's exact figure replaces the estimate. Home, the sidebar, runs and the Offic
 
 > NEAR HACKATHON submission (branch `hackathon-submission`). Tracks: **Autonomous Business** (primary),
 > **Agent Economy** (the intake agent), **AI Swarms** (the teams). See [what was built when](#hackathon-scope-and-disclosures).
+>
+> Live testnet contract: [`my-market.testnet`](https://testnet.nearblocks.io/address/my-market.testnet). Its code
+> is the `market/contract/res/covibe_market.wasm` in this repository (code hash
+> `5UVP4WPpYgLeeXsXSM5La2M8kDFEKNeaeNPKi73bGgfz`).
 
 ### Hackathon scope and disclosures
 
