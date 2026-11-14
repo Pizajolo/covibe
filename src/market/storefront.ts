@@ -21,11 +21,12 @@ export const DEFAULT_PRIVACY =
 let validator: ReturnType<Ajv2020['compile']> | undefined;
 
 interface Raw {
-  storefront: Partial<Omit<Storefront, 'windows' | 'intake' | 'deliverables'>> & {
+  storefront: Partial<Omit<Storefront, 'windows' | 'intake' | 'deliverables' | 'revisions'>> & {
     title: string;
     price_near: number;
     windows?: Partial<Storefront['windows']>;
     intake?: Partial<Storefront['intake']>;
+    revisions?: Partial<Storefront['revisions']>;
     deliverables: { folder: string; gates_required?: string[] };
   };
 }
@@ -77,6 +78,8 @@ function resolveStorefront(doc: Raw): Storefront {
     goal: s.goal ?? 'Fulfil the customer order below.',
     deliverables: { folder: s.deliverables.folder.replace(/\/+$/, ''), gates_required: s.deliverables.gates_required ?? [] },
     workspace: s.workspace ?? 'folder',
+    network: s.network ?? [],
+    revisions: { included: s.revisions?.included ?? 0 },
     privacy: s.privacy ?? DEFAULT_PRIVACY,
   };
 }
@@ -136,6 +139,7 @@ export function listingInput(sf: Storefront, metaHash: string, intakePubkey: str
     delivery_window_s: seconds(sf.windows.delivery_min),
     review_window_s: seconds(sf.windows.review_min),
     intake_pubkey: intakePubkey,
+    revisions: sf.revisions.included,
   };
 }
 
@@ -165,5 +169,7 @@ storefront:
   deliverables:
     folder: out
     gates_required: [${gates.join(', ')}]
+  revisions:
+    included: 1                # revisions per order the team does without asking you; more need your OK
 `;
 }

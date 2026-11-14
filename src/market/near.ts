@@ -1,7 +1,7 @@
 // The market contract as covibe uses it. `MarketChain` is the seam: NearChain
 // talks to NEAR through near-api-js, and tests put a stand-in behind it.
 import { Account, JsonRpcProvider, type KeyPairString } from 'near-api-js';
-import { MarketError, type ChainConfig, type Listing, type ListingInput, type Order } from './types.js';
+import { MarketError, type ChainConfig, type Listing, type ListingInput, type Order, type Review } from './types.js';
 
 export interface TxResult<T = undefined> {
   /** Transaction hash, for the explorer. */
@@ -31,10 +31,17 @@ export interface MarketChain {
   deliverOrder(id: number, receiptHash: string, bundleHash: string): Promise<TxResult>;
   settleOrder(id: number): Promise<TxResult>;
   expireOrder(id: number): Promise<TxResult>;
+  /** Answer a revision request that waits for the owner. */
+  answerRevision(id: number, accept: boolean, reason?: string): Promise<TxResult>;
+  /** A listing's reviews, oldest first. */
+  reviews(listingId: number, from?: number, limit?: number): Promise<Review[]>;
   /** The customer's side (the storefront does these in the browser; here for the CLI and tests). */
   placeOrder(listingId: number, inputHash: string, price: string, accessKey?: string): Promise<TxResult<number>>;
   confirmOrder(id: number): Promise<TxResult>;
   disputeOrder(id: number, reason?: string): Promise<TxResult>;
+  /** Resolves with whether the revision was one of the included ones (taken at once). */
+  requestRevision(id: number, noteHash: string): Promise<TxResult<boolean>>;
+  reviewOrder(id: number, stars: number, comment?: string): Promise<TxResult>;
 }
 
 export const YOCTO = 10n ** 24n;
@@ -133,6 +140,10 @@ export class NearChain implements MarketChain {
   placeOrder = (listingId: number, inputHash: string, price: string, accessKey?: string) => this.call<number>('place_order', { listing_id: listingId, input_hash: inputHash, access_key: accessKey ?? null }, BigInt(price));
   confirmOrder = (id: number) => this.call('confirm_order', { order_id: id });
   disputeOrder = (id: number, reason?: string) => this.call('dispute_order', { order_id: id, reason: reason ?? null });
+  answerRevision = (id: number, accept: boolean, reason?: string) => this.call('answer_revision', { order_id: id, accept, reason: reason ?? null });
+  requestRevision = (id: number, noteHash: string) => this.call<boolean>('request_revision', { order_id: id, note_hash: noteHash });
+  reviewOrder = (id: number, stars: number, comment?: string) => this.call('review_order', { order_id: id, stars, comment: comment ?? null });
+  reviews = (listingId: number, from = 0, limit = 50) => this.view<Review[]>('get_reviews', { listing_id: listingId, from_index: from, limit });
 }
 
 /** The contract's own words out of a failed call ("Smart contract panicked: …"), else the error as it is. */

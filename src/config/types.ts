@@ -42,6 +42,23 @@ export interface SandboxConfig {
   allowWrite: string[];
   /** Absolute paths shell commands may not write, even inside the working folder (a plain folder outside the write scope). */
   denyWrite?: string[];
+  /** Absolute paths shell commands may not read (a confined run hides the home folder). */
+  denyRead?: string[];
+  /** Absolute paths inside `denyRead` they may read all the same (the working folder, installed toolchains). */
+  allowRead?: string[];
+  /** Environment variables shell commands do not get (keys and tokens Claude Code itself needs). */
+  denyEnv?: string[];
+}
+
+/**
+ * Set on every member of a run that works on a stranger's input (a market
+ * order; see engine/confine.ts). The member reads only its working folder,
+ * its shell commands see neither the home folder nor any key, and nothing
+ * leaves the machine except to `network`.
+ */
+export interface Confinement {
+  /** Domains shell commands and WebFetch may reach (empty: none). */
+  network: string[];
 }
 
 export interface AgentConfig {
@@ -70,6 +87,8 @@ export interface AgentConfig {
   writes: boolean;
   /** Set when the agent has Bash and sandboxing is on. */
   sandbox?: SandboxConfig;
+  /** Set for a run on a stranger's input (a market order). */
+  confined?: Confinement;
   /** Skill names (team defaults plus the agent's own). */
   skills: string[];
   /** Plugin names from the plugin library (team defaults plus the agent's own). */

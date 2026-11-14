@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FileSecrets } from '../src/connections/secrets.js';
@@ -60,7 +61,7 @@ afterEach(async () => {
   relays = [];
 });
 
-async function setup(mode: string, scripts: Record<string, Script>, extra = '') {
+async function setup(mode: string, scripts: Record<string, Script>, extra = '', teamYaml = TEAM) {
   const chain = new FakeChain();
   const owner = generateNearKey();
   const keys: Record<string, string> = { [OWNER]: owner.publicKey };
@@ -68,7 +69,7 @@ async function setup(mode: string, scripts: Record<string, Script>, extra = '') 
   relays.push(relay);
   const home = tempDir('covibe-market-');
   const teamDir = tempDir('covibe-team-');
-  writeFiles(teamDir, { 'team.yaml': TEAM, 'schemas/review.json': REVIEW_SCHEMA, 'storefront.yaml': storefront(mode, extra) });
+  writeFiles(teamDir, { 'team.yaml': teamYaml, 'schemas/review.json': REVIEW_SCHEMA, 'storefront.yaml': storefront(mode, extra) });
   const runner = new ScriptedRunner(scripts);
   const lines: string[] = [];
   const market = new Market({ home, secrets: new FileSecrets(home), host: new LocalHost(runner), chain, relay: new RelayClient(relay.url, OWNER, owner.secretKey), log: (l) => lines.push(l) });
@@ -332,6 +333,91 @@ describe('an order', () => {
     await market.tick();
     await market.settle();
     expect((await chain.order(id))!.status).toBe('DELIVERED');
+  });
+});
+
+describe('an order is run confined', () => {
+  // A team file that asks for everything an order must not get.
+  const LOOSE = TEAM.replace('  isolation: none', '  isolation: none\n  setting_sources: [user, project]\n  sandbox: { enabled: false }').replace('tools: [Read, Write, Edit]', 'tools: [Read, Write, Edit, Bash, Grep, Glob, WebFetch]\n    browser: true');
+
+  it('whatever the team file says: sandboxed, the home folder hidden, no keys, no settings from the folder', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_test';
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oauth-test';
+    try {
+      const { market, runner, order } = await setup('recommend', good, '', LOOSE);
+      const { id } = await order({ fields: { brief: 'A page for Acme.' } });
+      await market.tick();
+      await market.accept(id);
+      await market.settle();
+      expect(market.store.order(id)!.stage).toBe('delivered');
+      const workspace = market.store.order(id)!.workspace!;
+      const maker = runner.callsFor('maker')[0]!;
+
+      // The shell: on, nothing of the home folder but the working folder and toolchains, no network, no package caches.
+      expect(maker.sandbox).toBeDefined();
+      expect(maker.sandbox!.network).toEqual([]);
+      expect(maker.sandbox!.allowWrite).toEqual([]);
+      expect(maker.sandbox!.denyRead).toEqual([homedir()]);
+      expect(maker.sandbox!.allowRead).toContain(workspace);
+      expect(maker.sandbox!.allowRead!.some((p) => /\.(ssh|aws|covibe|claude|near-credentials)$|\.cargo$|\.config\/git$/.test(p))).toBe(false);
+      for (const name of ['CLAUDE.md', '.claude', '.mcp.json', '.covibe']) expect(maker.sandbox!.denyWrite).toContain(join(workspace, name));
+      // Keys: the owner's other tokens are not in the environment at all; Claude Code's own are kept from its shell commands.
+      expect(maker.env.GITHUB_TOKEN).toBeUndefined();
+      expect(maker.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('oauth-test');
+      expect(maker.sandbox!.denyEnv).toContain('CLAUDE_CODE_OAUTH_TOKEN');
+      expect(maker.env.PATH).toBe(process.env.PATH);
+      // Nothing in the folder is read as settings or instructions, by the team or by the intake agent.
+      expect(maker.settingSources).toEqual([]);
+      expect(runner.callsFor('intake')[0]!.settingSources).toEqual([]);
+      expect(maker.customTools?.some((t) => t.name.startsWith('browser_')) ?? false).toBe(false);
+      expect(maker.systemPrompt).toContain('nothing else in the home folder');
+
+      // The file tools: the working folder only, and no link out of it.
+      const check = maker.checkToolUse;
+      expect(check('Read', { file_path: join(workspace, 'ORDER.md') })).toBeUndefined();
+      expect(check('Grep', { pattern: 'x' })).toBeUndefined();
+      expect(check('Read', { file_path: join(homedir(), '.ssh', 'id_ed25519') })).toMatch(/outside your working folder/);
+      expect(check('Grep', { pattern: 'x', path: homedir() })).toMatch(/outside your working folder/);
+      expect(check('Glob', { pattern: `${homedir()}/.ssh/*` })).toMatch(/relative/);
+      expect(check('Glob', { pattern: '../../*' })).toMatch(/relative/);
+      symlinkSync(homedir(), join(workspace, 'out', 'home'));
+      expect(check('Read', { file_path: join(workspace, 'out', 'home', '.zshrc') })).toMatch(/outside your working folder/);
+      expect(check('Write', { file_path: join(workspace, 'out', 'home', '.zshrc'), content: 'x' })).toMatch(/leads outside/);
+      expect(check('Write', { file_path: join(workspace, 'out', 'more.html'), content: 'x' })).toBeUndefined();
+      expect(check('WebFetch', { url: 'https://example.com/?q=secret' })).toMatch(/cannot be reached/);
+    } finally {
+      delete process.env.GITHUB_TOKEN;
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    }
+  });
+
+  it('reaches only the domains the storefront names', async () => {
+    const { market, runner, order, teamDir } = await setup('recommend', good, '', LOOSE);
+    writeFileSync(join(teamDir, 'storefront.yaml'), storefront('recommend') + '  network: [registry.npmjs.org, "*.example.com"]\n');
+    const { id } = await order({ fields: { brief: 'A page for Acme.' } });
+    await market.tick();
+    await market.accept(id);
+    await market.settle();
+    const maker = runner.callsFor('maker')[0]!;
+    expect(maker.sandbox!.network).toEqual(['registry.npmjs.org', '*.example.com']);
+    expect(maker.checkToolUse('WebFetch', { url: 'https://docs.example.com/a' })).toBeUndefined();
+    expect(maker.checkToolUse('WebFetch', { url: 'https://example.org/' })).toMatch(/cannot be reached/);
+    expect(storefrontProblems(storefront('recommend') + '  network: ["https://example.com/x"]\n').join(' ')).toMatch(/network/);
+  });
+
+  it('holds a delivery back when a file looks like a key, also in auto mode', async () => {
+    let secret = '';
+    const { market, chain, order, owner } = await setup('auto', { ...good, maker: () => ({ write: { 'out/index.html': '<h1>Acme</h1>\n', 'out/notes.txt': `for you: ${secret}\n` } }) });
+    secret = owner.secretKey;
+    const { id } = await order({ fields: { brief: 'A page for Acme.' } });
+    await market.tick();
+    await market.settle();
+    const local = market.store.order(id)!;
+    expect(local.stage).toBe('needs_owner');
+    expect(local.note).toMatch(/held back: out\/notes\.txt looks like it holds one of your own keys/);
+    // Nothing was sent, and the order still waits for the owner.
+    expect((await chain.order(id))!.status).toBe('ACCEPTED');
+    expect((await chain.order(id))!.bundle_hash).toBeNull();
   });
 });
 

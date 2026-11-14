@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentConfig, Branch, JsonSchema, Step, SummaryStep, TeamConfig } from '../config/types.js';
 import type { EventStore } from '../events/store.js';
@@ -24,7 +24,8 @@ import { appHub } from '../apps/manager.js';
 import { appTools } from '../apps/tools.js';
 import { ASK_TOOL, Deadline, LEAD_SCHEMA, leadPrompt, leadVerdict, QUESTION_STEP, questionOptions, RunPause, waitForAnswer, type LeadVerdict } from './questions.js';
 import { REQUEST_TOOL, RequestChains, requestPrompt } from './requests.js';
-import { makeToolChecker, readOnly } from './scope.js';
+import { makeToolChecker, readOnly, type ConfinedScope } from './scope.js';
+import { confinedSandbox } from './confine.js';
 import { denyWritePaths, type Writer } from './folder.js';
 import { Workspace, type CollectResult } from './workspace.js';
 import { attachFiles, attachmentNote, ensureAttachmentsDir, takeUploads, type Attachment } from './attachments.js';
@@ -1238,13 +1239,24 @@ export function buildInvocation(
   let sandbox = agent.sandbox && isCurator ? { ...agent.sandbox, allowWrite: [...agent.sandbox.allowWrite, brain!] } : agent.sandbox;
   // In a plain folder nothing can be thrown away after the turn, so shell commands are kept out of what the scope does not reach.
   if (sandbox && p.folder) sandbox = { ...sandbox, denyWrite: denyWritePaths(p.root, agent.writes ? agent.writeScope : []) };
+  // The brain, and the files the human gave the run (its folder exists from the first turn, so files sent later in chat are readable too).
+  const readDirs = [...(brain && !p.curating ? [brain] : []), ...(p.repo && !p.curating ? [ensureAttachmentsDir(p.repo, runId)] : [])];
+  const skills = resolveSkills(agent.skills);
+  // A run on a stranger's input (a market order): the member reads its working folder and nothing else of the person's (see confine.ts).
+  let confined: ConfinedScope | undefined;
+  if (agent.confined) {
+    const folders = [...new Set([p.root, p.cwd])];
+    const roots = [...folders, ...readDirs, ...(skills?.pluginDirs ?? [])];
+    confined = { readRoots: roots, network: agent.confined.network };
+    // A worktree's git commands read the repository it belongs to.
+    if (sandbox) sandbox = confinedSandbox(sandbox, { roots: [...roots, ...(p.repo ? [join(p.repo, '.git')] : [])], folders, home: homedir(), env: p.env });
+  }
   return {
     agentName: agent.name,
     prompt: p.prompt,
     systemPrompt: [systemPrompt(team, agent, { canAsk: tools.some((t) => t.name === ASK_TOOL), canRequest: tools.some((t) => t.name === REQUEST_TOOL), app: tools.some((t) => t.name === 'app_start'), folder: p.folder ? p.root : undefined }), ...(p.repo && !p.curating ? [p.brainNote ?? brainPrompt(p.repo, agent, team)] : [])].join('\n\n'),
-    // The brain, and the files the human gave the run (its folder exists from the first turn, so files sent later in chat are readable too).
-    readDirs: [...(brain && !p.curating ? [brain] : []), ...(p.repo && !p.curating ? [ensureAttachmentsDir(p.repo, runId)] : [])],
-    skills: resolveSkills(agent.skills),
+    readDirs,
+    skills,
     plugins: resolvePlugins(agent.plugins),
     customTools: tools.length ? tools : undefined,
     cwd: p.cwd,
@@ -1263,7 +1275,7 @@ export function buildInvocation(
     signal: p.signal,
     canMessage: agent.canMessage,
     beforeToolUse: p.beforeToolUse,
-    checkToolUse: makeToolChecker({ root: p.root, cwd: p.cwd, writeScope: agent.writes ? agent.writeScope : [], extraRoots: isCurator && brain ? [brain] : undefined }),
+    checkToolUse: makeToolChecker({ root: p.root, cwd: p.cwd, writeScope: agent.writes ? agent.writeScope : [], extraRoots: isCurator && brain ? [brain] : undefined, confined }),
     sendMessage: (to, text) => {
       if (!agent.canMessage.includes(to)) return `You cannot message ${to}.`;
       const m = store.enqueue(runId, to, agent.name, text, 'steer');

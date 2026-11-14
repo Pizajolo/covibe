@@ -83,7 +83,22 @@
             "gates_required": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
           }
         },
+        "revisions": {
+          "description": "Revisions a customer can ask for after a delivery. `included` per order are taken automatically (the team goes back to work without asking the owner); a request beyond them waits for the owner's answer.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "included": { "type": "integer", "minimum": 0, "maximum": 5 }
+          }
+        },
         "workspace": { "enum": ["folder", "git"] },
+        "network": {
+          "description": "Domains the team may reach while it works on an order (shell commands and WebFetch). An order is run confined: none unless named here.",
+          "type": "array",
+          "maxItems": 30,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^(\\*\\.)?[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$" }
+        },
         "privacy": { "type": "string", "maxLength": 2000 }
       }
     }

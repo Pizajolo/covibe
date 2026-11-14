@@ -2,9 +2,9 @@
 // through the relay, and what the owner's covibe keeps about each order.
 
 /** An order's state on-chain (see market/contract). */
-export type OrderStatus = 'PLACED' | 'ACCEPTED' | 'DELIVERED' | 'DECLINED' | 'EXPIRED' | 'FAILED' | 'DISPUTED' | 'SETTLED';
+export type OrderStatus = 'PLACED' | 'ACCEPTED' | 'DELIVERED' | 'DECLINED' | 'EXPIRED' | 'FAILED' | 'DISPUTED' | 'SETTLED' | 'REVISION_REQUESTED';
 
-export const OPEN_STATUSES: OrderStatus[] = ['PLACED', 'ACCEPTED', 'DELIVERED'];
+export const OPEN_STATUSES: OrderStatus[] = ['PLACED', 'ACCEPTED', 'DELIVERED', 'REVISION_REQUESTED'];
 
 export interface ListingStats {
   completed: number;
@@ -25,6 +25,8 @@ export interface ListingInput {
   delivery_window_s: number;
   review_window_s: number;
   intake_pubkey: string;
+  /** Revisions per order the contract takes without asking the owner (0 to 5). */
+  revisions?: number;
 }
 
 export interface Listing extends ListingInput {
@@ -32,6 +34,20 @@ export interface Listing extends ListingInput {
   owner: string;
   active: boolean;
   stats: ListingStats;
+  created_at: number;
+  /** Reviews of this listing, and their stars added up (the average is sum / count). */
+  rating_count?: number;
+  rating_sum?: number;
+}
+
+/** A customer's review of an order that was delivered and is closed. */
+export interface Review {
+  order_id: number;
+  listing_id: number;
+  customer: string;
+  /** 1 to 5. */
+  stars: number;
+  comment: string;
   created_at: number;
 }
 
@@ -53,6 +69,14 @@ export interface Order {
   receipt_hash: string | null;
   bundle_hash: string | null;
   reason: string | null;
+  /** Revisions taken without asking (locked when the order was placed), and how many the team was sent back for. */
+  revisions_included?: number;
+  revisions_used?: number;
+  /** sha256 of the customer's latest revision note (encrypted, in the relay). */
+  revision_hash?: string | null;
+  /** When a request that waits for the owner was made. */
+  revision_requested_at?: number | null;
+  review?: Review | null;
 }
 
 export interface ChainConfig {
@@ -154,6 +178,10 @@ export interface Storefront {
   deliverables: { folder: string; gates_required: string[] };
   /** What the team works in: a plain folder, or a git repository with the order as its first commit. */
   workspace: 'folder' | 'git';
+  /** Domains the team may reach while it works on an order (shell commands and WebFetch). None unless named here. */
+  network: string[];
+  /** Revisions per order that are taken automatically; a request beyond them waits for the owner. */
+  revisions: { included: number };
   privacy: string;
 }
 
@@ -238,7 +266,13 @@ export interface LocalOrder {
   replyKey?: string;
   /** Why it waits for the owner, or what went wrong. */
   note?: string;
-  txs: Partial<Record<'accept' | 'decline' | 'fail' | 'deliver' | 'settle', string>>;
+  /** The customer's latest revision request: its number, the note's hash on-chain, and the note (or why it cannot be read). */
+  revision?: { n: number; hash: string; note?: string; problem?: string };
+  /** The revision the team was last started on (0 or unset: the order itself). */
+  revisionRun?: number;
+  /** Result branch of the last delivered run (git workspaces): a revision starts from it. */
+  resultBranch?: string;
+  txs: Partial<Record<'accept' | 'decline' | 'fail' | 'deliver' | 'settle' | 'revision', string>>;
   updatedAt: string;
 }
 
@@ -293,6 +327,7 @@ export interface MarketTeam {
   url?: string;
   active?: boolean;
   stats?: ListingStats;
+  rating?: { count: number; sum: number };
   /** The page on-chain differs from the file: publish again to update it. */
   outdated?: boolean;
 }

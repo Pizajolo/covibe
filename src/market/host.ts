@@ -9,6 +9,7 @@ import type { Connections } from '../connections/store.js';
 import { startRun } from '../engine/engine.js';
 import { EventStore } from '../events/store.js';
 import type { RunEvent } from '../events/types.js';
+import type { Env } from '../runner/backend.js';
 import type { AgentRunner } from '../runner/types.js';
 import { runIntake } from './intake.js';
 import type { IntakeDecision } from './types.js';
@@ -19,6 +20,8 @@ export interface HostRun {
   repo: string;
   goal: string;
   budgetUsd?: number;
+  /** The environment members start from (an order's run gets a reduced one; see engine/confine.ts). */
+  env?: Env;
   signal?: AbortSignal;
   /** Called once the run exists (its id, and the app's project for it if there is one). */
   onStart?(runId: string, projectId?: string): void;
@@ -53,7 +56,7 @@ export interface RunHost {
 
 /** Run a team on a folder with a given store, and gather what the market needs from it. */
 export async function runOnStore(store: EventStore, runner: AgentRunner, connections: Connections | undefined, o: HostRun, projectId?: string, track?: (runId: string, done: Promise<unknown>) => void): Promise<RunResult> {
-  const { runId, done } = await startRun({ team: o.team, repo: o.repo, goal: o.goal, store, runner, connections, signal: o.signal, budgetUsd: o.budgetUsd, onLimit: 'stop' });
+  const { runId, done } = await startRun({ team: o.team, repo: o.repo, goal: o.goal, store, runner, connections, env: o.env, signal: o.signal, budgetUsd: o.budgetUsd, onLimit: 'stop' });
   track?.(runId, done);
   o.onStart?.(runId, projectId);
   const unsubscribe = store.subscribe((e) => {

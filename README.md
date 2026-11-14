@@ -1038,8 +1038,11 @@ contract. An intake agent screens the order for the owner. If it is accepted, th
 7. **The run.** The order becomes a workspace folder (`ORDER.md`, the customer's files, an empty deliverables
    folder) and the team runs on it as on any goal, with its gates and fix loops. The customer's text reaches the
    members marked as data. The customer sees a status feed (steps and checks by name), never the board or prompts.
-   The engine stops the run at the listing's spend cap and hands the order to the owner.
-8. **Delivery, only if the required gates passed.** covibe sends each file of the deliverables folder to the
+   The engine stops the run at the listing's spend cap and hands the order to the owner. Every order runs
+   **confined**, whatever the team file says (see [Order runs are confined](#order-runs-are-confined)).
+8. **Delivery, only if the required gates passed** and no file of the deliverables folder looks like a key (one
+   of the owner's own, or the usual shapes of private keys and tokens); such a delivery is held back for the
+   owner in every intake mode. covibe sends each file of the deliverables folder to the
    relay in encrypted chunks, seals the list of them (the bundle) to the customer's per-order key, uploads it,
    and writes a receipt signed with the owner's NEAR key:
    `{ order_id, input_hash, bundle_hash, gates: [{ name, passed }], event_log_hash, started, finished, … }`.
@@ -1187,11 +1190,29 @@ gate on measured facts: the render plays, is vertical and is 5 to 90 seconds lon
 State changes before any transfer. A transfer that fails is credited to the receiver's claimable balance instead
 of being lost. The price and the fee are locked when the order is placed.
 
+### Order runs are confined
+
+An order's text and files come from a stranger and may carry instructions meant for the members. So covibe runs
+the team on an order with these rules, which nothing in the team file can loosen (`src/engine/confine.ts`):
+
+| What | Rule |
+| --- | --- |
+| Shell commands | Always in the OS sandbox, also for a member with `sandbox: { enabled: false }`. The home folder is hidden (keys, tokens, other projects, the Keychain) except the order's folder and installed toolchains; writes only in the order's folder and temp folders, not in package caches |
+| Network | None, unless `storefront.yaml` names domains: `network: [registry.npmjs.org, "*.example.com"]`. The same list limits `WebFetch` |
+| File tools | `Read`, `Grep`, `Glob` and the write tools only inside the order's folder, with links followed first, so a link made by a shell command leads nowhere |
+| Keys | Members start from a reduced environment (no `GITHUB_TOKEN`, `NPM_TOKEN`, SSH agent…); what Claude Code itself needs to sign in is kept from its shell commands |
+| Settings | No `CLAUDE.md`, `.claude` settings or `.mcp.json` are read from the order's folder (by the team or the intake agent), and shell commands cannot write them |
+| Tools | No browser, no app, no plugins |
+| Delivery | Held back for the owner when a file looks like a key |
+
+This keeps an order away from the rest of the computer; it is still the owner's computer and login session. For
+orders from anyone, a machine or container that holds nothing else is the stronger answer.
+
 ### Risks and how they are handled
 
 | Risk | Handling |
 | --- | --- |
-| Customer input is untrusted and may carry prompt injection | It is treated as data everywhere. The intake agent has no tools. The team runs with covibe's role-scoped write permissions and shell sandbox, and file names from the customer cannot leave their folder. |
+| Customer input is untrusted and may carry prompt injection | It is treated as data everywhere. The intake agent has no tools. The team runs confined (below): as if one of its members could be turned against the owner. File names from the customer cannot leave their folder. |
 | Runaway cost | A hard budget cap per order, enforced by the engine. When it is reached the run stops and the owner decides. |
 | The owner reports false gate results | In this stage that rests on trust. The review window and the dispute path are the mitigation; TEE attestation of the run is the real fix (Stage B). |
 | The owner is offline | Time-based expiry refunds the customer; anyone can call `expire_order`. |
@@ -1256,6 +1277,7 @@ src/engine/engine.ts       the workflow engine: steps, parallel branches, gates,
 src/engine/workspace.ts    git worktrees, commits, merges, out-of-scope discard
 src/engine/folder.ts       plain folders: snapshots, who changed what, copies of the originals, diff and undo
 src/engine/scope.ts        pre-tool-use write-scope checks
+src/engine/confine.ts      a run on a stranger's input (a market order): what its members may read, reach and see
 src/engine/chat.ts         queue-or-resume chat
 src/engine/questions.ts    members' questions: the lead first, then you; pausing the run
 src/engine/requests.ts     members asking teammates for work (request_work), and keeping them out of waiting circles

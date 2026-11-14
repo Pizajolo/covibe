@@ -7,11 +7,12 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { TeamConfig } from '../config/types.js';
+import { confinedEnv, confineTeam } from '../engine/confine.js';
 import type { SecretStore } from '../connections/secrets.js';
 import type { RunEvent } from '../events/types.js';
 import { open, seal, sha256Hex } from './crypto.js';
 import { putFile } from './blobs.js';
-import { collectDeliverables, eventLogHash, gateResults, mediaType, signReceipt } from './delivery.js';
+import { collectDeliverables, eventLogHash, gateResults, mediaType, secretsIn, signReceipt } from './delivery.js';
 import type { RunHost, RunResult } from './host.js';
 import { fileList, intakePrompt, loadIntakeTeam, orderGoal, parseInput, prechecks, writeWorkspace } from './intake.js';
 import { explorerUrl, NearChain, yoctoToNear, type MarketChain } from './near.js';
@@ -429,7 +430,9 @@ export class Market {
 
   private async work(id: number, signal: AbortSignal): Promise<void> {
     const local = this.mine(id);
-    const { team, sf } = this.storefrontOf(local.team);
+    const { team: asWritten, sf } = this.storefrontOf(local.team);
+    // The order is a stranger's: whatever the team file allows, its members work confined (see engine/confine.ts).
+    const team = confineTeam(asWritten, { network: sf.network });
     const workspace = local.workspace;
     if (!workspace || !existsSync(join(workspace, 'ORDER.md'))) throw new MarketError('the order has no workspace; its input could not be read');
     await this.status(id, 'accepted', 'The team took your order and started working.');
@@ -438,6 +441,7 @@ export class Market {
       repo: workspace,
       goal: orderGoal(sf, readFileSync(join(workspace, 'ORDER.md'), 'utf8')),
       budgetUsd: sf.intake.budget_cap_usd,
+      env: confinedEnv(process.env, team),
       signal,
       onStart: (runId, projectId) => {
         this.store.patchOrder(id, { runId, ...(projectId ? { projectId } : {}) });
@@ -488,6 +492,12 @@ export class Market {
     const delivery: Delivery = { v: 2, files: [] };
     try {
       if (!files.length) throw new MarketError(`the checks passed, but ${sf.deliverables.folder}/ is empty: there is nothing to deliver`);
+      // Nothing that looks like a key leaves the machine on an order's word, in any intake mode.
+      const leaks = secretsIn(files, this.ownSecrets());
+      if (leaks.length) {
+        await this.status(id, 'waiting', 'The result is being checked by the owner before it is sent.');
+        throw new MarketError(`the delivery was held back: ${leaks.map((l) => `${sf.deliverables.folder}/${l.name} looks like it holds ${l.what}`).join('; ')}. Look at the files before anything else. Run the order again, or fail it to refund the customer.`);
+      }
       await this.status(id, 'uploading', `The checks passed. Uploading ${files.length === 1 ? 'the result' : `${files.length} files`}…`);
       for (const f of files) {
         const type = mediaType(f.name);
@@ -511,6 +521,12 @@ export class Market {
     this.log(`order ${id}: delivered, ${entries.length} file${entries.length === 1 ? '' : 's'} (${tx})`);
     this.store.patchOrder(id, { stage: 'delivered', txs: { deliver: tx }, chain: { ...local.chain, status: 'DELIVERED', delivered_at: Date.now(), bundle_hash: bundleHash, receipt_hash: sha256Hex(receipt) } });
     await this.status(id, 'delivered', 'Your order is ready to download. Review it and confirm, or dispute it within the review window.');
+  }
+
+  /** The owner's keys as they could turn up in a file: the NEAR key (with and without its prefix) and the key orders are encrypted to. */
+  private ownSecrets(): string[] {
+    const near = this.store.nearKey();
+    return [...(near ? [near, near.replace(/^ed25519:/, '')] : []), this.store.intakeKey().privateKey];
   }
 
   // ---- what the app and the CLI show

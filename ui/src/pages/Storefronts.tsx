@@ -157,6 +157,8 @@ interface Doc {
   goal?: string;
   deliverables?: { folder?: string; gates_required?: string[] };
   workspace?: 'folder' | 'git';
+  /** Domains the team may reach while it works on an order (none unless named). */
+  network?: string[];
   privacy?: string;
 }
 interface Loaded {

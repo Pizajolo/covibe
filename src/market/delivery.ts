@@ -1,7 +1,7 @@
 // From a finished run to a delivery: which gates passed, the files of the
 // deliverables folder, and the signed receipt whose hash goes on-chain.
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, openSync, readdirSync, readSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
 import type { RunEvent } from '../events/types.js';
@@ -76,6 +76,52 @@ export function collectDeliverables(workspace: string, folder: string, branch: s
     done();
     throw err;
   }
+}
+
+/** What a key or token looks like, by what it is. */
+const SECRET_SHAPES: [string, RegExp][] = [
+  ['a private key', /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/],
+  ['a NEAR secret key', /ed25519:[1-9A-HJ-NP-Za-km-z]{80,90}(?![1-9A-HJ-NP-Za-km-z])/],
+  ['an Anthropic key', /sk-ant-[A-Za-z0-9_-]{20,}/],
+  ['a GitHub token', /(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})/],
+  ['an AWS access key', /(?<![A-Z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Z0-9])/],
+  ['a Slack token', /xox[abprs]-[A-Za-z0-9-]{20,}/],
+  ['an npm token', /npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])/],
+];
+const SCAN_CHUNK = 1 << 20;
+/** Carried from one chunk to the next, so a key across the cut is still seen (longer than any shape's start and any known key). */
+const SCAN_OVERLAP = 4096;
+
+/**
+ * Files of a delivery that look like they carry a key: one of the owner's own
+ * (`known`: the exact values) or the usual shapes of keys and tokens. A team
+ * working on a stranger's order has no reason to deliver one, so a hit holds
+ * the delivery back for the owner. It is a tripwire, not a proof: a key that
+ * was encoded or packed first passes it. What keeps keys out of reach in the
+ * first place is the confinement of the run (engine/confine.ts).
+ */
+export function secretsIn(files: DeliverableFile[], known: string[] = []): { name: string; what: string }[] {
+  const own = known.filter((k) => k.length >= 16);
+  const found: { name: string; what: string }[] = [];
+  const buf = Buffer.alloc(SCAN_CHUNK);
+  for (const f of files) {
+    const fd = openSync(f.path, 'r');
+    try {
+      let tail = '';
+      for (let at = 0, n = 0; (n = readSync(fd, buf, 0, SCAN_CHUNK, at)) > 0; at += n) {
+        const text = tail + buf.toString('latin1', 0, n);
+        const what = own.some((k) => text.includes(k)) ? 'one of your own keys' : SECRET_SHAPES.find(([, shape]) => shape.test(text))?.[0];
+        if (what) {
+          found.push({ name: f.name, what });
+          break;
+        }
+        tail = text.slice(-SCAN_OVERLAP);
+      }
+    } finally {
+      closeSync(fd);
+    }
+  }
+  return found;
 }
 
 const TYPES: Record<string, string> = { '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm', '.m4v': 'video/mp4', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.pdf': 'application/pdf', '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json', '.txt': 'text/plain', '.md': 'text/markdown', '.zip': 'application/zip' };

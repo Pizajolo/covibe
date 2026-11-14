@@ -68,7 +68,7 @@ export function marketRoutes(market: Market, library: Library, secretStore: 'key
           const l = published?.listing;
           if (l) {
             const now = listingInput(sf, l.meta_hash, l.intake_pubkey);
-            base.outdated = now.price !== l.price || now.title !== l.title || now.summary !== l.summary || now.accept_window_s !== l.accept_window_s || now.delivery_window_s !== l.delivery_window_s || now.review_window_s !== l.review_window_s;
+            base.outdated = now.price !== l.price || now.title !== l.title || now.summary !== l.summary || now.accept_window_s !== l.accept_window_s || now.delivery_window_s !== l.delivery_window_s || now.review_window_s !== l.review_window_s || (now.revisions ?? 0) !== (l.revisions ?? 0);
           }
         }
       } catch (err) {
